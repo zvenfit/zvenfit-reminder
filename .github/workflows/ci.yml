@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run build
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Install YC CLI
+        run: |
+          curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
+          echo "$HOME/yandex-cloud/bin" >> "$GITHUB_PATH"
+      - name: Configure YC
+        env:
+          YC_SA_JSON: ${{ secrets.YC_SA_JSON }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+        run: |
+          printf '%s' "$YC_SA_JSON" > sa-key.json
+          yc config profile create ci
+          yc config set service-account-key sa-key.json
+          yc config set folder-id "$YC_FOLDER_ID"
+      - name: Package bot-webhook
+        run: |
+          cd functions/bot-webhook
+          npm run build
+          cd dist
+          zip -r ../../../bot-webhook.zip .
+      - name: Package reminder-cron
+        run: |
+          cd functions/reminder-cron
+          npm run build
+          cd dist
+          zip -r ../../../reminder-cron.zip .
+      - name: Deploy bot-webhook
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          ALLOWED_CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
+          YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
+          YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
+          MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
+          DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
+          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+        run: |
+          yc serverless function version create \
+            --function-name payments-reminder-bot \
+            --runtime nodejs20 \
+            --entrypoint index.handler \
+            --memory 256m \
+            --execution-timeout 30s \
+            --source-path bot-webhook.zip \
+            --environment BOT_TOKEN="$BOT_TOKEN" \
+            --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+            --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
+            --environment YDB_ENDPOINT="$YDB_ENDPOINT" \
+            --environment YDB_DATABASE="$YDB_DATABASE" \
+            --environment MINI_APP_URL="$MINI_APP_URL" \
+            --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
+            --environment ADMIN_USER_IDS="$ADMIN_USER_IDS"
+      - name: Deploy reminder-cron
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          ALLOWED_CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
+          YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
+          YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
+          DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
+        run: |
+          yc serverless function version create \
+            --function-name payments-reminder-cron \
+            --runtime nodejs20 \
+            --entrypoint index.handler \
+            --memory 256m \
+            --execution-timeout 60s \
+            --source-path reminder-cron.zip \
+            --environment BOT_TOKEN="$BOT_TOKEN" \
+            --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+            --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
+            --environment YDB_ENDPOINT="$YDB_ENDPOINT" \
+            --environment YDB_DATABASE="$YDB_DATABASE" \
+            --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}"
+      - name: Upload Mini App
+        env:
+          YC_BUCKET: ${{ secrets.YC_BUCKET }}
+        run: yc storage s3 cp --recursive mini-app/dist/ "s3://${YC_BUCKET}/" --acl public-read
+      - name: Set Telegram webhook
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+            --data-urlencode "url=${WEBHOOK_URL}/webhook" \
+            --data-urlencode "secret_token=${WEBHOOK_SECRET}"

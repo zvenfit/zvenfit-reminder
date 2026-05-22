@@ -1,0 +1,24 @@
+openapi: 3.0.0
+info:
+  title: payments-reminder-api
+  version: 1.0.0
+paths:
+  /webhook:
+    post:
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${BOT_FUNCTION_ID}
+        service_account_id: ${SA_ID}
+      operationId: webhook
+  /api/{proxy+}:
+    x-yc-apigateway-any-method:
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${BOT_FUNCTION_ID}
+        service_account_id: ${SA_ID}
+      parameters:
+        - name: proxy
+          in: path
+          required: false
+          schema:
+            type: string
