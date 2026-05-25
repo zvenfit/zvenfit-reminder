@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run build --workspace=@payments-reminder/shared && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:ydb-sdk --external:@yandex-cloud/nodejs-sdk --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" && node scripts/prepare-deploy.mjs && cd dist && npm install --omit=dev --no-package-lock",
+    "dev": "npm run build --workspace=@payments-reminder/shared && node --env-file=../../.env --import tsx src/dev.ts",
     "typecheck": "npm run build --workspace=@payments-reminder/shared && tsc --noEmit"
   },
   "dependencies": {

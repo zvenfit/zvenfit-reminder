@@ -7,6 +7,7 @@ import {
   loadConfig,
   parseInstanceCallbackData,
   validateInitData,
+  type ParsedInitData,
   type Rule,
 } from "@payments-reminder/shared";
 import { Bot, InlineKeyboard } from "grammy";
@@ -18,10 +19,32 @@ import {
   jsonResponse,
   updateRuleSchema,
 } from "./api.js";
+import { syncGroupMembers } from "./members-sync.js";
 
 let botInstance: Bot | null = null;
 
-function getBot(): Bot {
+function resolveInitData(initData: string | undefined, botToken: string): ParsedInitData {
+  if (process.env.SKIP_INIT_DATA_VALIDATION === "1" && process.env.NODE_ENV !== "production") {
+    const devUserId = Number(process.env.DEV_USER_ID ?? "0");
+    if (!devUserId) {
+      throw new Error("DEV_USER_ID required when SKIP_INIT_DATA_VALIDATION=1");
+    }
+    return {
+      user: { id: devUserId, first_name: "Dev" },
+      authDate: Math.floor(Date.now() / 1000),
+      hash: "",
+      raw: {},
+    };
+  }
+
+  if (!initData) {
+    throw new Error("Missing X-Telegram-Init-Data");
+  }
+
+  return validateInitData(initData, botToken);
+}
+
+export function getBot(): Bot {
   if (botInstance) {
     return botInstance;
   }
@@ -83,6 +106,40 @@ function getBot(): Bot {
     });
 
     await ctx.reply(`Активные правила:\n${lines.join("\n")}`);
+  });
+
+  bot.command("sync", async (ctx) => {
+    if (ctx.chat?.id !== config.allowedChatId) {
+      await ctx.reply("Команда доступна только в семейной группе.");
+      return;
+    }
+
+    try {
+      const synced = await syncGroupMembers(bot.api, config.allowedChatId, membersRepo, ctx.from?.id);
+      const members = await membersRepo.list(config.allowedChatId);
+      await ctx.reply(`Участники обновлены: ${members.length} в списке (${synced} из Telegram).`);
+    } catch (error) {
+      await ctx.reply(error instanceof Error ? error.message : "Не удалось синхронизировать участников.");
+    }
+  });
+
+  bot.on("chat_member", async (ctx) => {
+    if (ctx.chatMember.chat.id !== config.allowedChatId) {
+      return;
+    }
+
+    const status = ctx.chatMember.new_chat_member.status;
+    if (status === "left" || status === "kicked") {
+      return;
+    }
+
+    const user = ctx.chatMember.new_chat_member.user;
+    if (user.is_bot) {
+      return;
+    }
+
+    const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "User";
+    await membersRepo.upsert(config.allowedChatId, user.id, user.username ?? null, displayName);
   });
 
   bot.command("done", async (ctx) => {
@@ -174,12 +231,9 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   }
 
   const initData = getHeader(event, "X-Telegram-Init-Data");
-  if (!initData) {
-    return jsonResponse(401, { error: "Missing X-Telegram-Init-Data" });
-  }
-
+  let parsedInit: ParsedInitData;
   try {
-    validateInitData(initData, config.botToken);
+    parsedInit = resolveInitData(initData, config.botToken);
   } catch (error) {
     return jsonResponse(401, { error: error instanceof Error ? error.message : "Unauthorized" });
   }
@@ -196,6 +250,24 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   if (method === "GET" && path === "/api/members") {
     const members = await membersRepo.list(config.allowedChatId);
     return jsonResponse(200, { members });
+  }
+
+  if (method === "POST" && path === "/api/members/sync") {
+    try {
+      const bot = getBot();
+      const synced = await syncGroupMembers(
+        bot.api,
+        config.allowedChatId,
+        membersRepo,
+        parsedInit.user.id,
+      );
+      const members = await membersRepo.list(config.allowedChatId);
+      return jsonResponse(200, { members, synced });
+    } catch (error) {
+      return jsonResponse(502, {
+        error: error instanceof Error ? error.message : "Failed to sync members",
+      });
+    }
   }
 
   if (method === "POST" && path === "/api/rules") {
@@ -234,7 +306,6 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   const completeMatch = path.match(/^\/api\/instances\/([^/]+)\/complete$/);
   if (method === "POST" && completeMatch) {
     const instanceId = decodeURIComponent(completeMatch[1]);
-    const parsedInit = validateInitData(initData, config.botToken);
     const instance = await instancesRepo.complete(instanceId, parsedInit.user.id);
     if (!instance) {
       return jsonResponse(404, { error: "Instance not found" });

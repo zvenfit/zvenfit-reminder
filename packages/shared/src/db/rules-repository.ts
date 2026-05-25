@@ -1,23 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { TypedValues, Types, withSession } from "./client.js";
-import { getField, parseYdbTimestamp, parseYdbTimestampRequired, timestampValue, type YdbRow } from "./ydb-utils.js";
+import { TypedValues, withSession } from "./client.js";
+import {
+  getField,
+  mapResultRows,
+  optionalInt64,
+  optionalTimestamp,
+  optionalUint8,
+  parseJsonDocument,
+  parseYdbTimestamp,
+  parseYdbTimestampRequired,
+  timestampValue,
+} from "./ydb-utils.js";
 import type { CreateRuleInput, Rule, RuleStatus, UpdateRuleInput } from "../types.js";
 
-function rowToRule(row: YdbRow): Rule {
+function rowToRule(data: Record<string, unknown>): Rule {
   return {
-    id: String(getField(row, "id")),
-    title: String(getField(row, "title")),
-    amount: getField(row, "amount") == null ? null : Number(getField(row, "amount")),
-    ruleType: String(getField(row, "rule_type")) as Rule["ruleType"],
-    dayOfMonth: getField(row, "day_of_month") == null ? null : Number(getField(row, "day_of_month")),
-    dueAt: parseYdbTimestamp(getField(row, "due_at")),
-    timeLocal: String(getField(row, "time_local")),
-    timezone: String(getField(row, "timezone")),
-    chatId: Number(getField(row, "chat_id")),
-    mentionIds: JSON.parse(String(getField(row, "mention_ids"))) as number[],
-    status: String(getField(row, "status")) as RuleStatus,
-    createdAt: parseYdbTimestampRequired(getField(row, "created_at"), "created_at"),
-    updatedAt: parseYdbTimestampRequired(getField(row, "updated_at"), "updated_at"),
+    id: String(getField(data, "id")),
+    title: String(getField(data, "title")),
+    amount: getField(data, "amount") == null ? null : Number(getField(data, "amount")),
+    ruleType: String(getField(data, "rule_type")) as Rule["ruleType"],
+    dayOfMonth: getField(data, "day_of_month") == null ? null : Number(getField(data, "day_of_month")),
+    dueAt: parseYdbTimestamp(getField(data, "due_at")),
+    timeLocal: String(getField(data, "time_local")),
+    timezone: String(getField(data, "timezone")),
+    chatId: Number(getField(data, "chat_id")),
+    mentionIds: parseJsonDocument<number[]>(getField(data, "mention_ids"), []),
+    status: String(getField(data, "status")) as RuleStatus,
+    createdAt: parseYdbTimestampRequired(getField(data, "created_at"), "created_at"),
+    updatedAt: parseYdbTimestampRequired(getField(data, "updated_at"), "updated_at"),
   };
 }
 
@@ -43,7 +53,7 @@ export class RulesRepository {
             $status: TypedValues.utf8(status),
           },
         );
-        return (resultSets[0]?.rows ?? []).map((row) => rowToRule(row as YdbRow));
+        return mapResultRows(resultSets[0]).map(rowToRule);
       }
 
       const { resultSets } = await session.executeQuery(
@@ -55,7 +65,7 @@ export class RulesRepository {
         `,
         { $chat_id: TypedValues.int64(chatId) },
       );
-      return (resultSets[0]?.rows ?? []).map((row) => rowToRule(row as YdbRow));
+      return mapResultRows(resultSets[0]).map(rowToRule);
     });
   }
 
@@ -68,8 +78,8 @@ export class RulesRepository {
         `,
         { $id: TypedValues.utf8(id) },
       );
-      const row = resultSets[0]?.rows?.[0];
-      return row ? rowToRule(row as YdbRow) : null;
+      const mapped = mapResultRows(resultSets[0]);
+      return mapped[0] ? rowToRule(mapped[0]) : null;
     });
   }
 
@@ -78,7 +88,7 @@ export class RulesRepository {
       const { resultSets } = await session.executeQuery(`
         SELECT * FROM rules WHERE status = 'active';
       `);
-      return (resultSets[0]?.rows ?? []).map((row) => rowToRule(row as YdbRow));
+      return mapResultRows(resultSets[0]).map(rowToRule);
     });
   }
 
@@ -128,11 +138,10 @@ export class RulesRepository {
         {
           $id: TypedValues.utf8(rule.id),
           $title: TypedValues.utf8(rule.title),
-          $amount: rule.amount == null ? TypedValues.optionalNull(Types.INT64) : TypedValues.int64(rule.amount),
+          $amount: optionalInt64(rule.amount),
           $rule_type: TypedValues.utf8(rule.ruleType),
-          $day_of_month:
-            rule.dayOfMonth == null ? TypedValues.optionalNull(Types.UINT8) : TypedValues.uint8(rule.dayOfMonth),
-          $due_at: rule.dueAt == null ? TypedValues.optionalNull(Types.TIMESTAMP) : timestampValue(rule.dueAt),
+          $day_of_month: optionalUint8(rule.dayOfMonth),
+          $due_at: optionalTimestamp(rule.dueAt),
           $time_local: TypedValues.utf8(rule.timeLocal),
           $timezone: TypedValues.utf8(rule.timezone),
           $chat_id: TypedValues.int64(rule.chatId),
@@ -198,12 +207,10 @@ export class RulesRepository {
         {
           $id: TypedValues.utf8(id),
           $title: TypedValues.utf8(updated.title),
-          $amount: updated.amount == null ? TypedValues.optionalNull(Types.INT64) : TypedValues.int64(updated.amount),
+          $amount: optionalInt64(updated.amount),
           $rule_type: TypedValues.utf8(updated.ruleType),
-          $day_of_month:
-            updated.dayOfMonth == null ? TypedValues.optionalNull(Types.UINT8) : TypedValues.uint8(updated.dayOfMonth),
-          $due_at:
-            updated.dueAt == null ? TypedValues.optionalNull(Types.TIMESTAMP) : timestampValue(updated.dueAt),
+          $day_of_month: optionalUint8(updated.dayOfMonth),
+          $due_at: optionalTimestamp(updated.dueAt),
           $time_local: TypedValues.utf8(updated.timeLocal),
           $timezone: TypedValues.utf8(updated.timezone),
           $mention_ids: TypedValues.jsonDocument(JSON.stringify(updated.mentionIds)),

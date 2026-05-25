@@ -65,11 +65,14 @@ npm run test
 npm run build
 ```
 
-Mini App локально:
+Полная инструкция: [docs/local-dev.md](docs/local-dev.md).
+
+Quick start:
 
 ```bash
-cd mini-app
-VITE_API_BASE_URL=https://your-api-gateway-url npm run dev
+./scripts/prepare-sa-key.sh   # после заполнения YC_SA_JSON
+npm run dev:bot               # backend :3000 + Telegram polling
+cd mini-app && npm run dev    # Mini App :5173
 ```
 
 ## Использование бота

@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { TypedValues, withSession } from "./client.js";
-import { getField, parseYdbTimestamp, parseYdbTimestampRequired, timestampValue, type YdbRow } from "./ydb-utils.js";
+import { getField, mapResultRows, parseYdbTimestamp, parseYdbTimestampRequired, timestampValue } from "./ydb-utils.js";
 import type { InstanceStatus, ReminderInstance } from "../types.js";
 
-function rowToInstance(row: YdbRow): ReminderInstance {
+function rowToInstance(data: Record<string, unknown>): ReminderInstance {
   return {
-    id: String(getField(row, "id")),
-    ruleId: String(getField(row, "rule_id")),
-    dueAt: parseYdbTimestampRequired(getField(row, "due_at"), "due_at"),
-    status: String(getField(row, "status")) as InstanceStatus,
-    completedBy: getField(row, "completed_by") == null ? null : Number(getField(row, "completed_by")),
-    completedAt: parseYdbTimestamp(getField(row, "completed_at")),
-    messageId: getField(row, "message_id") == null ? null : Number(getField(row, "message_id")),
+    id: String(getField(data, "id")),
+    ruleId: String(getField(data, "rule_id")),
+    dueAt: parseYdbTimestampRequired(getField(data, "due_at"), "due_at"),
+    status: String(getField(data, "status")) as InstanceStatus,
+    completedBy: getField(data, "completed_by") == null ? null : Number(getField(data, "completed_by")),
+    completedAt: parseYdbTimestamp(getField(data, "completed_at")),
+    messageId: getField(data, "message_id") == null ? null : Number(getField(data, "message_id")),
   };
 }
 
@@ -27,8 +27,8 @@ export class InstancesRepository {
         `DECLARE $id AS Utf8; SELECT * FROM reminder_instances WHERE id = $id LIMIT 1;`,
         { $id: TypedValues.utf8(id) },
       );
-      const row = resultSets[0]?.rows?.[0];
-      return row ? rowToInstance(row as YdbRow) : null;
+      const mapped = mapResultRows(resultSets[0]);
+      return mapped[0] ? rowToInstance(mapped[0]) : null;
     });
   }
 
@@ -47,8 +47,8 @@ export class InstancesRepository {
           $due_at: timestampValue(dueAt),
         },
       );
-      const row = resultSets[0]?.rows?.[0];
-      return row ? rowToInstance(row as YdbRow) : null;
+      const mapped = mapResultRows(resultSets[0]);
+      return mapped[0] ? rowToInstance(mapped[0]) : null;
     });
   }
 

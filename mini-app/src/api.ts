@@ -25,6 +25,10 @@ export interface GroupMember {
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 function getInitData(): string {
+  const devInitData = import.meta.env.VITE_DEV_INIT_DATA;
+  if (devInitData) {
+    return devInitData;
+  }
   return window.Telegram?.WebApp?.initData ?? "";
 }
 
@@ -52,6 +56,10 @@ export function listRules(): Promise<{ rules: Rule[] }> {
 
 export function listMembers(): Promise<{ members: GroupMember[] }> {
   return api("/api/members");
+}
+
+export function syncMembers(): Promise<{ members: GroupMember[]; synced: number }> {
+  return api("/api/members/sync", { method: "POST", body: "{}" });
 }
 
 export function createRule(body: Record<string, unknown>): Promise<{ rule: Rule }> {

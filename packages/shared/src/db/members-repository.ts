@@ -1,14 +1,20 @@
-import { TypedValues, Types, withSession } from "./client.js";
-import { getField, parseYdbTimestampRequired, timestampValue, type YdbRow } from "./ydb-utils.js";
+import { TypedValues, withSession } from "./client.js";
+import {
+  getField,
+  mapResultRows,
+  optionalUtf8,
+  parseYdbTimestampRequired,
+  timestampValue,
+} from "./ydb-utils.js";
 import type { GroupMember } from "../types.js";
 
-function rowToMember(row: YdbRow): GroupMember {
+function rowToMember(data: Record<string, unknown>): GroupMember {
   return {
-    chatId: Number(getField(row, "chat_id")),
-    userId: Number(getField(row, "user_id")),
-    username: getField(row, "username") == null ? null : String(getField(row, "username")),
-    displayName: String(getField(row, "display_name")),
-    updatedAt: parseYdbTimestampRequired(getField(row, "updated_at"), "updated_at"),
+    chatId: Number(getField(data, "chat_id")),
+    userId: Number(getField(data, "user_id")),
+    username: getField(data, "username") == null ? null : String(getField(data, "username")),
+    displayName: String(getField(data, "display_name")),
+    updatedAt: parseYdbTimestampRequired(getField(data, "updated_at"), "updated_at"),
   };
 }
 
@@ -27,7 +33,7 @@ export class MembersRepository {
         `,
         { $chat_id: TypedValues.int64(chatId) },
       );
-      return (resultSets[0]?.rows ?? []).map((row) => rowToMember(row as YdbRow));
+      return mapResultRows(resultSets[0]).map(rowToMember);
     });
   }
 
@@ -47,7 +53,7 @@ export class MembersRepository {
         {
           $chat_id: TypedValues.int64(chatId),
           $user_id: TypedValues.int64(userId),
-          $username: username ? TypedValues.utf8(username) : TypedValues.optionalNull(Types.UTF8),
+          $username: optionalUtf8(username),
           $display_name: TypedValues.utf8(displayName),
           $updated_at: timestampValue(now),
         },

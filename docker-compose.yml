@@ -1,0 +1,6 @@
+services:
+  ydb:
+    image: ghcr.io/ydb-platform/local-ydb:latest
+    ports:
+      - "2136:2136"
+      - "8765:8765"

@@ -1,9 +1,11 @@
-import type { TableSession } from "ydb-sdk";
-import { Driver as YdbDriver, TypedValues, Types, getCredentialsFromEnv } from "ydb-sdk";
+import ydbSdk from "ydb-sdk";
+import type { Driver as YdbDriverType, TableSession } from "ydb-sdk";
 
-let driverPromise: Promise<YdbDriver> | null = null;
+const { Driver: YdbDriver, TypedValues, Types, getCredentialsFromEnv } = ydbSdk;
 
-export async function getDriver(endpoint: string, database: string): Promise<YdbDriver> {
+let driverPromise: Promise<YdbDriverType> | null = null;
+
+export async function getDriver(endpoint: string, database: string): Promise<YdbDriverType> {
   if (!driverPromise) {
     const driver = new YdbDriver({ endpoint, database, authService: getCredentialsFromEnv() });
     driverPromise = driver.ready(10000).then((ready) => {

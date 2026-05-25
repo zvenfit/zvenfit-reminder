@@ -5,6 +5,7 @@ import {
   deleteRule,
   listMembers,
   listRules,
+  syncMembers,
   updateRule,
   type GroupMember,
   type Rule,
@@ -55,6 +56,7 @@ function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<RuleFormState>(emptyForm);
   const [loading, setLoading] = useState(true);
+  const [membersSyncing, setMembersSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const activeRules = useMemo(() => rules.filter((r) => r.status === "active"), [rules]);
@@ -79,6 +81,19 @@ function App() {
     window.Telegram?.WebApp?.expand();
     void refresh();
   }, []);
+
+  async function syncMembersFromChat() {
+    setMembersSyncing(true);
+    setError(null);
+    try {
+      const response = await syncMembers();
+      setMembers(response.members);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sync failed");
+    } finally {
+      setMembersSyncing(false);
+    }
+  }
 
   function openCreate() {
     setEditingId(null);
@@ -215,22 +230,43 @@ function App() {
             </label>
           )}
 
-          <fieldset>
-            <legend>Кого упомянуть</legend>
-            {members.length === 0 ? (
-              <p className="muted">Участники появятся после сообщений в группе.</p>
-            ) : (
-              members.map((member) => (
-                <label key={member.userId} className="checkbox">
-                  <input
-                    type="checkbox"
-                    checked={form.mentionIds.includes(member.userId)}
-                    onChange={() => toggleMention(member.userId)}
+          <fieldset className="mentions-fieldset">
+            <legend className="mentions-legend">
+              <span>Кого упомянуть</span>
+              <button
+                type="button"
+                className="icon-button"
+                title="Синхронизировать участников из чата"
+                aria-label="Синхронизировать участников из чата"
+                disabled={membersSyncing}
+                onClick={() => void syncMembersFromChat()}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46A7.93 7.93 0 0 0 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74A7.93 7.93 0 0 0 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"
+                    fill="currentColor"
                   />
-                  {member.displayName}
-                  {member.username ? ` (@${member.username})` : ""}
-                </label>
-              ))
+                </svg>
+              </button>
+            </legend>
+            {members.length === 0 ? (
+              <p className="muted mentions-empty">Никого нет</p>
+            ) : (
+              <div className="member-list">
+                {members.map((member) => (
+                  <label key={member.userId} className="member-row">
+                    <input
+                      type="checkbox"
+                      checked={form.mentionIds.includes(member.userId)}
+                      onChange={() => toggleMention(member.userId)}
+                    />
+                    <span className="member-name">
+                      <span>{member.displayName}</span>
+                      {member.username ? <span className="member-username">@{member.username}</span> : null}
+                    </span>
+                  </label>
+                ))}
+              </div>
             )}
           </fieldset>
 

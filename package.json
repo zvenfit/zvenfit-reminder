@@ -9,7 +9,14 @@
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev:bot": "npm run dev --workspace=@payments-reminder/bot-webhook",
+    "dev:cron": "npm run dev --workspace=@payments-reminder/reminder-cron",
+    "dev:init-data": "node --env-file=.env --import tsx scripts/generate-init-data.ts",
+    "dev:stack": "docker compose up -d && ./scripts/ydb-local-init.sh"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
   },
   "engines": {
     "node": ">=20"
