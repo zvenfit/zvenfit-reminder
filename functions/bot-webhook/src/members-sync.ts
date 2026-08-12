@@ -1,4 +1,4 @@
-import type { MembersRepository } from "@payments-reminder/shared";
+import type { MembersRepository } from "@zvenfit-reminder/shared";
 import type { Api, RawApi } from "grammy";
 
 function memberDisplayName(user: {

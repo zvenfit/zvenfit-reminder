@@ -6,6 +6,7 @@ sa-key.json
 *.log
 .DS_Store
 coverage/
+*.tsbuildinfo
 .idea/
 .vscode/
 *.zip

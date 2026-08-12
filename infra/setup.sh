@@ -6,12 +6,12 @@ set -euo pipefail
 
 : "${YC_FOLDER_ID:?Укажи YC_FOLDER_ID}"
 
-SA_NAME="payments-reminder-sa"
-BUCKET_NAME="${BUCKET_NAME:-payments-reminder-$(openssl rand -hex 4)}"
-YDB_NAME="payments-reminder"
-BOT_FN="payments-reminder-bot"
-CRON_FN="payments-reminder-cron"
-APIGW_NAME="payments-reminder-api"
+SA_NAME="zvenfit-reminder-sa"
+BUCKET_NAME="${BUCKET_NAME:-zvenfit-reminder-$(openssl rand -hex 4)}"
+YDB_NAME="zvenfit-reminder"
+BOT_FN="zvenfit-reminder-bot"
+CRON_FN="zvenfit-reminder-cron"
+APIGW_NAME="zvenfit-reminder-api"
 
 echo "==> Создаём сервисный аккаунт..."
 yc iam service-account create --name "$SA_NAME" --folder-id "$YC_FOLDER_ID" 2>/dev/null || true

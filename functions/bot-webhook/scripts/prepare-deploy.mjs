@@ -8,7 +8,7 @@ writeFileSync(
   join(distDir, "package.json"),
   JSON.stringify(
     {
-      name: "bot-webhook-deploy",
+      name: "@zvenfit-reminder/bot-webhook-deploy",
       type: "module",
       dependencies: {
         "ydb-sdk": "^5.11.1",

@@ -1,19 +1,19 @@
 {
-  "name": "@payments-reminder/reminder-cron",
+  "name": "@zvenfit-reminder/reminder-cron",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build --workspace=@payments-reminder/shared && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:ydb-sdk --external:@yandex-cloud/nodejs-sdk --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" && node scripts/prepare-deploy.mjs && cd dist && npm install --omit=dev --no-package-lock",
-    "dev": "npm run build --workspace=@payments-reminder/shared && node --env-file=../../.env --import tsx src/run-once.ts",
-    "typecheck": "npm run build --workspace=@payments-reminder/shared && tsc --noEmit"
+    "build": "npm run build --workspace=@zvenfit-reminder/shared && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:ydb-sdk --external:@yandex-cloud/nodejs-sdk --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" && node scripts/prepare-deploy.mjs && cd dist && npm install --omit=dev --no-package-lock",
+    "dev": "npm run build --workspace=@zvenfit-reminder/shared && node --env-file=../../.env --import tsx src/run-once.ts",
+    "typecheck": "npm run build --workspace=@zvenfit-reminder/shared && tsc --noEmit"
   },
   "dependencies": {
-    "@payments-reminder/shared": "*"
+    "@zvenfit-reminder/shared": "*"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "esbuild": "^0.24.2",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2"
   }
 }

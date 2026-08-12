@@ -69,7 +69,7 @@ jobs:
           ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
         run: |
           yc serverless function version create \
-            --function-name payments-reminder-bot \
+            --function-name zvenfit-reminder-bot \
             --runtime nodejs20 \
             --entrypoint index.handler \
             --memory 256m \
@@ -93,7 +93,7 @@ jobs:
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
         run: |
           yc serverless function version create \
-            --function-name payments-reminder-cron \
+            --function-name zvenfit-reminder-cron \
             --runtime nodejs20 \
             --entrypoint index.handler \
             --memory 256m \

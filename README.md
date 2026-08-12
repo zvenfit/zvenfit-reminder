@@ -1,6 +1,8 @@
-# Бот напоминаний о платежах
+# zvenfit-reminder
 
 Telegram-бот для семейных напоминаний о платежах на Yandex Cloud Functions с YDB Serverless, Mini App и деплоем через GitHub Actions.
+
+Репозиторий: [github.com/zvenfit/zvenfit-reminder](https://github.com/zvenfit/zvenfit-reminder).
 
 ## Архитектура
 
@@ -9,6 +11,8 @@ Telegram-бот для семейных напоминаний о платежа
 - `packages/shared` — репозитории YDB, планировщик, хелперы Telegram
 - `mini-app` — Telegram Mini App (Vite + React)
 - `infra/` — схема YDB, спецификация API Gateway, скрипты первичной настройки
+
+Подробные потоки, инварианты и известные ограничения: [docs/architecture.md](docs/architecture.md).
 
 ## Требования
 
@@ -31,7 +35,7 @@ chmod +x infra/setup.sh
 ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" scheme -f infra/ydb/schema.sql
 ```
 
-Создать Cloud Timer для `payments-reminder-cron`:
+Создать Cloud Timer для `zvenfit-reminder-cron`:
 
 ```bash
 SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
@@ -60,9 +64,8 @@ SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
 
 ```bash
 cp .env.example .env
-npm install
-npm run test
-npm run build
+npm ci
+npm run check
 ```
 
 Полная инструкция: [docs/local-dev.md](docs/local-dev.md).
@@ -80,9 +83,9 @@ cd mini-app && npm run dev    # Mini App :5173
 1. Добавь бота в семейную Telegram-группу
 2. **Отключи privacy mode** в [@BotFather](https://t.me/BotFather): `/setprivacy` → Disable (иначе кэш участников не работает)
 3. Напиши любое сообщение в группе — участники закэшируются
-3. Открой Mini App через `/start` или кнопку меню
-4. Создай правила: ежемесячные или разовые
-5. Cron шлёт напоминания с `@mention` и кнопками Done/Skip
+4. Открой Mini App через `/start` или кнопку меню
+5. Создай правила: ежемесячные или разовые
+6. Cron шлёт напоминания с `@mention` и кнопками Done/Skip
 
 Запасные команды:
 
@@ -93,3 +96,10 @@ cd mini-app && npm run dev    # Mini App :5173
 ## Smoke test
 
 См. [docs/smoke-test.md](docs/smoke-test.md).
+
+## Переименование облачных ресурсов
+
+Новые конфигурации используют префикс `zvenfit-reminder-`. Ресурсы, ранее
+созданные с префиксом `payments-reminder-`, автоматически не переименовываются:
+перед первым production-деплоем после переименования их нужно явно создать или
+мигрировать.

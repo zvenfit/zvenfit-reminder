@@ -10,7 +10,7 @@ chmod +x scripts/prepare-sa-key.sh
 ./scripts/prepare-sa-key.sh
 # Добавь YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS=./sa-key.json в .env
 
-npm install
+npm ci
 ```
 
 Терминал 1 — backend + Telegram polling:

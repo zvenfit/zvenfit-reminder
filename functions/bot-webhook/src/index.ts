@@ -9,7 +9,7 @@ import {
   validateInitData,
   type ParsedInitData,
   type Rule,
-} from "@payments-reminder/shared";
+} from "@zvenfit-reminder/shared";
 import { Bot, InlineKeyboard } from "grammy";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import {

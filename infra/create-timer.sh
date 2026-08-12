@@ -7,8 +7,8 @@ set -euo pipefail
 : "${SA_ID:?Укажи SA_ID}"
 : "${YC_FOLDER_ID:?Укажи YC_FOLDER_ID}"
 
-TRIGGER_NAME="payments-reminder-every-5m"
-CRON_FN="payments-reminder-cron"
+TRIGGER_NAME="zvenfit-reminder-every-5m"
+CRON_FN="zvenfit-reminder-cron"
 
 yc serverless trigger create timer \
   --name "$TRIGGER_NAME" \

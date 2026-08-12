@@ -8,7 +8,7 @@ writeFileSync(
   join(distDir, "package.json"),
   JSON.stringify(
     {
-      name: "reminder-cron-deploy",
+      name: "@zvenfit-reminder/reminder-cron-deploy",
       type: "module",
       dependencies: {
         "ydb-sdk": "^5.11.1",

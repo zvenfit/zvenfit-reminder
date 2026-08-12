@@ -7,7 +7,7 @@ import {
   instanceCallbackData,
   loadConfig,
   shouldSendReminder,
-} from "@payments-reminder/shared";
+} from "@zvenfit-reminder/shared";
 import { InlineKeyboard } from "grammy";
 import { randomUUID } from "node:crypto";
 
