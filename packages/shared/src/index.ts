@@ -1,5 +1,7 @@
 export * from "./types.js";
 export * from "./scheduling.js";
+export * from "./reminder-domain.js";
+export * from "./reminder-scheduling.js";
 export * from "./init-data.js";
 export * from "./telegram.js";
 export * from "./db/client.js";

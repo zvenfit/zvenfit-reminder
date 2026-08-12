@@ -132,13 +132,17 @@ not as user-entered cron. Example:
 {
   "version": 1,
   "frequency": "monthly",
+  "startDate": "2026-08-13",
   "interval": 1,
+  "timing": {
+    "kind": "timed",
+    "timeLocal": "18:00"
+  },
   "day": {
     "type": "dayOfMonth",
     "value": 31,
     "overflow": "lastDay"
-  },
-  "localTime": "18:00"
+  }
 }
 ```
 
