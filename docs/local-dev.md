@@ -113,6 +113,9 @@ GET  /api/reminders
 POST /api/reminders
 GET  /api/dashboard
 GET  /api/members
+POST /api/occurrences/:id/complete
+POST /api/occurrences/:id/snooze
+POST /api/occurrences/:id/undo-completion
 ```
 
 Они требуют валидный `X-Telegram-Init-Data` и активное членство в workspace.

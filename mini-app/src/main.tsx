@@ -2,10 +2,13 @@ import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   ApiError,
+  completeOccurrence,
   createReminder,
   listMembers,
   listReminders,
   loadDashboard,
+  snoozeOccurrence,
+  undoOccurrenceCompletion,
   syncMembers,
   type CreateReminderBody,
   type DeadlineTiming,
@@ -202,7 +205,10 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
 
   const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
   const memberMap = useMemo(
@@ -345,6 +351,57 @@ function App() {
       setError(errorMessage(requestError));
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function actOnOccurrence(
+    occurrenceId: string,
+    action: "complete" | "snooze",
+  ) {
+    setActingOccurrenceId(occurrenceId);
+    setError(null);
+    try {
+      if (action === "complete") {
+        const { occurrence } = await completeOccurrence(occurrenceId);
+        setOccurrences((current) =>
+          current.filter((occurrence) => occurrence.occurrenceId !== occurrenceId),
+        );
+        setUndoableOccurrence(occurrence);
+      } else {
+        const { occurrence } = await snoozeOccurrence(occurrenceId, 60);
+        setOccurrences((current) =>
+          current.map((item) => (item.occurrenceId === occurrenceId ? occurrence : item)),
+        );
+        setNotice("Следующий сигнал — через час");
+      }
+      window.setTimeout(() => setNotice(null), 2600);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setActingOccurrenceId(null);
+    }
+  }
+
+  async function undoLastCompletion() {
+    if (!undoableOccurrence) return;
+    setActingOccurrenceId(undoableOccurrence.occurrenceId);
+    setError(null);
+    try {
+      const { occurrence } = await undoOccurrenceCompletion(
+        undoableOccurrence.occurrenceId,
+      );
+      setOccurrences((current) =>
+        [...current, occurrence].sort(
+          (left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime(),
+        ),
+      );
+      setUndoableOccurrence(null);
+      setNotice("Выполнение отменено");
+      window.setTimeout(() => setNotice(null), 2600);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setActingOccurrenceId(null);
     }
   }
 
@@ -683,6 +740,19 @@ function App() {
       </section>
 
       {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
+      {undoableOccurrence ? (
+        <div className="undo-banner" role="status">
+          <span><b>Выполнено</b><small>Можно отменить в течение 10 минут</small></span>
+          <button
+            type="button"
+            disabled={actingOccurrenceId === undoableOccurrence.occurrenceId}
+            onClick={() => void undoLastCompletion()}
+          >
+            Отменить
+          </button>
+        </div>
+      ) : null}
 
       <section className="attention-section" aria-busy={loading}>
         <div className="section-heading">
@@ -717,6 +787,24 @@ function App() {
                     </div>
                     <h3>{occurrence.title}</h3>
                     <p>{occurrence.assignment.mode === "anyone" ? "Может выполнить любой" : `Ответственный · ${memberName(responsible)}`}</p>
+                    <div className="rail-actions">
+                      <button
+                        className="rail-action rail-action--complete"
+                        type="button"
+                        disabled={actingOccurrenceId === occurrence.occurrenceId}
+                        onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}
+                      >
+                        ✓ Выполнено
+                      </button>
+                      <button
+                        className="rail-action"
+                        type="button"
+                        disabled={actingOccurrenceId === occurrence.occurrenceId}
+                        onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze")}
+                      >
+                        +1 час
+                      </button>
+                    </div>
                   </div>
                 </article>
               );

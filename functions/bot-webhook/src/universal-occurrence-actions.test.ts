@@ -79,6 +79,7 @@ describe("executeUniversalOccurrenceAction", () => {
     const result = await executeUniversalOccurrenceAction(
       config,
       {
+        source: "telegram",
         action: "done",
         occurrenceId: "occurrence-a",
         actorUserId: 20,
@@ -109,6 +110,7 @@ describe("executeUniversalOccurrenceAction", () => {
     await executeUniversalOccurrenceAction(
       config,
       {
+        source: "telegram",
         action: "snooze",
         occurrenceId: "occurrence-a",
         actorUserId: 20,
@@ -138,6 +140,7 @@ describe("executeUniversalOccurrenceAction", () => {
       executeUniversalOccurrenceAction(
         config,
         {
+          source: "telegram",
           action: "done",
           occurrenceId: "occurrence-a",
           actorUserId: 30,
@@ -157,6 +160,7 @@ describe("executeUniversalOccurrenceAction", () => {
       executeUniversalOccurrenceAction(
         config,
         {
+          source: "telegram",
           action: "done",
           occurrenceId: "occurrence-a",
           actorUserId: 20,
@@ -167,5 +171,27 @@ describe("executeUniversalOccurrenceAction", () => {
       ),
     ).rejects.toBeInstanceOf(UniversalOccurrenceActionForbiddenError);
     expect(deps.members.getByUserId).not.toHaveBeenCalled();
+  });
+
+  it("uses the same policy for Mini App actions without a Telegram message location", async () => {
+    const deps = dependencies();
+
+    await executeUniversalOccurrenceAction(
+      config,
+      {
+        source: "mini-app",
+        action: "done",
+        occurrenceId: "occurrence-a",
+        actorUserId: 20,
+      },
+      deps,
+    );
+
+    expect(deps.actions.complete).toHaveBeenCalledWith(
+      "workspace-a",
+      "occurrence-a",
+      20,
+      expect.any(Date),
+    );
   });
 });

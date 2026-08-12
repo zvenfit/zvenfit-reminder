@@ -62,6 +62,12 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     occurrences: {
       listActionableForActor: vi.fn().mockResolvedValue([]),
     },
+    occurrenceActions: {
+      execute: vi.fn().mockResolvedValue({
+        action: "done",
+        occurrence: { occurrenceId: "occurrence-a", status: "completed" },
+      }),
+    },
   } as unknown as UniversalApiDependencies;
 }
 
@@ -119,6 +125,45 @@ describe("handleUniversalApi", () => {
       "workspace-a",
       20,
     );
+  });
+
+  it("completes an occurrence through the shared action service", async () => {
+    const deps = dependencies();
+    const response = await handleUniversalApi(
+      {
+        httpMethod: "POST",
+        path: "/api/occurrences/occurrence-a/complete",
+        body: "{}",
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.occurrenceActions.execute).toHaveBeenCalledWith({
+      source: "mini-app",
+      action: "done",
+      occurrenceId: "occurrence-a",
+      actorUserId: 20,
+    });
+  });
+
+  it("validates Mini App snooze duration before changing state", async () => {
+    const deps = dependencies();
+    const response = await handleUniversalApi(
+      {
+        httpMethod: "POST",
+        path: "/api/occurrences/occurrence-a/snooze",
+        body: JSON.stringify({ minutes: 5 }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(400);
+    expect(deps.occurrenceActions.execute).not.toHaveBeenCalled();
   });
 
   it("lets an ordinary member create a private reminder for themselves", async () => {

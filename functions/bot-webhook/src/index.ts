@@ -390,6 +390,7 @@ export function getBot(): Bot {
       let result: UniversalOccurrenceActionResult;
       try {
         result = await executeUniversalOccurrenceAction(config, {
+          source: "telegram",
           action: universalCallback.action,
           occurrenceId: universalCallback.occurrenceId,
           actorUserId: ctx.from.id,

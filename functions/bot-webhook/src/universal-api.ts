@@ -1,10 +1,12 @@
 import {
   InactiveWorkspaceMemberError,
+  OccurrenceNotActionableError,
   OccurrencesRepository,
   PrivateChatUnavailableError,
   RemindersRepository,
   WorkspaceMembersRepository,
   WorkspacesRepository,
+  UndoWindowExpiredError,
   canCreateReminder,
   reminderDraftSchema,
   type AppConfig,
@@ -12,12 +14,22 @@ import {
 } from "@zvenfit-reminder/shared";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getPath, jsonResponse } from "./api.js";
+import {
+  UniversalOccurrenceActionForbiddenError,
+  UniversalOccurrenceActionNotFoundError,
+  executeUniversalOccurrenceAction,
+  type UniversalOccurrenceActionInput,
+  type UniversalOccurrenceActionResult,
+} from "./universal-occurrence-actions.js";
 
 export interface UniversalApiDependencies {
   workspaces: Pick<WorkspacesRepository, "getByTelegramChatId">;
   members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles">;
   reminders: Pick<RemindersRepository, "listForActor" | "create">;
   occurrences: Pick<OccurrencesRepository, "listActionableForActor">;
+  occurrenceActions: {
+    execute(input: UniversalOccurrenceActionInput): Promise<UniversalOccurrenceActionResult>;
+  };
 }
 
 function createDependencies(config: AppConfig): UniversalApiDependencies {
@@ -26,6 +38,9 @@ function createDependencies(config: AppConfig): UniversalApiDependencies {
     members: new WorkspaceMembersRepository(config.ydbEndpoint, config.ydbDatabase),
     reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
     occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
+    occurrenceActions: {
+      execute: (input) => executeUniversalOccurrenceAction(config, input),
+    },
   };
 }
 
@@ -36,7 +51,10 @@ function isUniversalRoute(method: string, path: string): boolean {
       path === "/api/reminders" ||
       path === "/api/members"
     )) ||
-    (method === "POST" && path === "/api/reminders")
+    (method === "POST" && (
+      path === "/api/reminders" ||
+      /^\/api\/occurrences\/[^/]+\/(complete|snooze|undo-completion)$/.test(path)
+    ))
   );
 }
 
@@ -86,6 +104,53 @@ export async function handleUniversalApi(
   if (method === "GET" && path === "/api/members") {
     const members = await dependencies.members.listProfiles(workspace.workspaceId);
     return jsonResponse(200, { members });
+  }
+
+  const occurrenceActionMatch = path.match(
+    /^\/api\/occurrences\/([^/]+)\/(complete|snooze|undo-completion)$/,
+  );
+  if (method === "POST" && occurrenceActionMatch) {
+    const occurrenceId = decodeURIComponent(occurrenceActionMatch[1]);
+    const routeAction = occurrenceActionMatch[2];
+    let snoozeMinutes = 60;
+    if (routeAction === "snooze") {
+      try {
+        const body = JSON.parse(event.body ?? "{}");
+        snoozeMinutes = body.minutes ?? 60;
+      } catch {
+        return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+      }
+      if (!Number.isInteger(snoozeMinutes) || snoozeMinutes < 15 || snoozeMinutes > 43_200) {
+        return jsonResponse(400, {
+          error: "Snooze duration must be between 15 minutes and 30 days",
+          code: "validation_failed",
+        });
+      }
+    }
+    try {
+      const result = await dependencies.occurrenceActions.execute({
+        source: "mini-app",
+        action: routeAction === "complete" ? "done" : routeAction === "snooze" ? "snooze" : "undo",
+        occurrenceId,
+        actorUserId: actor.userId,
+        ...(routeAction === "snooze" ? { snoozeMinutes } : {}),
+      });
+      return jsonResponse(200, { occurrence: result.occurrence });
+    } catch (error) {
+      if (error instanceof UniversalOccurrenceActionForbiddenError) {
+        return jsonResponse(403, { error: "Cannot act on this reminder", code: "forbidden" });
+      }
+      if (error instanceof UniversalOccurrenceActionNotFoundError) {
+        return jsonResponse(404, { error: "Reminder occurrence not found", code: "not_found" });
+      }
+      if (error instanceof UndoWindowExpiredError) {
+        return jsonResponse(409, { error: "Undo window has expired", code: "undo_expired" });
+      }
+      if (error instanceof OccurrenceNotActionableError) {
+        return jsonResponse(409, { error: "Reminder state has already changed", code: "not_actionable" });
+      }
+      throw error;
+    }
   }
 
   let body: unknown;

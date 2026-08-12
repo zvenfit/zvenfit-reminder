@@ -188,7 +188,13 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export function loadDashboard(): Promise<{ occurrences: ReminderOccurrence[] }> {
-  if (MOCK_MODE) return Promise.resolve({ occurrences: mockOccurrences });
+  if (MOCK_MODE) {
+    return Promise.resolve({
+      occurrences: mockOccurrences.filter((occurrence) =>
+        ["scheduled", "pending", "overdue"].includes(occurrence.status),
+      ),
+    });
+  }
   return api("/api/dashboard");
 }
 
@@ -223,6 +229,49 @@ export function createReminder(body: CreateReminderBody): Promise<{ reminder: Re
     });
   }
   return api("/api/reminders", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function completeOccurrence(
+  occurrenceId: string,
+): Promise<{ occurrence: ReminderOccurrence }> {
+  if (MOCK_MODE) {
+    const occurrence = mockOccurrences.find((item) => item.occurrenceId === occurrenceId)!;
+    occurrence.status = "completed";
+    return Promise.resolve({ occurrence });
+  }
+  return api(`/api/occurrences/${encodeURIComponent(occurrenceId)}/complete`, {
+    method: "POST",
+    body: "{}",
+  });
+}
+
+export function snoozeOccurrence(
+  occurrenceId: string,
+  minutes = 60,
+): Promise<{ occurrence: ReminderOccurrence }> {
+  if (MOCK_MODE) {
+    const occurrence = mockOccurrences.find((item) => item.occurrenceId === occurrenceId)!;
+    occurrence.nextNotificationAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
+    return Promise.resolve({ occurrence });
+  }
+  return api(`/api/occurrences/${encodeURIComponent(occurrenceId)}/snooze`, {
+    method: "POST",
+    body: JSON.stringify({ minutes }),
+  });
+}
+
+export function undoOccurrenceCompletion(
+  occurrenceId: string,
+): Promise<{ occurrence: ReminderOccurrence }> {
+  if (MOCK_MODE) {
+    const occurrence = mockOccurrences.find((item) => item.occurrenceId === occurrenceId)!;
+    occurrence.status = new Date(occurrence.dueAt) <= new Date() ? "overdue" : "pending";
+    return Promise.resolve({ occurrence });
+  }
+  return api(`/api/occurrences/${encodeURIComponent(occurrenceId)}/undo-completion`, {
+    method: "POST",
+    body: "{}",
+  });
 }
 
 declare global {

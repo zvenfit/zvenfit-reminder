@@ -11,14 +11,19 @@ import {
 
 export type UniversalOccurrenceAction = "done" | "snooze" | "undo";
 
-export interface UniversalOccurrenceActionInput {
+interface UniversalOccurrenceActionInputBase {
   action: UniversalOccurrenceAction;
   occurrenceId: string;
   actorUserId: number;
-  chatId: number;
-  chatType: "private" | "group";
+  snoozeMinutes?: number;
   now?: Date;
 }
+
+export type UniversalOccurrenceActionInput = UniversalOccurrenceActionInputBase &
+  (
+    | { source: "telegram"; chatId: number; chatType: "private" | "group" }
+    | { source: "mini-app" }
+  );
 
 export interface UniversalOccurrenceActionResult {
   action: UniversalOccurrenceAction;
@@ -65,6 +70,9 @@ function callbackLocationAllowed(
   input: UniversalOccurrenceActionInput,
   allowedGroupChatId: number,
 ): boolean {
+  if (input.source === "mini-app") {
+    return true;
+  }
   if (visibility === "group") {
     return input.chatType === "group" && input.chatId === allowedGroupChatId;
   }
@@ -78,6 +86,10 @@ export async function executeUniversalOccurrenceAction(
 ): Promise<UniversalOccurrenceActionResult> {
   const dependencies = providedDependencies ?? createDependencies(config);
   const now = input.now ?? new Date();
+  const snoozeMinutes = input.snoozeMinutes ?? 60;
+  if (!Number.isInteger(snoozeMinutes) || snoozeMinutes < 15 || snoozeMinutes > 30 * 24 * 60) {
+    throw new Error("Snooze duration must be between 15 minutes and 30 days");
+  }
   const workspace = await dependencies.workspaces.getByTelegramChatId(config.allowedChatId);
   if (!workspace || workspace.status !== "active") {
     throw new UniversalOccurrenceActionNotFoundError();
@@ -124,7 +136,7 @@ export async function executeUniversalOccurrenceAction(
             workspace.workspaceId,
             occurrence.occurrenceId,
             input.actorUserId,
-            new Date(now.getTime() + 60 * 60 * 1_000),
+            new Date(now.getTime() + snoozeMinutes * 60 * 1_000),
             now,
           )
         : await dependencies.actions.undoCompletion(
