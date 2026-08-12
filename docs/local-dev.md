@@ -111,11 +111,16 @@ curl -H "X-Telegram-Init-Data: $INIT_DATA" http://localhost:3000/api/rules
 ```text
 GET  /api/reminders
 POST /api/reminders
+GET  /api/dashboard
 GET  /api/members
 ```
 
 Они требуют валидный `X-Telegram-Init-Data` и активное членство в workspace.
 Legacy `/api/rules` остаётся доступным до переключения интерфейса.
+
+Для визуальной проверки нового Mini App без запущенного backend открой
+`http://localhost:5173/?mock=1`. Mock-режим доступен только в Vite development
+и показывает просроченное, текущее и повторяющиеся напоминания.
 
 ## YDB Local (offline)
 

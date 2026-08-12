@@ -225,6 +225,37 @@ export class OccurrencesRepository {
     });
   }
 
+  async listActionableForActor(
+    workspaceId: string,
+    actorUserId: number,
+  ): Promise<ReminderOccurrence[]> {
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          DECLARE $workspace_id AS Utf8;
+          DECLARE $actor_user_id AS Int64;
+          SELECT occurrence.* FROM reminder_occurrences AS occurrence
+          INNER JOIN reminders AS reminder
+            ON occurrence.workspace_id = reminder.workspace_id
+            AND occurrence.reminder_id = reminder.reminder_id
+          WHERE occurrence.workspace_id = $workspace_id
+            AND occurrence.status IN ('scheduled', 'pending', 'overdue')
+            AND (
+              occurrence.visibility = 'group'
+              OR reminder.creator_user_id = $actor_user_id
+              OR occurrence.responsible_user_id = $actor_user_id
+            )
+          ORDER BY occurrence.due_at, occurrence.occurrence_id;
+        `,
+        {
+          $workspace_id: TypedValues.utf8(workspaceId),
+          $actor_user_id: TypedValues.int64(actorUserId),
+        },
+      );
+      return mapResultRows(resultSets[0]).map(rowToOccurrence);
+    });
+  }
+
   async materialize(
     workspaceId: string,
     reminderId: string,

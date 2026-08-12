@@ -1,28 +1,154 @@
-export interface Rule {
-  id: string;
+export type WorkspaceRole = "owner" | "organizer" | "member";
+export type ReminderStatus = "active" | "paused" | "archived";
+export type ReminderVisibility = "group" | "private";
+
+export interface WorkspaceMember {
+  workspaceId: string;
+  userId: number;
+  role: WorkspaceRole;
+  status: "active" | "removed";
+  username: string | null;
+  displayName: string;
+  privateChatAvailable: boolean;
+}
+
+export type DeadlineTiming =
+  | { kind: "timed"; timeLocal: string }
+  | { kind: "allDay" };
+
+export type ScheduleSpec =
+  | { version: 1; frequency: "once"; date: string; timing: DeadlineTiming }
+  | {
+      version: 1;
+      frequency: "daily";
+      startDate: string;
+      timing: DeadlineTiming;
+      interval: number;
+    }
+  | {
+      version: 1;
+      frequency: "weekly";
+      startDate: string;
+      timing: DeadlineTiming;
+      interval: number;
+      weekdays: number[];
+    }
+  | {
+      version: 1;
+      frequency: "monthly";
+      startDate: string;
+      timing: DeadlineTiming;
+      interval: number;
+      day: { type: "dayOfMonth"; value: number; overflow: "lastDay" } | { type: "lastDay" };
+    }
+  | {
+      version: 1;
+      frequency: "yearly";
+      startDate: string;
+      timing: DeadlineTiming;
+      interval: number;
+      month: number;
+      day: number;
+      overflow: "lastDay";
+    };
+
+export interface Reminder {
+  workspaceId: string;
+  reminderId: string;
   title: string;
-  amount: number | null;
-  ruleType: "recurring" | "oneoff";
-  dayOfMonth: number | null;
-  dueAt: string | null;
-  timeLocal: string;
+  description: string | null;
+  actionUrl: string | null;
+  amountMinor: number | null;
+  currency: string | null;
+  visibility: ReminderVisibility;
+  creatorUserId: number;
+  assignment:
+    | { mode: "person"; responsibleUserId: number }
+    | { mode: "anyone" };
+  watcherUserIds: number[];
+  schedule: ScheduleSpec;
   timezone: string;
-  chatId: number;
-  mentionIds: number[];
-  status: "active" | "paused" | "archived";
+  notificationPolicy: {
+    leadMinutes: number;
+    repeatIntervalMinutes: number;
+    ignoreQuietHours: boolean;
+    escalation:
+      | { enabled: false }
+      | { enabled: true; delayMinutes: number; repeatMinutes: number };
+  };
+  status: ReminderStatus;
+  version: number;
   createdAt: string;
   updatedAt: string;
 }
 
-export interface GroupMember {
-  chatId: number;
-  userId: number;
-  username: string | null;
-  displayName: string;
-  updatedAt: string;
+export interface ReminderOccurrence {
+  workspaceId: string;
+  occurrenceId: string;
+  reminderId: string;
+  dueAt: string;
+  title: string;
+  description: string | null;
+  amountMinor: number | null;
+  currency: string | null;
+  visibility: ReminderVisibility;
+  assignment:
+    | { mode: "person"; responsibleUserId: number }
+    | { mode: "anyone" };
+  status: "scheduled" | "pending" | "overdue" | "completed" | "cancelled";
+  timezone: string;
+  nextNotificationAt: string | null;
 }
 
+export type CreateReminderBody = Omit<
+  Reminder,
+  | "workspaceId"
+  | "reminderId"
+  | "creatorUserId"
+  | "status"
+  | "version"
+  | "createdAt"
+  | "updatedAt"
+>;
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const MOCK_MODE = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
+
+const mockMembers: WorkspaceMember[] = [
+  { workspaceId: "demo", userId: 10, role: "owner", status: "active", username: "anna", displayName: "Анна", privateChatAvailable: true },
+  { workspaceId: "demo", userId: 20, role: "member", status: "active", username: "ivan", displayName: "Иван", privateChatAvailable: true },
+  { workspaceId: "demo", userId: 30, role: "member", status: "active", username: null, displayName: "Маша", privateChatAvailable: false },
+];
+
+const mockReminders: Reminder[] = [
+  {
+    workspaceId: "demo", reminderId: "utilities", title: "Передать показания счётчиков", description: null, actionUrl: null, amountMinor: null, currency: null,
+    visibility: "group", creatorUserId: 10, assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [10],
+    schedule: { version: 1, frequency: "monthly", startDate: "2026-01-01", timing: { kind: "timed", timeLocal: "19:00" }, interval: 1, day: { type: "dayOfMonth", value: 25, overflow: "lastDay" } },
+    timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 1440, repeatIntervalMinutes: 360, ignoreQuietHours: false, escalation: { enabled: true, delayMinutes: 1440, repeatMinutes: 1440 } },
+    status: "active", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  },
+  {
+    workspaceId: "demo", reminderId: "training", title: "Записаться на тренировку", description: null, actionUrl: null, amountMinor: 250000, currency: "RUB",
+    visibility: "private", creatorUserId: 20, assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [],
+    schedule: { version: 1, frequency: "weekly", startDate: "2026-01-01", timing: { kind: "timed", timeLocal: "12:00" }, interval: 1, weekdays: [1] },
+    timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 0, repeatIntervalMinutes: 360, ignoreQuietHours: false, escalation: { enabled: false } },
+    status: "active", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+  },
+];
+
+const mockOccurrences: ReminderOccurrence[] = [
+  {
+    workspaceId: "demo", occurrenceId: "passport", reminderId: "passport", dueAt: new Date(Date.now() - 18 * 60 * 60 * 1000).toISOString(),
+    title: "Забрать готовый паспорт", description: null, amountMinor: null, currency: null, visibility: "group",
+    assignment: { mode: "person", responsibleUserId: 20 }, status: "overdue", timezone: "Europe/Moscow", nextNotificationAt: new Date().toISOString(),
+  },
+  {
+    workspaceId: "demo", occurrenceId: "internet", reminderId: "internet", dueAt: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
+    title: "Оплатить домашний интернет", description: null, amountMinor: 89000, currency: "RUB", visibility: "group",
+    assignment: { mode: "person", responsibleUserId: 10 }, status: "pending", timezone: "Europe/Moscow", nextNotificationAt: new Date().toISOString(),
+  },
+];
 
 function getInitData(): string {
   const devInitData = import.meta.env.VITE_DEV_INIT_DATA;
@@ -30,6 +156,17 @@ function getInitData(): string {
     return devInitData;
   }
   return window.Telegram?.WebApp?.initData ?? "";
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -44,34 +181,48 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(error.error ?? "Request failed");
+    throw new ApiError(error.error ?? "Не удалось выполнить запрос", response.status, error.code);
   }
 
   return response.json() as Promise<T>;
 }
 
-export function listRules(): Promise<{ rules: Rule[] }> {
-  return api("/api/rules");
+export function loadDashboard(): Promise<{ occurrences: ReminderOccurrence[] }> {
+  if (MOCK_MODE) return Promise.resolve({ occurrences: mockOccurrences });
+  return api("/api/dashboard");
 }
 
-export function listMembers(): Promise<{ members: GroupMember[] }> {
+export function listReminders(): Promise<{ reminders: Reminder[] }> {
+  if (MOCK_MODE) return Promise.resolve({ reminders: mockReminders });
+  return api("/api/reminders");
+}
+
+export function listMembers(): Promise<{ members: WorkspaceMember[] }> {
+  if (MOCK_MODE) return Promise.resolve({ members: mockMembers });
   return api("/api/members");
 }
 
-export function syncMembers(): Promise<{ members: GroupMember[]; synced: number }> {
+export function syncMembers(): Promise<unknown> {
+  if (MOCK_MODE) return Promise.resolve({ members: mockMembers });
   return api("/api/members/sync", { method: "POST", body: "{}" });
 }
 
-export function createRule(body: Record<string, unknown>): Promise<{ rule: Rule }> {
-  return api("/api/rules", { method: "POST", body: JSON.stringify(body) });
-}
-
-export function updateRule(id: string, body: Record<string, unknown>): Promise<{ rule: Rule }> {
-  return api(`/api/rules/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) });
-}
-
-export function deleteRule(id: string): Promise<{ ok: boolean }> {
-  return api(`/api/rules/${encodeURIComponent(id)}`, { method: "DELETE" });
+export function createReminder(body: CreateReminderBody): Promise<{ reminder: Reminder }> {
+  if (MOCK_MODE) {
+    return Promise.resolve({
+      reminder: {
+        ...body,
+        workspaceId: "demo",
+        reminderId: crypto.randomUUID(),
+        creatorUserId: 10,
+        status: "active",
+        version: 1,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    });
+  }
+  return api("/api/reminders", { method: "POST", body: JSON.stringify(body) });
 }
 
 declare global {
@@ -79,6 +230,7 @@ declare global {
     Telegram?: {
       WebApp?: {
         initData: string;
+        initDataUnsafe?: { user?: { id?: number } };
         ready: () => void;
         expand: () => void;
         themeParams: Record<string, string>;

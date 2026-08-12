@@ -59,6 +59,9 @@ function dependencies(member: WorkspaceMember | null = actor()) {
         creatorUserId,
       })),
     },
+    occurrences: {
+      listActionableForActor: vi.fn().mockResolvedValue([]),
+    },
   } as unknown as UniversalApiDependencies;
 }
 
@@ -100,6 +103,22 @@ describe("handleUniversalApi", () => {
 
     expect(response?.statusCode).toBe(200);
     expect(deps.reminders.listForActor).toHaveBeenCalledWith("workspace-a", 20);
+  });
+
+  it("returns the actor's actionable occurrence feed", async () => {
+    const deps = dependencies();
+    const response = await handleUniversalApi(
+      { httpMethod: "GET", path: "/api/dashboard" },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.occurrences.listActionableForActor).toHaveBeenCalledWith(
+      "workspace-a",
+      20,
+    );
   });
 
   it("lets an ordinary member create a private reminder for themselves", async () => {

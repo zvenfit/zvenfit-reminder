@@ -1,5 +1,6 @@
 import {
   InactiveWorkspaceMemberError,
+  OccurrencesRepository,
   PrivateChatUnavailableError,
   RemindersRepository,
   WorkspaceMembersRepository,
@@ -16,6 +17,7 @@ export interface UniversalApiDependencies {
   workspaces: Pick<WorkspacesRepository, "getByTelegramChatId">;
   members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles">;
   reminders: Pick<RemindersRepository, "listForActor" | "create">;
+  occurrences: Pick<OccurrencesRepository, "listActionableForActor">;
 }
 
 function createDependencies(config: AppConfig): UniversalApiDependencies {
@@ -23,12 +25,17 @@ function createDependencies(config: AppConfig): UniversalApiDependencies {
     workspaces: new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase),
     members: new WorkspaceMembersRepository(config.ydbEndpoint, config.ydbDatabase),
     reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
+    occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
   };
 }
 
 function isUniversalRoute(method: string, path: string): boolean {
   return (
-    (method === "GET" && (path === "/api/reminders" || path === "/api/members")) ||
+    (method === "GET" && (
+      path === "/api/dashboard" ||
+      path === "/api/reminders" ||
+      path === "/api/members"
+    )) ||
     (method === "POST" && path === "/api/reminders")
   );
 }
@@ -66,6 +73,14 @@ export async function handleUniversalApi(
       actor.userId,
     );
     return jsonResponse(200, { reminders });
+  }
+
+  if (method === "GET" && path === "/api/dashboard") {
+    const occurrences = await dependencies.occurrences.listActionableForActor(
+      workspace.workspaceId,
+      actor.userId,
+    );
+    return jsonResponse(200, { occurrences });
   }
 
   if (method === "GET" && path === "/api/members") {

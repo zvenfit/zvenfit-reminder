@@ -123,3 +123,17 @@ describe("OccurrencesRepository.materialize", () => {
     expect(session.commitTransaction).toHaveBeenCalled();
   });
 });
+
+describe("OccurrencesRepository.listActionableForActor", () => {
+  it("scopes the attention feed by workspace, actor, and visibility", async () => {
+    const { repository, session } = repositoryDouble();
+    await repository.listActionableForActor("workspace-a", 20);
+
+    const [query, params] = session.executeQuery.mock.calls[0] ?? [];
+    expect(query).toContain("occurrence.workspace_id = $workspace_id");
+    expect(query).toContain("occurrence.visibility = 'group'");
+    expect(query).toContain("reminder.creator_user_id = $actor_user_id");
+    expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
+    expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
+  });
+});
