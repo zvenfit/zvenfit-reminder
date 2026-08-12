@@ -157,6 +157,7 @@ describe("OccurrenceActionsRepository", () => {
       query.includes("snoozed_by = $actor_user_id"),
     );
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
+    expect(writeCall?.[0]).toContain("'occurrence.snoozed'");
   });
 
   it("completes idempotently while retaining the runtime slot for ten minutes", async () => {
@@ -178,6 +179,7 @@ describe("OccurrenceActionsRepository", () => {
       query.includes("status = 'completed'"),
     );
     expect(writeCall?.[0]).toContain("UPDATE reminder_runtime SET updated_at = $now");
+    expect(writeCall?.[0]).toContain("'occurrence.completed'");
     expect(writeCall?.[0]).not.toContain("state = 'ready'");
   });
 
@@ -190,7 +192,7 @@ describe("OccurrenceActionsRepository", () => {
       completed_at: "2026-08-13T19:58:00.000Z",
       undo_until: "2026-08-13T20:08:00.000Z",
     });
-    const { repository } = repositoryDouble([
+    const { repository, session } = repositoryDouble([
       resultSet([completed]),
       resultSet([runtimeRow]),
       resultSet([workspaceRow]),
@@ -198,6 +200,7 @@ describe("OccurrenceActionsRepository", () => {
     const occurrence = await repository.undoCompletion(
       "workspace-a",
       "occurrence-a",
+      20,
       new Date("2026-08-13T20:00:00.000Z"),
     );
 
@@ -210,6 +213,11 @@ describe("OccurrenceActionsRepository", () => {
     expect(occurrence?.nextNotificationAt?.toISOString()).toBe(
       "2026-08-14T05:00:00.000Z",
     );
+    const writeCall = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("completed_by = NULL"),
+    );
+    expect(writeCall?.[0]).toContain("'occurrence.completion_undone'");
+    expect(decodeYdbValue(writeCall?.[1]?.$actor_user_id)).toBe(20);
   });
 
   it("rejects undo after the ten-minute window", async () => {
@@ -231,6 +239,7 @@ describe("OccurrenceActionsRepository", () => {
       repository.undoCompletion(
         "workspace-a",
         "occurrence-a",
+        20,
         new Date("2026-08-13T12:10:00.001Z"),
       ),
     ).rejects.toBeInstanceOf(UndoWindowExpiredError);

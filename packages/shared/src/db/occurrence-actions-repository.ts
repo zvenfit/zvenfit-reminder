@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ReminderOccurrence } from "../reminder-domain.js";
 import {
   adjustForQuietHours,
@@ -140,6 +141,8 @@ export class OccurrenceActionsRepository {
             DECLARE $actor_user_id AS Int64;
             DECLARE $now AS Timestamp;
             DECLARE $snooze_until AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
             UPDATE reminder_occurrences SET
               next_notification_at = $snooze_until,
               snoozed_by = $actor_user_id,
@@ -149,6 +152,14 @@ export class OccurrenceActionsRepository {
             WHERE workspace_id = $workspace_id
               AND occurrence_id = $occurrence_id
               AND notification_state = 'waiting';
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $occurrence_id, $now, $event_id, 'occurrence',
+              'occurrence.snoozed', $actor_user_id, $payload
+            );
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -156,6 +167,10 @@ export class OccurrenceActionsRepository {
             $actor_user_id: TypedValues.int64(actorUserId),
             $now: timestampValue(now),
             $snooze_until: timestampValue(snoozeUntil),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(
+              JSON.stringify({ snoozeUntil: snoozeUntil.toISOString() }),
+            ),
           },
         );
 
@@ -230,6 +245,8 @@ export class OccurrenceActionsRepository {
             DECLARE $actor_user_id AS Int64;
             DECLARE $now AS Timestamp;
             DECLARE $undo_until AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
 
             UPDATE reminder_occurrences SET
               status = 'completed',
@@ -248,6 +265,14 @@ export class OccurrenceActionsRepository {
               AND reminder_id = $reminder_id
               AND state = 'blocked'
               AND current_occurrence_id = $occurrence_id;
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $occurrence_id, $now, $event_id, 'occurrence',
+              'occurrence.completed', $actor_user_id, $payload
+            );
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -256,6 +281,10 @@ export class OccurrenceActionsRepository {
             $actor_user_id: TypedValues.int64(actorUserId),
             $now: timestampValue(now),
             $undo_until: timestampValue(undoUntil),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(
+              JSON.stringify({ undoUntil: undoUntil.toISOString() }),
+            ),
           },
         );
 
@@ -276,8 +305,10 @@ export class OccurrenceActionsRepository {
   async undoCompletion(
     workspaceId: string,
     occurrenceId: string,
+    actorUserId: number,
     now: Date = new Date(),
   ): Promise<ReminderOccurrence | null> {
+    assertActorUserId(actorUserId);
     return this.runSession((session) =>
       withSerializableTransaction(session, async (transaction) => {
         const { resultSets } = await transaction.executeQuery(
@@ -340,6 +371,9 @@ export class OccurrenceActionsRepository {
             DECLARE $status AS Utf8;
             DECLARE $next_notification_at AS Timestamp;
             DECLARE $now AS Timestamp;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
             UPDATE reminder_occurrences SET
               status = $status,
               notification_state = 'waiting',
@@ -351,6 +385,14 @@ export class OccurrenceActionsRepository {
             WHERE workspace_id = $workspace_id
               AND occurrence_id = $occurrence_id
               AND status = 'completed';
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $occurrence_id, $now, $event_id, 'occurrence',
+              'occurrence.completion_undone', $actor_user_id, $payload
+            );
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -358,6 +400,11 @@ export class OccurrenceActionsRepository {
             $status: TypedValues.utf8(status),
             $next_notification_at: timestampValue(nextNotificationAt),
             $now: timestampValue(now),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(
+              JSON.stringify({ nextNotificationAt: nextNotificationAt.toISOString() }),
+            ),
           },
         );
 

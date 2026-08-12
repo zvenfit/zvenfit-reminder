@@ -44,18 +44,19 @@ export function parseInstanceCallbackData(data: string): { action: "done" | "ski
 }
 
 export function occurrenceCallbackData(
-  action: "done" | "snooze",
+  action: "done" | "snooze" | "undo",
   occurrenceId: string,
 ): string {
   if (!occurrenceId || occurrenceId.includes(":") || occurrenceId.length > 50) {
     throw new Error("Occurrence ID is not callback-safe");
   }
-  return `${action === "done" ? "od" : "os"}:${occurrenceId}`;
+  const code = action === "done" ? "od" : action === "snooze" ? "os" : "ou";
+  return `${code}:${occurrenceId}`;
 }
 
 export function parseOccurrenceCallbackData(
   data: string,
-): { action: "done" | "snooze"; occurrenceId: string } | null {
+): { action: "done" | "snooze" | "undo"; occurrenceId: string } | null {
   const [code, occurrenceId, extra] = data.split(":");
   if (extra || !occurrenceId || occurrenceId.length > 50) {
     return null;
@@ -65,6 +66,9 @@ export function parseOccurrenceCallbackData(
   }
   if (code === "os") {
     return { action: "snooze", occurrenceId };
+  }
+  if (code === "ou") {
+    return { action: "undo", occurrenceId };
   }
   return null;
 }

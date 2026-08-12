@@ -139,4 +139,4 @@ YDB_DATABASE=/local \
 | `SKIP_INIT_DATA_VALIDATION` | `0` | `1` — bypass initData в dev |
 | `DEV_USER_ID` | — | User id для bypass / генератора |
 | `VITE_DEV_INIT_DATA` | — | initData для Mini App в браузере |
-| `UNIVERSAL_REMINDERS_ENABLED` | `0` | Внутренний dev-флаг нового dispatcher; до миграций и подключения новых callbacks оставлять `0` |
+| `UNIVERSAL_REMINDERS_ENABLED` | `0` | Внутренний dev-флаг нового runtime; до миграций, bootstrap workspace и явного cutover оставлять `0` |

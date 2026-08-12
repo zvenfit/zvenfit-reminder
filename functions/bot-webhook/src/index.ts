@@ -1,11 +1,17 @@
 import {
   InstancesRepository,
   MembersRepository,
+  OccurrenceNotActionableError,
   RulesRepository,
+  UndoWindowExpiredError,
+  buildOccurrenceMessage,
+  escapeHtml,
   formatAmount,
   formatDueDate,
   loadConfig,
   parseInstanceCallbackData,
+  parseOccurrenceCallbackData,
+  occurrenceCallbackData,
   validateInitData,
   type ParsedInitData,
   type Rule,
@@ -20,8 +26,70 @@ import {
   updateRuleSchema,
 } from "./api.js";
 import { syncGroupMembers } from "./members-sync.js";
+import {
+  UniversalOccurrenceActionForbiddenError,
+  UniversalOccurrenceActionNotFoundError,
+  executeUniversalOccurrenceAction,
+  type UniversalOccurrenceActionResult,
+} from "./universal-occurrence-actions.js";
 
 let botInstance: Bot | null = null;
+
+function occurrenceKeyboard(occurrenceId: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("✅ Выполнил", occurrenceCallbackData("done", occurrenceId))
+    .text("⏰ +1 час", occurrenceCallbackData("snooze", occurrenceId));
+}
+
+function formatOccurrenceInstant(instant: Date, timezone: string): string {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: timezone,
+  }).format(instant);
+}
+
+function renderOccurrenceAction(
+  result: UniversalOccurrenceActionResult,
+  actor: { id: number; first_name: string; last_name?: string },
+): { text: string; keyboard: InlineKeyboard; callbackNotice: string } {
+  const { occurrence, action } = result;
+  const actorName = escapeHtml(
+    [actor.first_name, actor.last_name].filter(Boolean).join(" ") || "Участник",
+  );
+  const actorMention = `<a href="tg://user?id=${actor.id}">${actorName}</a>`;
+  const base = buildOccurrenceMessage(occurrence);
+  if (action === "done") {
+    const undoUntil = occurrence.undoUntil
+      ? formatOccurrenceInstant(occurrence.undoUntil, occurrence.timezone)
+      : null;
+    return {
+      text: `${base}\n\n✅ Выполнено: ${actorMention}${undoUntil ? `\nОтменить можно до ${escapeHtml(undoUntil)}` : ""}`,
+      keyboard: new InlineKeyboard().text(
+        "↩️ Отменить выполнение",
+        occurrenceCallbackData("undo", occurrence.occurrenceId),
+      ),
+      callbackNotice: "Готово",
+    };
+  }
+  if (action === "snooze") {
+    const nextAt = occurrence.nextNotificationAt
+      ? formatOccurrenceInstant(occurrence.nextNotificationAt, occurrence.timezone)
+      : "позже";
+    return {
+      text: `${base}\n\n⏰ Отложено: ${escapeHtml(nextAt)}\nИзменил: ${actorMention}`,
+      keyboard: occurrenceKeyboard(occurrence.occurrenceId),
+      callbackNotice: "Напомню позже",
+    };
+  }
+  return {
+    text: `${base}\n\n↩️ Выполнение отменено: ${actorMention}`,
+    keyboard: occurrenceKeyboard(occurrence.occurrenceId),
+    callbackNotice: "Снова активно",
+  };
+}
 
 function resolveInitData(initData: string | undefined, botToken: string): ParsedInitData {
   if (process.env.SKIP_INIT_DATA_VALIDATION === "1" && process.env.NODE_ENV !== "production") {
@@ -63,8 +131,17 @@ export function getBot(): Bot {
     const isAllowedChat = chatId === config.allowedChatId;
     const isPrivateAdmin = ctx.chat?.type === "private" && userId != null && config.adminUserIds.includes(userId);
     const isAllowedPrivate = ctx.chat?.type === "private" && config.adminUserIds.length === 0;
+    const callbackData = ctx.callbackQuery && "data" in ctx.callbackQuery
+      ? ctx.callbackQuery.data
+      : null;
+    const isUniversalPrivateCallback =
+      config.universalRemindersEnabled &&
+      ctx.chat?.type === "private" &&
+      userId != null &&
+      callbackData != null &&
+      parseOccurrenceCallbackData(callbackData) != null;
 
-    if (!isAllowedChat && !isPrivateAdmin && !isAllowedPrivate) {
+    if (!isAllowedChat && !isPrivateAdmin && !isAllowedPrivate && !isUniversalPrivateCallback) {
       return;
     }
 
@@ -185,6 +262,73 @@ export function getBot(): Bot {
   });
 
   bot.on("callback_query:data", async (ctx) => {
+    const universalCallback = config.universalRemindersEnabled
+      ? parseOccurrenceCallbackData(ctx.callbackQuery.data)
+      : null;
+    if (universalCallback) {
+      if (!ctx.from || !ctx.chat) {
+        await ctx.answerCallbackQuery();
+        return;
+      }
+
+      let result: UniversalOccurrenceActionResult;
+      try {
+        result = await executeUniversalOccurrenceAction(config, {
+          action: universalCallback.action,
+          occurrenceId: universalCallback.occurrenceId,
+          actorUserId: ctx.from.id,
+          chatId: ctx.chat.id,
+          chatType: ctx.chat.type === "private" ? "private" : "group",
+        });
+      } catch (error) {
+        if (error instanceof UniversalOccurrenceActionForbiddenError) {
+          await ctx.answerCallbackQuery({
+            text: "У вас нет доступа к этому действию",
+            show_alert: true,
+          });
+          return;
+        }
+        if (error instanceof UniversalOccurrenceActionNotFoundError) {
+          await ctx.answerCallbackQuery({
+            text: "Напоминание больше недоступно",
+            show_alert: true,
+          });
+          return;
+        }
+        if (error instanceof UndoWindowExpiredError) {
+          await ctx.answerCallbackQuery({
+            text: "10 минут на отмену уже прошли",
+            show_alert: true,
+          });
+          return;
+        }
+        if (error instanceof OccurrenceNotActionableError) {
+          await ctx.answerCallbackQuery({ text: "Состояние уже изменилось" });
+          return;
+        }
+        await ctx.answerCallbackQuery({
+          text: "Не удалось выполнить действие. Попробуйте ещё раз",
+          show_alert: true,
+        });
+        return;
+      }
+
+      const rendered = renderOccurrenceAction(result, ctx.from);
+      try {
+        await ctx.editMessageText(rendered.text, {
+          parse_mode: "HTML",
+          reply_markup: rendered.keyboard,
+        });
+        await ctx.answerCallbackQuery({ text: rendered.callbackNotice });
+      } catch {
+        await ctx.answerCallbackQuery({
+          text: "Действие сохранено, но сообщение не обновилось",
+          show_alert: true,
+        });
+      }
+      return;
+    }
+
     const parsed = parseInstanceCallbackData(ctx.callbackQuery.data);
     if (!parsed || !ctx.from) {
       await ctx.answerCallbackQuery();
