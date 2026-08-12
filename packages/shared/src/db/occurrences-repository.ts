@@ -40,7 +40,7 @@ function nullableString(value: unknown): string | null {
   return value == null ? null : String(value);
 }
 
-function rowToRuntime(data: Record<string, unknown>): ReminderRuntime {
+export function rowToRuntime(data: Record<string, unknown>): ReminderRuntime {
   return {
     workspaceId: String(getField(data, "workspace_id")),
     reminderId: String(getField(data, "reminder_id")),
@@ -53,7 +53,7 @@ function rowToRuntime(data: Record<string, unknown>): ReminderRuntime {
   };
 }
 
-function rowToReminder(data: Record<string, unknown>): ReminderDefinition {
+export function rowToReminder(data: Record<string, unknown>): ReminderDefinition {
   const escalationEnabled = Boolean(getField(data, "escalation_enabled"));
   const draft = reminderDraftSchema.parse({
     title: getField(data, "title"),

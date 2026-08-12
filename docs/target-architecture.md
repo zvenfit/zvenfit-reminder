@@ -227,10 +227,12 @@ Rules:
 
 Materialization scans `reminder_runtime` rows in `ready` state whose
 `next_reminder_start_at` has arrived. This preserves long lead times without a
-guesswork creation horizon. Completion atomically clears the active occurrence
-slot and calculates the first schedule date after `now`, so a long-overdue
-monthly task completed on 27 September next appears on 25 October, not
-retroactively on 25 September.
+guesswork creation horizon. Completion marks the occurrence complete but keeps
+the runtime slot blocked through the ten-minute undo window. A finalizer then
+atomically clears the slot and calculates the first schedule date after `now`,
+so a long-overdue monthly task completed on 27 September next appears on 25
+October, not retroactively on 25 September. Undo simply reactivates the same
+occurrence; no newly materialized occurrence needs to be cancelled.
 
 The Plan and ICS views may calculate future dates without persisting future
 occurrences. Persistence happens only for the current actionable occurrence.

@@ -13,3 +13,4 @@ export * from "./db/workspaces-repository.js";
 export * from "./db/reminders-repository.js";
 export * from "./db/occurrences-repository.js";
 export * from "./db/deliveries-repository.js";
+export * from "./db/occurrence-actions-repository.js";
