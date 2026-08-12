@@ -58,5 +58,9 @@ if [[ "$ready" -eq 0 ]]; then
 fi
 
 apply_schema
+YDB_CONTAINER="$YDB_CONTAINER" \
+YDB_ENDPOINT="$YDB_ENDPOINT" \
+YDB_DATABASE="$YDB_DATABASE" \
+  "$ROOT/scripts/apply-ydb-migrations.sh"
 echo "Schema applied to $YDB_DATABASE"
 run_ydb scheme ls

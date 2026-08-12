@@ -7,7 +7,8 @@
     "mini-app"
   ],
   "scripts": {
-    "check": "npm run typecheck && npm run test && npm run build",
+    "check": "npm run check:migrations && npm run typecheck && npm run test && npm run build",
+    "check:migrations": "node scripts/validate-ydb-migrations.mjs",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",

@@ -45,7 +45,8 @@ Primary key: `(workspace_id)`.
 
 Important fields:
 
-- Telegram chat ID with a unique index;
+- Telegram chat ID, paired with a `telegram_chat_workspaces` primary-key row
+  that enforces one workspace per chat;
 - display name;
 - owner user ID;
 - IANA timezone;
@@ -135,7 +136,8 @@ incomplete occurrence per reminder.
 
 Primary key: `(workspace_id, occurrence_id)`.
 
-Unique index: `(workspace_id, reminder_id, due_at)`.
+Uniqueness guard: a `reminder_occurrence_slots` row keyed by
+`(workspace_id, reminder_id, due_at)` and inserted in the same transaction.
 
 Synchronous dispatch index: `(notification_state, next_notification_at,
 workspace_id)` covering the occurrence and reminder IDs.
@@ -156,9 +158,9 @@ Important fields:
 - cancellation actor, reason, and timestamp;
 - creation and update timestamps.
 
-The runtime row prevents more than one incomplete occurrence. The unique due
-key additionally prevents concurrent timers from creating the same scheduled
-date twice.
+The runtime row prevents more than one incomplete occurrence. The occurrence
+slot primary key additionally prevents concurrent timers from creating the same
+scheduled date twice without depending on secondary-index feature support.
 
 The snapshot preserves historically accurate content after a series changes.
 
@@ -191,11 +193,13 @@ and cancellation. Event payloads contain non-secret structured diffs.
 
 ### `calendar_feed_tokens`
 
-Primary key: `(workspace_id, user_id, token_id)`.
+Primary key: `(token_hash)` with a synchronous owner index on
+`(workspace_id, user_id, created_at)`.
 
-Store only a cryptographic hash of the presented token, its scope, creation and
-last-used timestamps, and revocation state. The plaintext token appears only in
-the generated subscription URL.
+Store only a cryptographic hash of the presented token, a public token ID, its
+scope, creation and last-used timestamps, and revocation state. Hash lookup is
+both globally unique and efficient. The plaintext token appears only in the
+generated subscription URL.
 
 ### `schema_migrations`
 

@@ -117,6 +117,18 @@ YDB_ANONYMOUS_CREDENTIALS=1
 npm run dev:stack
 ```
 
+Скрипт сначала поднимает совместимую legacy-схему, а затем применяет по порядку
+файлы из `infra/ydb/migrations`. Выполненные версии и SHA-256 записываются в
+`schema_migrations`; изменение уже применённого файла останавливает запуск.
+
+Для отдельного применения миграций к настроенной базе:
+
+```bash
+YDB_ENDPOINT=grpc://localhost:2136 \
+YDB_DATABASE=/local \
+./scripts/apply-ydb-migrations.sh
+```
+
 ## Env reference
 
 | Variable | Default | Description |
