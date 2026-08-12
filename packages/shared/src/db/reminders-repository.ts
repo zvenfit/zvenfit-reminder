@@ -46,6 +46,13 @@ export class ScheduleHasNoFutureDeadlineError extends Error {
   }
 }
 
+export class PrivateChatUnavailableError extends Error {
+  constructor(readonly userId: number) {
+    super(`User ${userId} has not started a private bot chat`);
+    this.name = "PrivateChatUnavailableError";
+  }
+}
+
 interface WorkspaceDeliverySettings {
   status: string;
   quietHoursStart: string;
@@ -154,6 +161,48 @@ export class RemindersRepository {
     });
   }
 
+  async listForActor(
+    workspaceId: string,
+    actorUserId: number,
+  ): Promise<ReminderDefinition[]> {
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          DECLARE $workspace_id AS Utf8;
+          DECLARE $actor_user_id AS Int64;
+          SELECT * FROM reminders
+          WHERE workspace_id = $workspace_id
+            AND status != 'archived'
+            AND (
+              visibility = 'group'
+              OR creator_user_id = $actor_user_id
+              OR responsible_user_id = $actor_user_id
+            )
+          ORDER BY updated_at DESC, reminder_id;
+
+          SELECT reminder_id, user_id FROM reminder_watchers
+          WHERE workspace_id = $workspace_id
+          ORDER BY reminder_id, user_id;
+        `,
+        {
+          $workspace_id: TypedValues.utf8(workspaceId),
+          $actor_user_id: TypedValues.int64(actorUserId),
+        },
+      );
+      const watchers = new Map<string, number[]>();
+      for (const row of mapResultRows(resultSets[1])) {
+        const reminderId = String(getField(row, "reminder_id"));
+        const ids = watchers.get(reminderId) ?? [];
+        ids.push(Number(getField(row, "user_id")));
+        watchers.set(reminderId, ids);
+      }
+      return mapResultRows(resultSets[0]).map((row) => {
+        const reminderId = String(getField(row, "reminder_id"));
+        return rowToReminder(row, watchers.get(reminderId) ?? []);
+      });
+    });
+  }
+
   async create(
     workspaceId: string,
     creatorUserId: number,
@@ -196,6 +245,9 @@ export class RemindersRepository {
 
             SELECT user_id, status FROM workspace_members
             WHERE workspace_id = $workspace_id AND user_id IN $participant_ids;
+
+            SELECT user_id, private_chat_available FROM users
+            WHERE user_id IN $participant_ids;
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -224,6 +276,18 @@ export class RemindersRepository {
         const inactiveUserIds = requiredUserIds.filter((userId) => !activeUserIds.has(userId));
         if (inactiveUserIds.length > 0) {
           throw new InactiveWorkspaceMemberError(workspaceId, inactiveUserIds);
+        }
+        if (reminder.visibility === "private" && reminder.assignment.mode === "person") {
+          const responsibleUserId = reminder.assignment.responsibleUserId;
+          const responsibleUser = mapResultRows(resultSets[2]).find(
+            (row) => Number(getField(row, "user_id")) === responsibleUserId,
+          );
+          if (
+            !responsibleUser ||
+            !Boolean(getField(responsibleUser, "private_chat_available"))
+          ) {
+            throw new PrivateChatUnavailableError(responsibleUserId);
+          }
         }
 
         const deadline = getNextScheduledDeadline(reminder.schedule, reminder.timezone, now, {

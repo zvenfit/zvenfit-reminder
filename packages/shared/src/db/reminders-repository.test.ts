@@ -4,6 +4,7 @@ import { reminderDraftSchema } from "../reminder-domain.js";
 import type { SessionRunner } from "./client.js";
 import {
   InactiveWorkspaceMemberError,
+  PrivateChatUnavailableError,
   RemindersRepository,
 } from "./reminders-repository.js";
 import { decodeYdbValue } from "./ydb-utils.js";
@@ -24,7 +25,10 @@ function resultSet(rows: Array<Record<string, string | number | boolean | null>>
   };
 }
 
-function repositoryDouble(activeUserIds: number[]) {
+function repositoryDouble(
+  activeUserIds: number[],
+  privateChatUserIds: number[] = activeUserIds,
+) {
   const session = {
     beginTransaction: vi.fn().mockResolvedValue({ id: "tx-reminder" }),
     commitTransaction: vi.fn().mockResolvedValue(undefined),
@@ -42,6 +46,12 @@ function repositoryDouble(activeUserIds: number[]) {
               },
             ]),
             resultSet(activeUserIds.map((userId) => ({ user_id: userId, status: "active" }))),
+            resultSet(
+              activeUserIds.map((userId) => ({
+                user_id: userId,
+                private_chat_available: privateChatUserIds.includes(userId),
+              })),
+            ),
           ],
         };
       }
@@ -128,5 +138,34 @@ describe("RemindersRepository", () => {
     );
     expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(params?.$reminder_id)).toBe("reminder-a");
+  });
+
+  it("does not create a private reminder before the responsible user starts the bot", async () => {
+    const { repository, session } = repositoryDouble([10, 20], [10]);
+    const privateDraft = reminderDraftSchema.parse({
+      ...draft,
+      visibility: "private",
+      watcherUserIds: [],
+    });
+
+    await expect(
+      repository.create("workspace-a", 10, privateDraft, {
+        now: new Date("2026-08-13T10:00:00.000Z"),
+      }),
+    ).rejects.toBeInstanceOf(PrivateChatUnavailableError);
+    expect(
+      session.executeQuery.mock.calls.some(([query]) => query.includes("INSERT INTO reminders")),
+    ).toBe(false);
+  });
+
+  it("filters list reads by workspace, visibility, and actor", async () => {
+    const { repository, session } = repositoryDouble([]);
+    await repository.listForActor("workspace-a", 20);
+
+    const [query, params] = session.executeQuery.mock.calls[0] ?? [];
+    expect(query).toContain("visibility = 'group'");
+    expect(query).toContain("responsible_user_id = $actor_user_id");
+    expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
+    expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
   });
 });

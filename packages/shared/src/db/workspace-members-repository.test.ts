@@ -60,4 +60,44 @@ describe("WorkspaceMembersRepository", () => {
       "workspace-a",
     );
   });
+
+  it("reactivates an observed removed member without restoring elevated rights", async () => {
+    const removedRow = {
+      workspace_id: "workspace-a",
+      user_id: 20,
+      role: "organizer",
+      status: "removed",
+      role_granted_by: 10,
+      role_granted_at: "2026-08-01T10:00:00.000Z",
+      last_observed_at: "2026-08-01T10:00:00.000Z",
+      created_at: "2026-08-01T10:00:00.000Z",
+      updated_at: "2026-08-01T10:00:00.000Z",
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-member" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("SELECT status FROM workspaces")
+          ? [resultSet({ status: "active" }), resultSet(removedRow)]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    const observed = await repository.observe(
+      "workspace-a",
+      20,
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    expect(observed).toMatchObject({ role: "member", status: "active" });
+    expect(observed?.roleGrantedBy).toBeNull();
+    const writeCall = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("UPSERT INTO workspace_members"),
+    );
+    expect(decodeYdbValue(writeCall?.[1]?.$role)).toBe("member");
+  });
 });

@@ -9,16 +9,27 @@ function memberDisplayName(user: {
   return [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username || "User";
 }
 
+export interface SyncedTelegramUser {
+  id: number;
+  is_bot?: boolean;
+  first_name: string;
+  last_name?: string;
+  username?: string;
+  language_code?: string;
+}
+
 async function upsertTelegramUser(
   membersRepo: MembersRepository,
   chatId: number,
-  user: { id: number; is_bot?: boolean; first_name: string; last_name?: string; username?: string },
+  user: SyncedTelegramUser,
+  onObservedUser?: (user: SyncedTelegramUser) => Promise<void>,
 ): Promise<boolean> {
   if (user.is_bot) {
     return false;
   }
 
   await membersRepo.upsert(chatId, user.id, user.username ?? null, memberDisplayName(user));
+  await onObservedUser?.(user);
   return true;
 }
 
@@ -27,6 +38,7 @@ export async function syncGroupMembers(
   chatId: number,
   membersRepo: MembersRepository,
   currentUserId?: number,
+  onObservedUser?: (user: SyncedTelegramUser) => Promise<void>,
 ): Promise<number> {
   const seen = new Set<number>();
   let synced = 0;
@@ -37,7 +49,7 @@ export async function syncGroupMembers(
       continue;
     }
     seen.add(member.user.id);
-    if (await upsertTelegramUser(membersRepo, chatId, member.user)) {
+    if (await upsertTelegramUser(membersRepo, chatId, member.user, onObservedUser)) {
       synced += 1;
     }
   }
@@ -54,7 +66,7 @@ export async function syncGroupMembers(
         continue;
       }
       seen.add(cachedMember.userId);
-      if (await upsertTelegramUser(membersRepo, chatId, member.user)) {
+      if (await upsertTelegramUser(membersRepo, chatId, member.user, onObservedUser)) {
         synced += 1;
       }
     } catch {
@@ -66,7 +78,7 @@ export async function syncGroupMembers(
     try {
       const member = await api.getChatMember(chatId, currentUserId);
       if (member.status !== "left" && member.status !== "kicked") {
-        if (await upsertTelegramUser(membersRepo, chatId, member.user)) {
+        if (await upsertTelegramUser(membersRepo, chatId, member.user, onObservedUser)) {
           synced += 1;
         }
       }

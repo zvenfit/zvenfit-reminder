@@ -311,6 +311,23 @@ export interface WorkspaceMember {
   updatedAt: Date;
 }
 
+export interface TelegramUser {
+  userId: number;
+  username: string | null;
+  displayName: string;
+  privateChatAvailable: boolean;
+  privateChatId: number | null;
+  locale: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface WorkspaceMemberProfile extends WorkspaceMember {
+  username: string | null;
+  displayName: string;
+  privateChatAvailable: boolean;
+}
+
 export interface ReminderDefinition extends ReminderDraft {
   workspaceId: string;
   reminderId: string;

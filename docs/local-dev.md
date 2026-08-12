@@ -94,6 +94,29 @@ INIT_DATA=$(npm run dev:init-data --silent)
 curl -H "X-Telegram-Init-Data: $INIT_DATA" http://localhost:3000/api/rules
 ```
 
+## Universal reminders (локальный cutover)
+
+Новый runtime по умолчанию выключен. Для изолированной проверки после применения
+всех YDB-миграций:
+
+1. Установи `UNIVERSAL_REMINDERS_ENABLED=1` только в локальном `.env`.
+2. Запусти polling-бота и выполни `/setup` в разрешённой группе от имени её
+   администратора. Команда создаст workspace с quiet hours `22:00–08:00`.
+3. Выполни `/sync`, чтобы перенести доступных боту участников в новую модель.
+4. Для личных напоминаний ответственный должен один раз отправить боту `/start`
+   в личном чате.
+
+Первые новые endpoints:
+
+```text
+GET  /api/reminders
+POST /api/reminders
+GET  /api/members
+```
+
+Они требуют валидный `X-Telegram-Init-Data` и активное членство в workspace.
+Legacy `/api/rules` остаётся доступным до переключения интерфейса.
+
 ## YDB Local (offline)
 
 Без Yandex Cloud аккаунта:
