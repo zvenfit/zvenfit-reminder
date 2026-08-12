@@ -1,8 +1,17 @@
-# Architecture and engineering notes
+# Current architecture and engineering notes
+
+> This document describes the checked-in payment-reminder prototype. The
+> approved redesign is documented in
+> [product-spec.md](product-spec.md),
+> [ux-design.md](ux-design.md),
+> [target-architecture.md](target-architecture.md), and
+> [implementation-plan.md](implementation-plan.md). Until the redesign is
+> implemented, do not treat the target documents as a description of current
+> runtime behavior.
 
 ## What the system does
 
-`zvenfit-reminder` manages monthly and one-off payment reminders for one
+The current `zvenfit-reminder` manages monthly and one-off payment reminders for one
 Telegram group. A Telegram Mini App provides rule CRUD, a timer-backed Cloud
 Function sends due reminders, and group members complete or skip reminder
 instances from inline buttons or bot commands.

@@ -1,6 +1,12 @@
 # zvenfit-reminder
 
-Telegram-бот для семейных напоминаний о платежах на Yandex Cloud Functions с YDB Serverless, Mini App и деплоем через GitHub Actions.
+Telegram-приложение для личных и групповых напоминаний: назначенный человек
+получает уведомления до явного выполнения дела. Проект работает на Yandex Cloud
+Functions, YDB Serverless и Telegram Mini App.
+
+Сейчас в репозитории находится платежно-ориентированный прототип с разовыми и
+ежемесячными правилами. Согласованный редизайн расширяет его до универсального
+диспетчера обязательств; текущая и целевая архитектуры описаны отдельно.
 
 Репозиторий: [github.com/zvenfit/zvenfit-reminder](https://github.com/zvenfit/zvenfit-reminder).
 
@@ -12,7 +18,13 @@ Telegram-бот для семейных напоминаний о платежа
 - `mini-app` — Telegram Mini App (Vite + React)
 - `infra/` — схема YDB, спецификация API Gateway, скрипты первичной настройки
 
-Подробные потоки, инварианты и известные ограничения: [docs/architecture.md](docs/architecture.md).
+Документация:
+
+- [текущая архитектура прототипа](docs/architecture.md);
+- [продуктовая спецификация](docs/product-spec.md);
+- [UX и визуальная система «Тихий пульс»](docs/ux-design.md);
+- [целевая архитектура и модель данных](docs/target-architecture.md);
+- [план реализации и перехода](docs/implementation-plan.md).
 
 ## Требования
 
