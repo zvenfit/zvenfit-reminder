@@ -8,3 +8,6 @@ export * from "./db/client.js";
 export * from "./db/rules-repository.js";
 export * from "./db/instances-repository.js";
 export * from "./db/members-repository.js";
+export * from "./db/transaction.js";
+export * from "./db/workspaces-repository.js";
+export * from "./db/reminders-repository.js";

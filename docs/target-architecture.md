@@ -115,12 +115,13 @@ validated in the same transaction as reminder creation or update.
 
 Primary key: `(workspace_id, reminder_id)`.
 
-Synchronous materialization index: `(state, next_due_at, workspace_id)`.
+Synchronous materialization index:
+`(state, next_reminder_start_at, workspace_id)`.
 
 This one-row-per-reminder table is the concurrency control point for recurrence:
 
 - `state`: `ready`, `blocked`, or `paused`;
-- next due timestamp when ready;
+- next due and first-notification timestamps when ready;
 - current occurrence ID when blocked;
 - schedule version used to calculate the next deadline;
 - updated timestamp.
@@ -225,10 +226,11 @@ Rules:
 - one-off reminders archive after their occurrence completes or is cancelled.
 
 Materialization scans `reminder_runtime` rows in `ready` state whose
-`next_due_at` is within the creation horizon. Completion atomically clears the
-active occurrence slot and calculates the first schedule date after `now`, so a
-long-overdue monthly task completed on 27 September next appears on 25 October,
-not retroactively on 25 September.
+`next_reminder_start_at` has arrived. This preserves long lead times without a
+guesswork creation horizon. Completion atomically clears the active occurrence
+slot and calculates the first schedule date after `now`, so a long-overdue
+monthly task completed on 27 September next appears on 25 October, not
+retroactively on 25 September.
 
 The Plan and ICS views may calculate future dates without persisting future
 occurrences. Persistence happens only for the current actionable occurrence.

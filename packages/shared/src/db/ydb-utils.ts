@@ -1,6 +1,4 @@
-import ydbSdk from "ydb-sdk";
-
-const { TypedValues, Types } = ydbSdk;
+import { TypedValues, Types } from "ydb-sdk";
 
 export type YdbColumn = {
   name?: string | null;
@@ -140,6 +138,13 @@ export function optionalUint8(value: number | null | undefined) {
     return TypedValues.optionalNull(Types.UINT8);
   }
   return TypedValues.optional(TypedValues.uint8(value));
+}
+
+export function optionalUint32(value: number | null | undefined) {
+  if (value == null) {
+    return TypedValues.optionalNull(Types.UINT32);
+  }
+  return TypedValues.optional(TypedValues.uint32(value));
 }
 
 export function optionalTimestamp(value: Date | null | undefined) {

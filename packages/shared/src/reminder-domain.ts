@@ -11,6 +11,12 @@ export const DEFAULT_ALL_DAY_REMINDER_TIME = "09:00";
 export const workspaceRoleSchema = z.enum(["owner", "organizer", "member"]);
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
 
+export const workspaceStatusSchema = z.enum(["active", "archived"]);
+export type WorkspaceStatus = z.infer<typeof workspaceStatusSchema>;
+
+export const membershipStatusSchema = z.enum(["active", "removed"]);
+export type MembershipStatus = z.infer<typeof membershipStatusSchema>;
+
 export const reminderVisibilitySchema = z.enum(["group", "private"]);
 export type ReminderVisibility = z.infer<typeof reminderVisibilitySchema>;
 
@@ -28,6 +34,9 @@ export type OccurrenceStatus = z.infer<typeof occurrenceStatusSchema>;
 
 export const deliveryStatusSchema = z.enum(["reserved", "sent", "failed", "unknown"]);
 export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
+
+export const reminderRuntimeStateSchema = z.enum(["ready", "blocked", "paused"]);
+export type ReminderRuntimeState = z.infer<typeof reminderRuntimeStateSchema>;
 
 export const localTimeSchema = z
   .string()
@@ -220,6 +229,7 @@ export const reminderDraftSchema = z
     assignment: assignmentSchema,
     watcherUserIds: z
       .array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+      .max(100)
       .default([])
       .refine((ids) => new Set(ids).size === ids.length, {
         message: "Watcher IDs must be unique",
@@ -267,6 +277,32 @@ export const reminderDraftSchema = z
   });
 export type ReminderDraft = z.infer<typeof reminderDraftSchema>;
 
+export interface Workspace {
+  workspaceId: string;
+  telegramChatId: number;
+  displayName: string;
+  ownerUserId: number;
+  timezone: string;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+  defaultAllDayReminderTime: string;
+  status: WorkspaceStatus;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface WorkspaceMember {
+  workspaceId: string;
+  userId: number;
+  role: WorkspaceRole;
+  status: MembershipStatus;
+  roleGrantedBy: number | null;
+  roleGrantedAt: Date | null;
+  lastObservedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 export interface ReminderDefinition extends ReminderDraft {
   workspaceId: string;
   reminderId: string;
@@ -293,5 +329,16 @@ export interface ReminderOccurrence {
   completedAt: Date | null;
   undoUntil: Date | null;
   createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ReminderRuntime {
+  workspaceId: string;
+  reminderId: string;
+  state: ReminderRuntimeState;
+  nextDueAt: Date | null;
+  nextReminderStartAt: Date | null;
+  currentOccurrenceId: string | null;
+  scheduleVersion: number;
   updatedAt: Date;
 }

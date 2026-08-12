@@ -1,9 +1,15 @@
-import ydbSdk from "ydb-sdk";
-import type { Driver as YdbDriverType, TableSession } from "ydb-sdk";
-
-const { Driver: YdbDriver, TypedValues, Types, getCredentialsFromEnv } = ydbSdk;
+import {
+  Driver as YdbDriver,
+  TypedValues,
+  Types,
+  getCredentialsFromEnv,
+  type Driver as YdbDriverType,
+  type TableSession,
+} from "ydb-sdk";
 
 let driverPromise: Promise<YdbDriverType> | null = null;
+
+export type SessionRunner = <T>(fn: (session: TableSession) => Promise<T>) => Promise<T>;
 
 export async function getDriver(endpoint: string, database: string): Promise<YdbDriverType> {
   if (!driverPromise) {
@@ -25,6 +31,11 @@ export async function withSession<T>(
 ): Promise<T> {
   const driver = await getDriver(endpoint, database);
   return driver.tableClient.withSession(fn);
+}
+
+export function createSessionRunner(endpoint: string, database: string): SessionRunner {
+  return <T>(fn: (session: TableSession) => Promise<T>) =>
+    withSession(endpoint, database, fn);
 }
 
 export { TypedValues, Types };
