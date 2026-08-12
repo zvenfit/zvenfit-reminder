@@ -376,6 +376,7 @@ export class OccurrenceActionsRepository {
   }
 
   async listCompletionFinalizationCandidates(
+    workspaceId: string,
     now: Date,
     limit = 100,
   ): Promise<CompletionFinalizationCandidate[]> {
@@ -387,15 +388,19 @@ export class OccurrenceActionsRepository {
         `
           DECLARE $now AS Timestamp;
           DECLARE $limit AS Uint64;
+          DECLARE $workspace_id AS Utf8;
           SELECT workspace_id, occurrence_id, undo_until
           FROM reminder_occurrences VIEW idx_occurrences_completion_finalize
-          WHERE status = 'completed' AND undo_until <= $now
+          WHERE status = 'completed'
+            AND undo_until <= $now
+            AND workspace_id = $workspace_id
           ORDER BY status, undo_until, workspace_id
           LIMIT $limit;
         `,
         {
           $now: timestampValue(now),
           $limit: TypedValues.uint64(limit),
+          $workspace_id: TypedValues.utf8(workspaceId),
         },
       );
       return mapResultRows(resultSets[0]).map((row) => ({

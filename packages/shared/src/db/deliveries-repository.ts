@@ -101,7 +101,11 @@ export class DeliveriesRepository {
     this.runSession = runSession ?? createSessionRunner(endpoint, database);
   }
 
-  async listCandidates(now: Date, limit = 100): Promise<DeliveryCandidate[]> {
+  async listCandidates(
+    workspaceId: string,
+    now: Date,
+    limit = 100,
+  ): Promise<DeliveryCandidate[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
       throw new Error("Candidate limit must be an integer between 1 and 1000");
     }
@@ -110,15 +114,19 @@ export class DeliveriesRepository {
         `
           DECLARE $now AS Timestamp;
           DECLARE $limit AS Uint64;
+          DECLARE $workspace_id AS Utf8;
           SELECT workspace_id, occurrence_id, next_notification_at
           FROM reminder_occurrences VIEW idx_occurrences_dispatch
-          WHERE notification_state = 'waiting' AND next_notification_at <= $now
+          WHERE notification_state = 'waiting'
+            AND next_notification_at <= $now
+            AND workspace_id = $workspace_id
           ORDER BY notification_state, next_notification_at, workspace_id
           LIMIT $limit;
         `,
         {
           $now: timestampValue(now),
           $limit: TypedValues.uint64(limit),
+          $workspace_id: TypedValues.utf8(workspaceId),
         },
       );
       return mapResultRows(resultSets[0]).map((row) => ({

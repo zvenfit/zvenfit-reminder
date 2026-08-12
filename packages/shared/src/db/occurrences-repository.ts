@@ -166,7 +166,11 @@ export class OccurrencesRepository {
     this.runSession = runSession ?? createSessionRunner(endpoint, database);
   }
 
-  async listRuntimeCandidates(now: Date, limit = 100): Promise<RuntimeCandidate[]> {
+  async listRuntimeCandidates(
+    workspaceId: string,
+    now: Date,
+    limit = 100,
+  ): Promise<RuntimeCandidate[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000) {
       throw new Error("Candidate limit must be an integer between 1 and 1000");
     }
@@ -175,15 +179,19 @@ export class OccurrencesRepository {
         `
           DECLARE $now AS Timestamp;
           DECLARE $limit AS Uint64;
+          DECLARE $workspace_id AS Utf8;
           SELECT workspace_id, reminder_id, next_reminder_start_at
           FROM reminder_runtime VIEW idx_reminder_runtime_start
-          WHERE state = 'ready' AND next_reminder_start_at <= $now
+          WHERE state = 'ready'
+            AND next_reminder_start_at <= $now
+            AND workspace_id = $workspace_id
           ORDER BY state, next_reminder_start_at, workspace_id
           LIMIT $limit;
         `,
         {
           $now: timestampValue(now),
           $limit: TypedValues.uint64(limit),
+          $workspace_id: TypedValues.utf8(workspaceId),
         },
       );
       return mapResultRows(resultSets[0]).map((row) => ({

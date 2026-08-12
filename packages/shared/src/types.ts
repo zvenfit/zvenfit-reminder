@@ -69,6 +69,7 @@ export interface AppConfig {
   defaultTimezone: string;
   miniAppUrl: string;
   adminUserIds: number[];
+  universalRemindersEnabled: boolean;
 }
 
 export function loadConfig(): AppConfig {
@@ -93,5 +94,6 @@ export function loadConfig(): AppConfig {
       .map((s) => s.trim())
       .filter(Boolean)
       .map(Number),
+    universalRemindersEnabled: process.env.UNIVERSAL_REMINDERS_ENABLED === "1",
   };
 }

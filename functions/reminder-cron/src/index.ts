@@ -10,6 +10,7 @@ import {
 } from "@zvenfit-reminder/shared";
 import { InlineKeyboard } from "grammy";
 import { randomUUID } from "node:crypto";
+import { runUniversalDispatcher } from "./universal-dispatcher.js";
 
 interface CronEvent {
   messages?: unknown[];
@@ -41,8 +42,9 @@ async function sendTelegramMessage(
   return data.result?.message_id ?? 0;
 }
 
-export async function handler(_event: CronEvent = {}): Promise<{ statusCode: number; body: string }> {
-  const config = loadConfig();
+async function runLegacyDispatcher(
+  config: ReturnType<typeof loadConfig>,
+): Promise<{ statusCode: number; body: string }> {
   const rulesRepo = new RulesRepository(config.ydbEndpoint, config.ydbDatabase);
   const instancesRepo = new InstancesRepository(config.ydbEndpoint, config.ydbDatabase);
   const membersRepo = new MembersRepository(config.ydbEndpoint, config.ydbDatabase);
@@ -107,4 +109,13 @@ export async function handler(_event: CronEvent = {}): Promise<{ statusCode: num
     statusCode: 200,
     body: JSON.stringify({ ok: true, sent, retried, errors, checkedRules: rules.length }),
   };
+}
+
+export async function handler(_event: CronEvent = {}): Promise<{ statusCode: number; body: string }> {
+  const config = loadConfig();
+  if (config.universalRemindersEnabled) {
+    const stats = await runUniversalDispatcher(config);
+    return { statusCode: 200, body: JSON.stringify({ ok: true, ...stats }) };
+  }
+  return runLegacyDispatcher(config);
 }
