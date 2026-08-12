@@ -185,6 +185,10 @@ summary:focus-visible {
   margin-top: 42px;
 }
 
+.access-section {
+  margin-top: 24px;
+}
+
 .section-heading {
   display: flex;
   align-items: center;
@@ -439,6 +443,99 @@ summary:focus-visible {
   border-radius: 18px;
   background: transparent;
   text-align: left;
+}
+
+.access-panel {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--paper) 74%, transparent);
+}
+
+.access-panel > summary {
+  display: flex;
+  min-height: 68px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 15px;
+  padding: 14px 16px;
+  list-style: none;
+}
+
+.access-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.access-panel > summary > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.access-panel > summary b {
+  font-family: ui-rounded, "SF Pro Rounded", sans-serif;
+  font-size: 15px;
+}
+
+.access-panel > summary small {
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.access-panel > summary > span:last-child {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--paper-muted);
+  color: var(--signal);
+  transition: transform 160ms ease;
+}
+
+.access-panel[open] > summary > span:last-child {
+  transform: rotate(45deg);
+}
+
+.access-list {
+  border-top: 1px solid var(--line);
+}
+
+.access-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) minmax(118px, 145px);
+  gap: 10px;
+  align-items: center;
+  padding: 11px 14px;
+}
+
+.access-row + .access-row {
+  border-top: 1px solid var(--line);
+}
+
+.access-person {
+  display: grid;
+  min-width: 0;
+}
+
+.access-person b {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-person small {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.access-row select {
+  min-height: 38px;
+  padding: 8px 10px;
+  font-size: 11px;
 }
 
 .floating-create {

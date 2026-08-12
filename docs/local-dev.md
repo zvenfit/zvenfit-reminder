@@ -116,6 +116,7 @@ GET  /api/members
 POST /api/occurrences/:id/complete
 POST /api/occurrences/:id/snooze
 POST /api/occurrences/:id/undo-completion
+PATCH /api/members/:userId/role
 ```
 
 Они требуют валидный `X-Telegram-Init-Data` и активное членство в workspace.

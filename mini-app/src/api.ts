@@ -274,6 +274,21 @@ export function undoOccurrenceCompletion(
   });
 }
 
+export function updateMemberRole(
+  userId: number,
+  role: "organizer" | "member",
+): Promise<{ member: WorkspaceMember }> {
+  if (MOCK_MODE) {
+    const member = mockMembers.find((item) => item.userId === userId)!;
+    member.role = role;
+    return Promise.resolve({ member });
+  }
+  return api(`/api/members/${userId}/role`, {
+    method: "PATCH",
+    body: JSON.stringify({ role }),
+  });
+}
+
 declare global {
   interface Window {
     Telegram?: {

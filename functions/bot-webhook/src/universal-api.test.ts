@@ -49,6 +49,12 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     members: {
       getByUserId: vi.fn().mockResolvedValue(member),
       listProfiles: vi.fn().mockResolvedValue([]),
+      setRole: vi.fn().mockImplementation(async (_workspaceId, userId, role) => ({
+        workspaceId: "workspace-a",
+        userId,
+        role,
+        status: "active",
+      })),
     },
     reminders: {
       listForActor: vi.fn().mockResolvedValue([]),
@@ -164,6 +170,28 @@ describe("handleUniversalApi", () => {
 
     expect(response?.statusCode).toBe(400);
     expect(deps.occurrenceActions.execute).not.toHaveBeenCalled();
+  });
+
+  it("updates a member role through the owner-scoped repository transition", async () => {
+    const deps = dependencies(actor("owner"));
+    const response = await handleUniversalApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/members/30/role",
+        body: JSON.stringify({ role: "organizer" }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.members.setRole).toHaveBeenCalledWith(
+      "workspace-a",
+      30,
+      "organizer",
+      20,
+    );
   });
 
   it("lets an ordinary member create a private reminder for themselves", async () => {

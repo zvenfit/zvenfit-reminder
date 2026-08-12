@@ -5,6 +5,8 @@ import {
   PrivateChatUnavailableError,
   RemindersRepository,
   WorkspaceMembersRepository,
+  WorkspaceMemberNotFoundError,
+  WorkspaceRoleChangeForbiddenError,
   WorkspacesRepository,
   UndoWindowExpiredError,
   canCreateReminder,
@@ -24,7 +26,7 @@ import {
 
 export interface UniversalApiDependencies {
   workspaces: Pick<WorkspacesRepository, "getByTelegramChatId">;
-  members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles">;
+  members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles" | "setRole">;
   reminders: Pick<RemindersRepository, "listForActor" | "create">;
   occurrences: Pick<OccurrencesRepository, "listActionableForActor">;
   occurrenceActions: {
@@ -54,7 +56,8 @@ function isUniversalRoute(method: string, path: string): boolean {
     (method === "POST" && (
       path === "/api/reminders" ||
       /^\/api\/occurrences\/[^/]+\/(complete|snooze|undo-completion)$/.test(path)
-    ))
+    )) ||
+    (method === "PATCH" && /^\/api\/members\/\d+\/role$/.test(path))
   );
 }
 
@@ -104,6 +107,40 @@ export async function handleUniversalApi(
   if (method === "GET" && path === "/api/members") {
     const members = await dependencies.members.listProfiles(workspace.workspaceId);
     return jsonResponse(200, { members });
+  }
+
+  const memberRoleMatch = path.match(/^\/api\/members\/(\d+)\/role$/);
+  if (method === "PATCH" && memberRoleMatch) {
+    const targetUserId = Number(memberRoleMatch[1]);
+    if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+      return jsonResponse(400, { error: "Invalid user ID", code: "validation_failed" });
+    }
+    let role: unknown;
+    try {
+      role = JSON.parse(event.body ?? "{}").role;
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    if (role !== "organizer" && role !== "member") {
+      return jsonResponse(400, { error: "Role must be organizer or member", code: "validation_failed" });
+    }
+    try {
+      const member = await dependencies.members.setRole(
+        workspace.workspaceId,
+        targetUserId,
+        role,
+        actor.userId,
+      );
+      return jsonResponse(200, { member });
+    } catch (error) {
+      if (error instanceof WorkspaceRoleChangeForbiddenError) {
+        return jsonResponse(403, { error: "Only the owner can change roles", code: "forbidden" });
+      }
+      if (error instanceof WorkspaceMemberNotFoundError) {
+        return jsonResponse(404, { error: "Workspace member not found", code: "not_found" });
+      }
+      throw error;
+    }
   }
 
   const occurrenceActionMatch = path.match(

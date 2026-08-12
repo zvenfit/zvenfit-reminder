@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   membershipStatusSchema,
   workspaceRoleSchema,
@@ -15,6 +16,20 @@ import {
   parseYdbTimestampRequired,
   timestampValue,
 } from "./ydb-utils.js";
+
+export class WorkspaceRoleChangeForbiddenError extends Error {
+  constructor() {
+    super("Only the workspace owner can change member roles");
+    this.name = "WorkspaceRoleChangeForbiddenError";
+  }
+}
+
+export class WorkspaceMemberNotFoundError extends Error {
+  constructor(readonly userId: number) {
+    super(`Workspace member ${userId} was not found`);
+    this.name = "WorkspaceMemberNotFoundError";
+  }
+}
 
 function nullableNumber(value: unknown): number | null {
   return value == null ? null : Number(value);
@@ -166,6 +181,110 @@ export class WorkspaceMembersRepository {
           },
         );
         return member;
+      }),
+    );
+  }
+
+  async setRole(
+    workspaceId: string,
+    targetUserId: number,
+    role: "organizer" | "member",
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<WorkspaceMember> {
+    return this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $target_user_id AS Int64;
+            SELECT owner_user_id, status FROM workspaces
+            WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT * FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT * FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $target_user_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $target_user_id: TypedValues.int64(targetUserId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const actorRow = mapResultRows(resultSets[1])[0];
+        const targetRow = mapResultRows(resultSets[2])[0];
+        if (!targetRow) {
+          throw new WorkspaceMemberNotFoundError(targetUserId);
+        }
+        const actor = actorRow ? rowToWorkspaceMember(actorRow) : null;
+        const target = rowToWorkspaceMember(targetRow);
+        if (
+          !workspaceRow ||
+          getField(workspaceRow, "status") !== "active" ||
+          !actor ||
+          actor.status !== "active" ||
+          actor.role !== "owner" ||
+          Number(getField(workspaceRow, "owner_user_id")) !== actorUserId ||
+          target.status !== "active" ||
+          targetUserId === actorUserId
+        ) {
+          throw new WorkspaceRoleChangeForbiddenError();
+        }
+        const updated: WorkspaceMember = {
+          ...target,
+          role,
+          roleGrantedBy: actorUserId,
+          roleGrantedAt: now,
+          updatedAt: now,
+        };
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $target_user_id AS Int64;
+            DECLARE $role AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $entity_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            UPDATE workspace_members SET
+              role = $role,
+              role_granted_by = $actor_user_id,
+              role_granted_at = $now,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND user_id = $target_user_id
+              AND status = 'active';
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $entity_id, $now, $event_id, 'workspace_member',
+              'workspace_member.role_changed', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $target_user_id: TypedValues.int64(targetUserId),
+            $role: TypedValues.utf8(role),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $entity_id: TypedValues.utf8(`member:${targetUserId}`),
+            $payload: TypedValues.jsonDocument(
+              JSON.stringify({ from: target.role, to: role }),
+            ),
+          },
+        );
+        return updated;
       }),
     );
   }

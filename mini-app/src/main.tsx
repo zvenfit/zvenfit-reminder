@@ -9,6 +9,7 @@ import {
   loadDashboard,
   snoozeOccurrence,
   undoOccurrenceCompletion,
+  updateMemberRole,
   syncMembers,
   type CreateReminderBody,
   type DeadlineTiming,
@@ -206,11 +207,14 @@ function App() {
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
+  const [updatingRoleUserId, setUpdatingRoleUserId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
 
-  const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id;
+  const previewMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
+  const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
+    (previewMode ? members[0]?.userId : undefined);
   const memberMap = useMemo(
     () => new Map(members.map((member) => [member.userId, member])),
     [members],
@@ -402,6 +406,26 @@ function App() {
       setError(errorMessage(requestError));
     } finally {
       setActingOccurrenceId(null);
+    }
+  }
+
+  async function changeMemberRole(
+    userId: number,
+    role: "organizer" | "member",
+  ) {
+    setUpdatingRoleUserId(userId);
+    setError(null);
+    try {
+      const { member } = await updateMemberRole(userId, role);
+      setMembers((current) =>
+        current.map((item) => (item.userId === userId ? { ...item, role: member.role } : item)),
+      );
+      setNotice(role === "organizer" ? "Доступ организатора выдан" : "Доступ организатора отозван");
+      window.setTimeout(() => setNotice(null), 2600);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setUpdatingRoleUserId(null);
     }
   }
 
@@ -846,6 +870,39 @@ function App() {
           </div>
         )}
       </section>
+
+      {actor?.role === "owner" ? (
+        <section className="access-section">
+          <details className="access-panel">
+            <summary>
+              <span><b>Доступы</b><small>Кто может создавать групповые поручения</small></span>
+              <span aria-hidden="true">＋</span>
+            </summary>
+            <div className="access-list">
+              {members
+                .filter((member) => member.role !== "owner")
+                .map((member) => (
+                  <label className="access-row" key={member.userId}>
+                    <span className="avatar">{member.displayName.slice(0, 1).toUpperCase()}</span>
+                    <span className="access-person"><b>{member.displayName}</b><small>{member.username ? `@${member.username}` : "Участник группы"}</small></span>
+                    <select
+                      aria-label={`Роль: ${member.displayName}`}
+                      disabled={updatingRoleUserId === member.userId}
+                      value={member.role === "organizer" ? "organizer" : "member"}
+                      onChange={(event) => void changeMemberRole(
+                        member.userId,
+                        event.target.value as "organizer" | "member",
+                      )}
+                    >
+                      <option value="member">Участник</option>
+                      <option value="organizer">Организатор</option>
+                    </select>
+                  </label>
+                ))}
+            </div>
+          </details>
+        </section>
+      ) : null}
 
       <button className="floating-create" onClick={openCreate}>
         <span aria-hidden="true">＋</span> Новое напоминание
