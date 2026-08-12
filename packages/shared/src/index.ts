@@ -11,3 +11,5 @@ export * from "./db/members-repository.js";
 export * from "./db/transaction.js";
 export * from "./db/workspaces-repository.js";
 export * from "./db/reminders-repository.js";
+export * from "./db/occurrences-repository.js";
+export * from "./db/deliveries-repository.js";

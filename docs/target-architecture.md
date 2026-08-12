@@ -150,7 +150,7 @@ Important fields:
 - status: `scheduled`, `pending`, `overdue`, `completed`, or `cancelled`;
 - notification state: `waiting` or `stopped`;
 - assignment snapshot;
-- content and notification-policy snapshot;
+- content, timezone, and notification-policy snapshot;
 - next notification timestamp and sequence;
 - snooze actor and expiry;
 - latest live Telegram chat/message IDs;

@@ -32,8 +32,16 @@ export const occurrenceStatusSchema = z.enum([
 ]);
 export type OccurrenceStatus = z.infer<typeof occurrenceStatusSchema>;
 
+export const occurrenceNotificationStateSchema = z.enum(["waiting", "stopped"]);
+export type OccurrenceNotificationState = z.infer<
+  typeof occurrenceNotificationStateSchema
+>;
+
 export const deliveryStatusSchema = z.enum(["reserved", "sent", "failed", "unknown"]);
 export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
+
+export const deliveryTypeSchema = z.enum(["initial", "repeat", "escalation", "state_update"]);
+export type DeliveryType = z.infer<typeof deliveryTypeSchema>;
 
 export const reminderRuntimeStateSchema = z.enum(["ready", "blocked", "paused"]);
 export type ReminderRuntimeState = z.infer<typeof reminderRuntimeStateSchema>;
@@ -323,11 +331,48 @@ export interface ReminderOccurrence {
   allDay: boolean;
   reminderStartAt: Date;
   status: OccurrenceStatus;
+  notificationState: OccurrenceNotificationState;
+  assignment: ReminderAssignment;
+  title: string;
+  description: string | null;
+  actionUrl: string | null;
+  amountMinor: number | null;
+  currency: string | null;
+  visibility: ReminderVisibility;
+  timezone: string;
+  repeatIntervalMinutes: number;
+  ignoreQuietHours: boolean;
+  escalation: EscalationPolicy;
   nextNotificationAt: Date | null;
   notificationSequence: number;
+  snoozedBy: number | null;
+  snoozedAt: Date | null;
+  snoozeUntil: Date | null;
+  latestMessageChatId: number | null;
+  latestMessageId: number | null;
   completedBy: number | null;
   completedAt: Date | null;
   undoUntil: Date | null;
+  cancelledBy: number | null;
+  cancellationReason: string | null;
+  cancelledAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface NotificationDelivery {
+  workspaceId: string;
+  deliveryKey: string;
+  occurrenceId: string;
+  reminderId: string;
+  deliveryType: DeliveryType;
+  sequence: number;
+  scheduledAt: Date;
+  claimedAt: Date;
+  status: DeliveryStatus;
+  telegramChatId: number | null;
+  telegramMessageId: number | null;
+  errorCode: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
