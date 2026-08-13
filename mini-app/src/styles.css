@@ -130,7 +130,76 @@ summary:focus-visible {
 }
 
 .home-intro {
-  padding: 42px 0 30px;
+  padding: 32px 0 30px;
+}
+
+.workspace-switcher {
+  position: relative;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  min-height: 68px;
+  margin-top: 22px;
+  padding: 12px 14px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--signal) 24%, var(--line));
+  border-radius: 18px;
+  background: linear-gradient(105deg, var(--paper), color-mix(in srgb, var(--signal) 7%, var(--paper)));
+  box-shadow: 0 10px 30px rgba(41, 66, 145, 0.08);
+}
+
+.workspace-switcher::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 4px;
+  background: var(--signal);
+  content: "";
+}
+
+.workspace-switcher__signal {
+  width: 12px;
+  height: 12px;
+  border: 3px solid color-mix(in srgb, var(--signal) 24%, var(--paper));
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--signal) 9%, transparent);
+}
+
+.workspace-switcher__copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.workspace-switcher__copy small,
+.workspace-switcher__hint {
+  color: var(--ink-faint);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-switcher__copy b,
+.workspace-switcher__copy select {
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: ui-rounded, "SF Pro Rounded", sans-serif;
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -0.025em;
+  text-overflow: ellipsis;
+}
+
+.workspace-switcher__copy select {
+  width: 100%;
+  padding: 0 24px 0 0;
 }
 
 .eyebrow {
@@ -387,6 +456,48 @@ summary:focus-visible {
   gap: 13px;
   align-items: center;
   padding: 15px 16px;
+}
+
+.plan-row--paused {
+  grid-template-columns: 40px minmax(0, 1fr) 10px;
+  background: color-mix(in srgb, var(--amber) 7%, var(--paper));
+}
+
+.reassign-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--amber) 24%, var(--line));
+}
+
+.reassign-row > span {
+  grid-column: 1 / -1;
+  color: #9a641e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reassign-row select,
+.reassign-row button {
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--paper);
+  font-size: 12px;
+}
+
+.reassign-row select {
+  min-width: 0;
+  padding: 0 10px;
+}
+
+.reassign-row button {
+  padding: 0 12px;
+  border-color: color-mix(in srgb, var(--amber) 38%, var(--line));
+  color: #8b5a1b;
+  font-weight: 800;
 }
 
 .plan-row + .plan-row {

@@ -1,7 +1,7 @@
 # Product specification: persistent reminders
 
-Status: approved target product design. The checked-in application is still the
-payment-oriented prototype described in [architecture.md](architecture.md).
+Status: approved product design. Core universal reminders are implemented;
+calendar subscriptions and later roadmap items remain planned separately.
 
 ## Product thesis
 
@@ -37,6 +37,10 @@ obvious.
 A workspace represents one Telegram group. All domain keys and authorization
 checks are scoped by `workspaceId`.
 
+One bot installation may serve many workspaces. A user sees only groups where
+they have active membership and explicitly selects the current workspace in the
+Mini App. Membership and role are independent in every group.
+
 | Role | Capabilities |
 | --- | --- |
 | Owner | Manage roles and workspace settings; create and manage any group reminder; create private reminders for members. |
@@ -53,6 +57,11 @@ to a group, so the backend verifies every selected user with `getChatMember`
 against the workspace group before activating membership. Future joins and
 group activity are observed automatically. Starting the bot is required only
 when a member needs private notifications.
+
+When Telegram reports that a member has left a group, that workspace membership
+becomes removed. Active reminders assigned to the user are paused, pending
+notifications stop, and owners and organizers are notified to reassign them.
+Reassignment is limited to active members of the same workspace.
 
 ## Reminder content
 

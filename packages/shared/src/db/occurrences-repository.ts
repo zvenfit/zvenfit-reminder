@@ -225,6 +225,33 @@ export class OccurrencesRepository {
     });
   }
 
+  async findByIdForActor(
+    occurrenceId: string,
+    actorUserId: number,
+  ): Promise<ReminderOccurrence | null> {
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          DECLARE $occurrence_id AS Utf8;
+          DECLARE $actor_user_id AS Int64;
+          SELECT occurrence.* FROM reminder_occurrences VIEW idx_occurrences_id AS occurrence
+          INNER JOIN workspace_members AS member
+            ON member.workspace_id = occurrence.workspace_id
+          WHERE occurrence.occurrence_id = $occurrence_id
+            AND member.user_id = $actor_user_id
+            AND member.status = 'active'
+          LIMIT 1;
+        `,
+        {
+          $occurrence_id: TypedValues.utf8(occurrenceId),
+          $actor_user_id: TypedValues.int64(actorUserId),
+        },
+      );
+      const row = mapResultRows(resultSets[0])[0];
+      return row ? rowToOccurrence(row) : null;
+    });
+  }
+
   async listActionableForActor(
     workspaceId: string,
     actorUserId: number,

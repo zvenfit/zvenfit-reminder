@@ -57,12 +57,21 @@ function dependencies(item = occurrence(), actor = member()) {
     workspaces: {
       getByTelegramChatId: vi.fn().mockResolvedValue({
         workspaceId: "workspace-a",
+        telegramChatId: -100123,
+        status: "active",
+      }),
+      getById: vi.fn().mockResolvedValue({
+        workspaceId: "workspace-a",
+        telegramChatId: -100123,
         status: "active",
       }),
     },
     members: { getByUserId: vi.fn().mockResolvedValue(actor) },
     reminders: { getById: vi.fn().mockResolvedValue(reminder) },
-    occurrences: { getById: vi.fn().mockResolvedValue(item) },
+    occurrences: {
+      getById: vi.fn().mockResolvedValue(item),
+      findByIdForActor: vi.fn().mockResolvedValue(item),
+    },
     actions: {
       complete: vi.fn().mockResolvedValue({ ...item, status: "completed" }),
       snooze: vi.fn().mockResolvedValue(item),
@@ -180,6 +189,7 @@ describe("executeUniversalOccurrenceAction", () => {
       config,
       {
         source: "mini-app",
+        workspaceId: "workspace-a",
         action: "done",
         occurrenceId: "occurrence-a",
         actorUserId: 20,

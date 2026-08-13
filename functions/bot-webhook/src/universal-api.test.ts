@@ -41,10 +41,11 @@ function actor(role: WorkspaceMember["role"] = "member") {
 function dependencies(member: WorkspaceMember | null = actor()) {
   return {
     workspaces: {
-      getByTelegramChatId: vi.fn().mockResolvedValue({
+      getById: vi.fn().mockResolvedValue({
         workspaceId: "workspace-a",
         status: "active",
       }),
+      listForUser: vi.fn().mockResolvedValue([]),
     },
     members: {
       getByUserId: vi.fn().mockResolvedValue(member),
@@ -58,6 +59,12 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     },
     reminders: {
       listForActor: vi.fn().mockResolvedValue([]),
+      reassign: vi.fn().mockResolvedValue({
+        workspaceId: "workspace-a",
+        reminderId: "reminder-a",
+        status: "active",
+        assignment: { mode: "person", responsibleUserId: 30 },
+      }),
       create: vi.fn().mockImplementation(async (_workspaceId, creatorUserId, draft) => ({
         ...draft,
         workspaceId: "workspace-a",
@@ -91,10 +98,29 @@ const privateReminderBody = {
 };
 
 describe("handleUniversalApi", () => {
+  const workspaceHeaders = { "X-Workspace-Id": "workspace-a" };
+
+  it("lists every active workspace available to the actor", async () => {
+    const deps = dependencies();
+    deps.workspaces.listForUser = vi.fn().mockResolvedValue([
+      { workspaceId: "workspace-a", displayName: "Дом", role: "member" },
+      { workspaceId: "workspace-b", displayName: "Работа", role: "organizer" },
+    ]);
+    const response = await handleUniversalApi(
+      { httpMethod: "GET", path: "/api/workspaces" },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(JSON.parse(response?.body ?? "{}").workspaces).toHaveLength(2);
+  });
+
   it("requires active workspace membership", async () => {
     const deps = dependencies(null);
     const response = await handleUniversalApi(
-      { httpMethod: "GET", path: "/api/reminders" },
+      { httpMethod: "GET", path: "/api/reminders", headers: workspaceHeaders },
       config,
       initData,
       deps,
@@ -104,10 +130,25 @@ describe("handleUniversalApi", () => {
     expect(deps.reminders.listForActor).not.toHaveBeenCalled();
   });
 
+  it("does not reveal whether an unavailable workspace exists", async () => {
+    const deps = dependencies();
+    deps.workspaces.getById = vi.fn().mockResolvedValue(null);
+    const response = await handleUniversalApi(
+      { httpMethod: "GET", path: "/api/reminders", headers: workspaceHeaders },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(404);
+    expect(JSON.parse(response?.body ?? "{}").code).toBe("not_found");
+    expect(deps.members.getByUserId).not.toHaveBeenCalled();
+  });
+
   it("lists only reminders visible to the authenticated actor", async () => {
     const deps = dependencies();
     const response = await handleUniversalApi(
-      { httpMethod: "GET", path: "/api/reminders" },
+      { httpMethod: "GET", path: "/api/reminders", headers: workspaceHeaders },
       config,
       initData,
       deps,
@@ -120,7 +161,7 @@ describe("handleUniversalApi", () => {
   it("returns the actor's actionable occurrence feed", async () => {
     const deps = dependencies();
     const response = await handleUniversalApi(
-      { httpMethod: "GET", path: "/api/dashboard" },
+      { httpMethod: "GET", path: "/api/dashboard", headers: workspaceHeaders },
       config,
       initData,
       deps,
@@ -139,6 +180,7 @@ describe("handleUniversalApi", () => {
       {
         httpMethod: "POST",
         path: "/api/occurrences/occurrence-a/complete",
+        headers: workspaceHeaders,
         body: "{}",
       },
       config,
@@ -149,6 +191,7 @@ describe("handleUniversalApi", () => {
     expect(response?.statusCode).toBe(200);
     expect(deps.occurrenceActions.execute).toHaveBeenCalledWith({
       source: "mini-app",
+      workspaceId: "workspace-a",
       action: "done",
       occurrenceId: "occurrence-a",
       actorUserId: 20,
@@ -161,6 +204,7 @@ describe("handleUniversalApi", () => {
       {
         httpMethod: "POST",
         path: "/api/occurrences/occurrence-a/snooze",
+        headers: workspaceHeaders,
         body: JSON.stringify({ minutes: 5 }),
       },
       config,
@@ -178,6 +222,7 @@ describe("handleUniversalApi", () => {
       {
         httpMethod: "PATCH",
         path: "/api/members/30/role",
+        headers: workspaceHeaders,
         body: JSON.stringify({ role: "organizer" }),
       },
       config,
@@ -194,12 +239,36 @@ describe("handleUniversalApi", () => {
     );
   });
 
+  it("reassigns a paused reminder inside the selected workspace", async () => {
+    const deps = dependencies(actor("organizer"));
+    const response = await handleUniversalApi(
+      {
+        httpMethod: "POST",
+        path: "/api/reminders/reminder-a/reassign",
+        headers: workspaceHeaders,
+        body: JSON.stringify({ responsibleUserId: 30 }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.reminders.reassign).toHaveBeenCalledWith(
+      "workspace-a",
+      "reminder-a",
+      30,
+      20,
+    );
+  });
+
   it("lets an ordinary member create a private reminder for themselves", async () => {
     const deps = dependencies();
     const response = await handleUniversalApi(
       {
         httpMethod: "POST",
         path: "/api/reminders",
+        headers: workspaceHeaders,
         body: JSON.stringify(privateReminderBody),
       },
       config,
@@ -221,6 +290,7 @@ describe("handleUniversalApi", () => {
       {
         httpMethod: "POST",
         path: "/api/reminders",
+        headers: workspaceHeaders,
         body: JSON.stringify({ ...privateReminderBody, visibility: "group" }),
       },
       config,
@@ -239,6 +309,7 @@ describe("handleUniversalApi", () => {
       {
         httpMethod: "POST",
         path: "/api/reminders",
+        headers: workspaceHeaders,
         body: JSON.stringify({
           ...privateReminderBody,
           assignment: { mode: "person", responsibleUserId: 30 },

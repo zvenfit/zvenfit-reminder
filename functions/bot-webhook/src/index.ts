@@ -2,6 +2,7 @@ import {
   InstancesRepository,
   MembersRepository,
   OccurrenceNotActionableError,
+  RemindersRepository,
   RulesRepository,
   UndoWindowExpiredError,
   WorkspaceMembersRepository,
@@ -29,13 +30,10 @@ import {
   updateRuleSchema,
 } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
-import {
-  MEMBER_IMPORT_REQUEST_ID,
-  canImportWorkspaceMembers,
-  importSharedGroupMembers,
-} from "./member-import.js";
+import { importSharedGroupMembers } from "./member-import.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
 import { buildStartResponse } from "./start-response.js";
+import { managedWorkspaces, workspaceForMemberImport } from "./bot-workspaces.js";
 import {
   UniversalOccurrenceActionForbiddenError,
   UniversalOccurrenceActionNotFoundError,
@@ -146,7 +144,7 @@ export function getBot(): Bot {
     config.botToken,
     cachedBotInfo ? { botInfo: cachedBotInfo } : undefined,
   );
-  const observeSyncedGroupUser = config.universalRemindersEnabled
+  const observeSyncedGroupUser = (chatId: number) => config.universalRemindersEnabled
     ? async (user: SyncedTelegramUser) =>
         observeTelegramIdentity(
           config,
@@ -157,17 +155,23 @@ export function getBot(): Bot {
             lastName: user.last_name,
             languageCode: user.language_code,
           },
-          { id: config.allowedChatId, type: "group" },
+          { id: chatId, type: "group" },
         )
     : undefined;
 
-  // Whitelist: только разрешённая группа и админы в личке
+  // Universal mode authorizes each group through its workspace. Legacy mode
+  // keeps the historical single-chat boundary.
   bot.use(async (ctx, next) => {
     const chatId = ctx.chat?.id;
     const userId = ctx.from?.id;
-    const isAllowedChat = chatId === config.allowedChatId;
+    const isGroupChat = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
+    const isAllowedChat = config.universalRemindersEnabled
+      ? isGroupChat && chatId != null &&
+        (await workspacesRepo.getByTelegramChatId(chatId))?.status === "active"
+      : chatId === config.allowedChatId;
     const isPrivateAdmin = ctx.chat?.type === "private" && userId != null && config.adminUserIds.includes(userId);
-    const isAllowedPrivate = ctx.chat?.type === "private" && config.adminUserIds.length === 0;
+    const isAllowedPrivate = !config.universalRemindersEnabled &&
+      ctx.chat?.type === "private" && config.adminUserIds.length === 0;
     const callbackData = ctx.callbackQuery && "data" in ctx.callbackQuery
       ? ctx.callbackQuery.data
       : null;
@@ -187,6 +191,11 @@ export function getBot(): Bot {
       ctx.chat?.type === "private" &&
       userId != null &&
       ctx.message?.users_shared != null;
+    const isUniversalGroupSetup =
+      config.universalRemindersEnabled &&
+      isGroupChat &&
+      userId != null &&
+      ctx.message?.text?.startsWith("/setup") === true;
 
     if (
       !isAllowedChat &&
@@ -194,18 +203,20 @@ export function getBot(): Bot {
       !isAllowedPrivate &&
       !isUniversalPrivateCallback &&
       !isUniversalPrivateStart &&
-      !isUniversalPrivateUsersShared
+      !isUniversalPrivateUsersShared &&
+      !isUniversalGroupSetup
     ) {
       return;
     }
 
-    if (chatId === config.allowedChatId && userId) {
+    if (isAllowedChat && chatId != null && userId) {
       const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ") || "User";
       // Кэшируем участников группы для Mini App
       await membersRepo.upsert(chatId, userId, ctx.from?.username ?? null, displayName);
     }
 
-    if (config.universalRemindersEnabled && ctx.from && ctx.chat) {
+    if (config.universalRemindersEnabled && ctx.from && ctx.chat &&
+      (ctx.chat.type === "private" || isAllowedChat)) {
       await observeTelegramIdentity(
         config,
         {
@@ -226,17 +237,16 @@ export function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => {
-    const workspace = config.universalRemindersEnabled && ctx.chat.type === "private"
-      ? await workspacesRepo.getByTelegramChatId(config.allowedChatId)
-      : null;
-    const actor = workspace && ctx.from
-      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id)
-      : null;
+    const actorWorkspaces = config.universalRemindersEnabled &&
+      ctx.chat.type === "private" && ctx.from
+      ? await workspacesRepo.listForUser(ctx.from.id)
+      : [];
+    const manageable = managedWorkspaces(actorWorkspaces);
     const response = buildStartResponse(
       ctx.chat.type,
       config.miniAppUrl,
       bot.botInfo.username,
-      canImportWorkspaceMembers(actor),
+      manageable.map(({ workspaceId, displayName }) => ({ workspaceId, displayName })),
     );
     await ctx.reply(response.message, {
       reply_markup: response.keyboard,
@@ -247,23 +257,23 @@ export function getBot(): Bot {
     if (
       !config.universalRemindersEnabled ||
       ctx.chat.type !== "private" ||
-      !ctx.from ||
-      ctx.message.users_shared.request_id !== MEMBER_IMPORT_REQUEST_ID
+      !ctx.from
     ) {
       return;
     }
 
-    const workspace = await workspacesRepo.getByTelegramChatId(config.allowedChatId);
-    const actor = workspace
-      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id)
-      : null;
-    if (!workspace || !canImportWorkspaceMembers(actor)) {
+    const actorWorkspaces = await workspacesRepo.listForUser(ctx.from.id);
+    const workspace = workspaceForMemberImport(
+      actorWorkspaces,
+      ctx.message.users_shared.request_id,
+    );
+    if (!workspace) {
       await ctx.reply("Добавлять участников может только владелец или организатор группы.");
       return;
     }
 
     const result = await importSharedGroupMembers(
-      config.allowedChatId,
+      workspace.telegramChatId,
       ctx.message.users_shared.users,
       {
         getChatMember: (chatId, userId) => bot.api.getChatMember(chatId, userId),
@@ -273,7 +283,7 @@ export function getBot(): Bot {
             .filter(Boolean)
             .join(" ") || user.username || "User";
           await membersRepo.upsert(
-            config.allowedChatId,
+            workspace.telegramChatId,
             user.id,
             user.username ?? null,
             displayName,
@@ -287,7 +297,7 @@ export function getBot(): Bot {
               lastName: user.last_name,
               languageCode: user.language_code,
             },
-            { id: config.allowedChatId, type: "group" },
+            { id: workspace.telegramChatId, type: "group" },
           );
         },
       },
@@ -297,18 +307,41 @@ export function getBot(): Bot {
       "private",
       config.miniAppUrl,
       bot.botInfo.username,
-      true,
+      managedWorkspaces(actorWorkspaces).map(({ workspaceId, displayName }) => ({
+        workspaceId,
+        displayName,
+      })),
     );
     const skippedText = result.skipped > 0
-      ? ` Не добавлено: ${result.skipped} — они не состоят в основной группе или недоступны.`
+      ? ` Не добавлено: ${result.skipped} — они не состоят в группе «${workspace.displayName}» или недоступны.`
       : "";
     await ctx.reply(
-      `✅ Добавлено участников: ${result.imported}.${skippedText}`,
+      `✅ ${workspace.displayName}: добавлено участников — ${result.imported}.${skippedText}`,
       { reply_markup: response.keyboard },
     );
   });
 
   bot.command("list", async (ctx) => {
+    if (config.universalRemindersEnabled) {
+      const workspace = ctx.chat.type !== "private"
+        ? await workspacesRepo.getByTelegramChatId(ctx.chat.id)
+        : null;
+      if (!workspace || !ctx.from) {
+        await ctx.reply("Откройте панель в личном чате или выполните команду в настроенной группе.");
+        return;
+      }
+      const remindersRepo = new RemindersRepository(
+        config.ydbEndpoint,
+        config.ydbDatabase,
+      );
+      const reminders = await remindersRepo.listForActor(workspace.workspaceId, ctx.from.id);
+      await ctx.reply(
+        reminders.length === 0
+          ? "Активных напоминаний нет."
+          : `Активные напоминания:\n${reminders.map((reminder) => `• ${reminder.title}`).join("\n")}`,
+      );
+      return;
+    }
     const rules = await rulesRepo.list(config.allowedChatId, "active");
     if (rules.length === 0) {
       await ctx.reply("Активных правил нет.");
@@ -331,11 +364,10 @@ export function getBot(): Bot {
 
   if (config.universalRemindersEnabled) {
     bot.command("setup", async (ctx) => {
-      if (ctx.chat.id !== config.allowedChatId || ctx.chat.type === "private" || !ctx.from) {
-        await ctx.reply("Настройка доступна только в основной группе.");
+      if (ctx.chat.type === "private" || !ctx.from) {
+        await ctx.reply("Настройка доступна только в группе.");
         return;
       }
-      const configuredAdmin = config.adminUserIds.includes(ctx.from.id);
       let telegramAdmin = false;
       try {
         const membership = await ctx.getChatMember(ctx.from.id);
@@ -344,19 +376,19 @@ export function getBot(): Bot {
       } catch {
         telegramAdmin = false;
       }
-      if (!configuredAdmin && !telegramAdmin) {
+      if (!telegramAdmin) {
         await ctx.reply("Создать workspace может только администратор группы.");
         return;
       }
 
-      const existing = await workspacesRepo.getByTelegramChatId(config.allowedChatId);
+      const existing = await workspacesRepo.getByTelegramChatId(ctx.chat.id);
       if (existing) {
         await ctx.reply("Workspace уже настроен.");
         return;
       }
       try {
         await workspacesRepo.create({
-          telegramChatId: config.allowedChatId,
+          telegramChatId: ctx.chat.id,
           displayName: ctx.chat.title || "Группа",
           ownerUserId: ctx.from.id,
           timezone: config.defaultTimezone,
@@ -365,10 +397,10 @@ export function getBot(): Bot {
         try {
           synced = await syncGroupMembers(
             bot.api,
-            config.allowedChatId,
+            ctx.chat.id,
             membersRepo,
             ctx.from.id,
-            observeSyncedGroupUser,
+            observeSyncedGroupUser(ctx.chat.id),
           );
         } catch {
           // Workspace is already valid; /sync can retry member discovery later.
@@ -387,20 +419,43 @@ export function getBot(): Bot {
   }
 
   bot.command("sync", async (ctx) => {
-    if (ctx.chat?.id !== config.allowedChatId) {
-      await ctx.reply("Команда доступна только в семейной группе.");
+    if (!config.universalRemindersEnabled) {
+      if (ctx.chat.id !== config.allowedChatId) {
+        await ctx.reply("Команда доступна только в настроенной группе.");
+        return;
+      }
+      try {
+        const synced = await syncGroupMembers(
+          bot.api,
+          config.allowedChatId,
+          membersRepo,
+          ctx.from?.id,
+        );
+        const members = await membersRepo.list(config.allowedChatId);
+        await ctx.reply(`Участники обновлены: ${members.length} в списке (${synced} из Telegram).`);
+      } catch (error) {
+        await ctx.reply(error instanceof Error ? error.message : "Не удалось синхронизировать участников.");
+      }
+      return;
+    }
+
+    const workspace = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup"
+      ? await workspacesRepo.getByTelegramChatId(ctx.chat.id)
+      : null;
+    if (!workspace || workspace.status !== "active") {
+      await ctx.reply("Сначала настройте эту группу командой /setup.");
       return;
     }
 
     try {
       const synced = await syncGroupMembers(
         bot.api,
-        config.allowedChatId,
+        workspace.telegramChatId,
         membersRepo,
         ctx.from?.id,
-        observeSyncedGroupUser,
+        observeSyncedGroupUser(workspace.telegramChatId),
       );
-      const members = await membersRepo.list(config.allowedChatId);
+      const members = await membersRepo.list(workspace.telegramChatId);
       await ctx.reply(`Участники обновлены: ${members.length} в списке (${synced} из Telegram).`);
     } catch (error) {
       await ctx.reply(error instanceof Error ? error.message : "Не удалось синхронизировать участников.");
@@ -408,26 +463,65 @@ export function getBot(): Bot {
   });
 
   bot.on("chat_member", async (ctx) => {
-    if (ctx.chatMember.chat.id !== config.allowedChatId) {
+    if (!config.universalRemindersEnabled) {
+      if (ctx.chatMember.chat.id !== config.allowedChatId) {
+        return;
+      }
+      const status = ctx.chatMember.new_chat_member.status;
+      const user = ctx.chatMember.new_chat_member.user;
+      if (user.is_bot || status === "left" || status === "kicked") {
+        return;
+      }
+      const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "User";
+      await membersRepo.upsert(
+        config.allowedChatId,
+        user.id,
+        user.username ?? null,
+        displayName,
+      );
+      return;
+    }
+
+    const workspace = await workspacesRepo.getByTelegramChatId(ctx.chatMember.chat.id);
+    if (!workspace || workspace.status !== "active") {
       return;
     }
 
     const status = ctx.chatMember.new_chat_member.status;
-    if (status === "left" || status === "kicked") {
-      return;
-    }
-
     const user = ctx.chatMember.new_chat_member.user;
     if (user.is_bot) {
       return;
     }
+    const restrictedOutsideGroup = status === "restricted" &&
+      "is_member" in ctx.chatMember.new_chat_member &&
+      ctx.chatMember.new_chat_member.is_member === false;
+    if (status === "left" || status === "kicked" || restrictedOutsideGroup) {
+      const removed = await workspaceMembersRepo.remove(workspace.workspaceId, user.id);
+      if (removed.pausedReminderIds.length > 0) {
+        const managers = (await workspaceMembersRepo.listProfiles(workspace.workspaceId))
+          .filter((member) => member.role === "owner" || member.role === "organizer")
+          .map((member) =>
+            `<a href="tg://user?id=${member.userId}">${escapeHtml(member.displayName)}</a>`)
+          .join(" ");
+        await bot.api.sendMessage(
+          workspace.telegramChatId,
+          `⚠️ ${escapeHtml([user.first_name, user.last_name].filter(Boolean).join(" ") || "Участник")} вышел из группы. Приостановлено напоминаний: ${removed.pausedReminderIds.length}. Нужно переназначить ответственного.${managers ? `\n${managers}` : ""}`,
+          { parse_mode: "HTML" },
+        );
+      }
+      return;
+    }
 
     const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "User";
-    await membersRepo.upsert(config.allowedChatId, user.id, user.username ?? null, displayName);
-    await observeSyncedGroupUser?.(user);
+    await membersRepo.upsert(workspace.telegramChatId, user.id, user.username ?? null, displayName);
+    await observeSyncedGroupUser(workspace.telegramChatId)?.(user);
   });
 
   bot.command("done", async (ctx) => {
+    if (config.universalRemindersEnabled) {
+      await ctx.reply("Используйте кнопку «Выполнил» под напоминанием.");
+      return;
+    }
     const instanceId = ctx.match?.trim();
     if (!instanceId || !ctx.from) {
       await ctx.reply("Использование: /done <instance_id>");
@@ -449,6 +543,10 @@ export function getBot(): Bot {
   });
 
   bot.command("skip", async (ctx) => {
+    if (config.universalRemindersEnabled) {
+      await ctx.reply("В новых напоминаниях используйте «Напомнить позже».");
+      return;
+    }
     const instanceId = ctx.match?.trim();
     if (!instanceId) {
       await ctx.reply("Использование: /skip <instance_id>");
@@ -539,6 +637,10 @@ export function getBot(): Bot {
     }
 
     const parsed = parseInstanceCallbackData(ctx.callbackQuery.data);
+    if (config.universalRemindersEnabled) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
     if (!parsed || !ctx.from) {
       await ctx.answerCallbackQuery();
       return;
@@ -596,10 +698,54 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   const membersRepo = new MembersRepository(config.ydbEndpoint, config.ydbDatabase);
 
   if (config.universalRemindersEnabled) {
+    if (method === "POST" && path === "/api/members/sync") {
+      const workspaceId = getHeader(event, "X-Workspace-Id")?.trim();
+      const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
+      const workspaceMembersRepo = new WorkspaceMembersRepository(
+        config.ydbEndpoint,
+        config.ydbDatabase,
+      );
+      const workspace = workspaceId ? await workspacesRepo.getById(workspaceId) : null;
+      const actor = workspace
+        ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, parsedInit.user.id)
+        : null;
+      if (!workspaceId) {
+        return jsonResponse(400, { error: "Choose a workspace", code: "workspace_required" });
+      }
+      if (!workspace || workspace.status !== "active" || !actor || actor.status !== "active") {
+        return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
+      }
+      try {
+        const synced = await syncGroupMembers(
+          getBot().api,
+          workspace.telegramChatId,
+          membersRepo,
+          parsedInit.user.id,
+          async (user) => observeTelegramIdentity(
+            config,
+            {
+              id: user.id,
+              username: user.username,
+              firstName: user.first_name,
+              lastName: user.last_name,
+              languageCode: user.language_code,
+            },
+            { id: workspace.telegramChatId, type: "group" },
+          ),
+        );
+        const members = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
+        return jsonResponse(200, { members, synced });
+      } catch (error) {
+        return jsonResponse(502, {
+          error: error instanceof Error ? error.message : "Failed to sync members",
+        });
+      }
+    }
     const universalResponse = await handleUniversalApi(event, config, parsedInit);
     if (universalResponse) {
       return universalResponse;
     }
+    return jsonResponse(404, { error: "Not found" });
   }
 
   if (method === "GET" && path === "/api/rules") {

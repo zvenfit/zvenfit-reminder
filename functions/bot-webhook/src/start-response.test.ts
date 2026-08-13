@@ -22,7 +22,7 @@ describe("buildStartResponse", () => {
       "private",
       "https://mini-app.example/index.html",
       "reminder_bot",
-      true,
+      [{ workspaceId: "workspace-a", displayName: "Дом" }],
     );
 
     expect(response.keyboard && "keyboard" in response.keyboard
@@ -32,7 +32,7 @@ describe("buildStartResponse", () => {
       [{
         text: "Добавить участников",
         request_users: {
-          request_id: 1515603278,
+          request_id: 1340583968,
           user_is_bot: false,
           max_quantity: 10,
           request_name: true,

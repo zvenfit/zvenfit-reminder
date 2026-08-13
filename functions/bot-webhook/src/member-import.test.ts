@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   canImportWorkspaceMembers,
   importSharedGroupMembers,
+  memberImportRequestId,
   type ImportableChatMember,
 } from "./member-import.js";
 
@@ -17,6 +18,13 @@ function chatMember(userId: number, status = "member"): ImportableChatMember {
 }
 
 describe("member import", () => {
+  it("derives a stable positive Telegram request ID per workspace", () => {
+    expect(memberImportRequestId("workspace-a")).toBe(1340583968);
+    expect(memberImportRequestId("workspace-a")).not.toBe(
+      memberImportRequestId("workspace-b"),
+    );
+  });
+
   it("allows only active owners and organizers", () => {
     expect(canImportWorkspaceMembers({ role: "owner", status: "active" })).toBe(true);
     expect(canImportWorkspaceMembers({ role: "organizer", status: "active" })).toBe(true);

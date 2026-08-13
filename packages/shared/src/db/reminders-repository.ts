@@ -53,6 +53,13 @@ export class PrivateChatUnavailableError extends Error {
   }
 }
 
+export class ReminderReassignmentForbiddenError extends Error {
+  constructor() {
+    super("Only an owner or organizer can reassign reminders");
+    this.name = "ReminderReassignmentForbiddenError";
+  }
+}
+
 interface WorkspaceDeliverySettings {
   status: string;
   quietHoursStart: string;
@@ -429,5 +436,123 @@ export class RemindersRepository {
     );
 
     return reminder;
+  }
+
+  async reassign(
+    workspaceId: string,
+    reminderId: string,
+    responsibleUserId: number,
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<ReminderDefinition | null> {
+    await this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $reminder_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $responsible_user_id AS Int64;
+            SELECT role, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $responsible_user_id
+            LIMIT 1;
+
+            SELECT * FROM reminders
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+            LIMIT 1;
+
+            SELECT private_chat_available FROM users
+            WHERE user_id = $responsible_user_id LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $reminder_id: TypedValues.utf8(reminderId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $responsible_user_id: TypedValues.int64(responsibleUserId),
+          },
+        );
+        const actorRow = mapResultRows(resultSets[0])[0];
+        const targetRow = mapResultRows(resultSets[1])[0];
+        const reminderRow = mapResultRows(resultSets[2])[0];
+        const userRow = mapResultRows(resultSets[3])[0];
+        if (!reminderRow) {
+          return;
+        }
+        if (
+          !actorRow ||
+          getField(actorRow, "status") !== "active" ||
+          !["owner", "organizer"].includes(String(getField(actorRow, "role")))
+        ) {
+          throw new ReminderReassignmentForbiddenError();
+        }
+        if (!targetRow || getField(targetRow, "status") !== "active") {
+          throw new InactiveWorkspaceMemberError(workspaceId, [responsibleUserId]);
+        }
+        if (
+          getField(reminderRow, "visibility") === "private" &&
+          (!userRow || !Boolean(getField(userRow, "private_chat_available")))
+        ) {
+          throw new PrivateChatUnavailableError(responsibleUserId);
+        }
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $reminder_id AS Utf8;
+            DECLARE $responsible_user_id AS Int64;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            UPDATE reminders SET
+              assignment_mode = 'person', responsible_user_id = $responsible_user_id,
+              status = 'active', updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            DELETE FROM reminder_watchers
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+              AND user_id = $responsible_user_id;
+
+            UPDATE reminder_occurrences SET
+              assignment_mode = 'person', responsible_user_id = $responsible_user_id,
+              notification_state = 'waiting', next_notification_at = $now,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+              AND status IN ('scheduled', 'pending', 'overdue')
+              AND notification_state = 'stopped';
+
+            UPDATE reminder_runtime SET
+              state = IF(current_occurrence_id IS NULL, 'ready', 'blocked'),
+              updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $reminder_id, $now, $event_id, 'reminder',
+              'reminder.reassigned', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $reminder_id: TypedValues.utf8(reminderId),
+            $responsible_user_id: TypedValues.int64(responsibleUserId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(JSON.stringify({
+              fromUserId: Number(getField(reminderRow, "responsible_user_id")),
+              toUserId: responsibleUserId,
+            })),
+          },
+        );
+      }),
+    );
+    return this.getById(workspaceId, reminderId);
   }
 }

@@ -299,6 +299,10 @@ export interface Workspace {
   updatedAt: Date;
 }
 
+export interface WorkspaceAccess extends Workspace {
+  role: WorkspaceRole;
+}
+
 export interface WorkspaceMember {
   workspaceId: string;
   userId: number;

@@ -1,8 +1,8 @@
 # Target architecture
 
-Status: greenfield target for the redesign in
-[product-spec.md](product-spec.md). The current prototype is documented in
-[architecture.md](architecture.md).
+Status: implemented core domain architecture for [product-spec.md](product-spec.md).
+Calendar feeds and explicitly marked later phases remain target behavior. The
+deployed runtime is documented in [architecture.md](architecture.md).
 
 ## Principles
 
@@ -286,7 +286,8 @@ Telegram currently permits bots to delete their own group messages less than
 Mini App requests continue to carry verified Telegram init data. Verification
 proves the Telegram identity but is followed by application authorization:
 
-1. Resolve the workspace from the configured chat or request route.
+1. Resolve the workspace from the Telegram chat, or from the explicit
+   `X-Workspace-Id` selected in the Mini App.
 2. Require active `workspace_members` membership.
 3. Apply the role and reminder-visibility rules.
 4. Include `workspace_id` in every repository method and key predicate.

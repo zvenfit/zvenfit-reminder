@@ -4,7 +4,7 @@
 
 ```bash
 cp .env.example .env
-# Заполни BOT_TOKEN, ALLOWED_CHAT_ID, YDB_*, YC_SA_JSON
+# Заполни BOT_TOKEN, YDB_*, YC_SA_JSON; ALLOWED_CHAT_ID нужен legacy-режиму
 
 chmod +x scripts/prepare-sa-key.sh
 ./scripts/prepare-sa-key.sh
@@ -100,11 +100,13 @@ curl -H "X-Telegram-Init-Data: $INIT_DATA" http://localhost:3000/api/rules
 всех YDB-миграций:
 
 1. Установи `UNIVERSAL_REMINDERS_ENABLED=1` только в локальном `.env`.
-2. Запусти polling-бота и выполни `/setup` в разрешённой группе от имени её
+2. Запусти polling-бота и выполни `/setup` в нужной группе от имени её
    администратора. Команда создаст workspace с quiet hours `22:00–08:00`.
+   Команду можно выполнить в нескольких группах: каждая создаёт отдельный workspace.
 3. Открой личный чат с ботом, выполни `/start`, нажми «Добавить участников» и
-   выбери до 10 пользователей. Telegram покажет общий список, а backend добавит
-   только подтверждённых участников разрешённой группы. Вводить `/start` каждому
+   выбери до 10 пользователей. При нескольких workspace кнопка подписана именем
+   группы. Telegram покажет общий список, а backend добавит только подтверждённых
+   участников выбранной группы. Вводить `/start` каждому
    участнику в группе не нужно.
 4. `/sync` остаётся запасной командой для повторной проверки уже известных боту
    пользователей; будущие вступления и активность также учитываются автоматически.
@@ -121,11 +123,15 @@ GET  /api/members
 POST /api/occurrences/:id/complete
 POST /api/occurrences/:id/snooze
 POST /api/occurrences/:id/undo-completion
+POST /api/reminders/:id/reassign
 PATCH /api/members/:userId/role
 ```
 
 Они требуют валидный `X-Telegram-Init-Data` и активное членство в workspace.
-Legacy `/api/rules` остаётся доступным до переключения интерфейса.
+`GET /api/workspaces` возвращает доступные пользователю группы. Остальные
+universal endpoints требуют `X-Workspace-Id`; backend повторно проверяет активное
+членство перед каждой операцией.
+В universal-режиме legacy `/api/rules` отключён.
 
 Для визуальной проверки нового Mini App без запущенного backend открой
 `http://localhost:5173/?mock=1`. Mock-режим доступен только в Vite development

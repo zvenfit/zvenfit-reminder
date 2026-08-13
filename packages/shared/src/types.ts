@@ -81,12 +81,22 @@ export function loadConfig(): AppConfig {
     return value;
   };
 
+  const universalRemindersEnabled = process.env.UNIVERSAL_REMINDERS_ENABLED === "1";
+  const allowedChatIdRaw = process.env.ALLOWED_CHAT_ID?.trim();
+  if (!universalRemindersEnabled && !allowedChatIdRaw) {
+    throw new Error("Missing required env var: ALLOWED_CHAT_ID");
+  }
+  const allowedChatId = allowedChatIdRaw ? Number(allowedChatIdRaw) : 0;
+  if (!Number.isSafeInteger(allowedChatId)) {
+    throw new Error("Invalid ALLOWED_CHAT_ID");
+  }
+
   return {
     ydbEndpoint: required("YDB_ENDPOINT"),
     ydbDatabase: required("YDB_DATABASE"),
     botToken: required("BOT_TOKEN"),
     webhookSecret: required("WEBHOOK_SECRET"),
-    allowedChatId: Number(required("ALLOWED_CHAT_ID")),
+    allowedChatId,
     defaultTimezone: process.env.DEFAULT_TIMEZONE ?? "Europe/Moscow",
     miniAppUrl: process.env.MINI_APP_URL ?? "",
     adminUserIds: (process.env.ADMIN_USER_IDS ?? "")
@@ -94,6 +104,6 @@ export function loadConfig(): AppConfig {
       .map((s) => s.trim())
       .filter(Boolean)
       .map(Number),
-    universalRemindersEnabled: process.env.UNIVERSAL_REMINDERS_ENABLED === "1",
+    universalRemindersEnabled,
   };
 }

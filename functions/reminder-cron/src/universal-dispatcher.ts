@@ -13,6 +13,7 @@ import { InlineKeyboard } from "grammy";
 
 export interface UniversalDispatcherStats {
   mode: "universal";
+  workspaces: number;
   completionFinalized: number;
   materialized: number;
   reserved: number;
@@ -34,7 +35,7 @@ interface UniversalTelegramClient {
 }
 
 interface UniversalDispatcherDependencies {
-  workspaces: Pick<WorkspacesRepository, "getByTelegramChatId">;
+  workspaces: Pick<WorkspacesRepository, "listActive">;
   occurrences: Pick<OccurrencesRepository, "listRuntimeCandidates" | "materialize">;
   actions: Pick<
     OccurrenceActionsRepository,
@@ -187,6 +188,7 @@ export async function runUniversalDispatcher(
   const dependencies = providedDependencies ?? createDependencies(config);
   const stats: UniversalDispatcherStats = {
     mode: "universal",
+    workspaces: 0,
     completionFinalized: 0,
     materialized: 0,
     reserved: 0,
@@ -196,66 +198,77 @@ export async function runUniversalDispatcher(
     skipped: 0,
     errors: [],
   };
-  const workspace = await dependencies.workspaces.getByTelegramChatId(config.allowedChatId);
-  if (!workspace || workspace.status !== "active") {
-    throw new Error("Universal reminder workspace is not initialized");
-  }
-
-  const finalizationCandidates = await dependencies.actions.listCompletionFinalizationCandidates(
-    workspace.workspaceId,
-    now,
-  );
-  for (const candidate of finalizationCandidates) {
+  const workspaces = await dependencies.workspaces.listActive();
+  stats.workspaces = workspaces.length;
+  for (const workspace of workspaces) {
     try {
-      const finalized = await dependencies.actions.finalizeCompletion(
+      const finalizationCandidates = await dependencies.actions.listCompletionFinalizationCandidates(
         workspace.workspaceId,
-        candidate.occurrenceId,
         now,
       );
-      stats.completionFinalized += finalized ? 1 : 0;
-      stats.skipped += finalized ? 0 : 1;
-    } catch {
-      stats.errors.push("completion_finalize_failed");
-    }
-  }
-
-  const runtimeCandidates = await dependencies.occurrences.listRuntimeCandidates(
-    workspace.workspaceId,
-    now,
-  );
-  for (const candidate of runtimeCandidates) {
-    try {
-      const occurrence = await dependencies.occurrences.materialize(
-        workspace.workspaceId,
-        candidate.reminderId,
-        { now },
-      );
-      stats.materialized += occurrence ? 1 : 0;
-      stats.skipped += occurrence ? 0 : 1;
-    } catch {
-      stats.errors.push("occurrence_materialize_failed");
-    }
-  }
-
-  const deliveryCandidates = await dependencies.deliveries.listCandidates(
-    workspace.workspaceId,
-    now,
-  );
-  for (const candidate of deliveryCandidates) {
-    try {
-      const reservation = await dependencies.deliveries.reserve(
-        workspace.workspaceId,
-        candidate.occurrenceId,
-        now,
-      );
-      if (!reservation) {
-        stats.skipped += 1;
-        continue;
+      for (const candidate of finalizationCandidates) {
+        try {
+          const finalized = await dependencies.actions.finalizeCompletion(
+            workspace.workspaceId,
+            candidate.occurrenceId,
+            now,
+          );
+          stats.completionFinalized += finalized ? 1 : 0;
+          stats.skipped += finalized ? 0 : 1;
+        } catch {
+          stats.errors.push(`completion_finalize_failed:${workspace.workspaceId}`);
+        }
       }
-      stats.reserved += 1;
-      await dispatchReservation(config, reservation, dependencies, stats);
     } catch {
-      stats.errors.push("delivery_reserve_failed");
+      stats.errors.push(`completion_scan_failed:${workspace.workspaceId}`);
+    }
+
+    try {
+      const runtimeCandidates = await dependencies.occurrences.listRuntimeCandidates(
+        workspace.workspaceId,
+        now,
+      );
+      for (const candidate of runtimeCandidates) {
+        try {
+          const occurrence = await dependencies.occurrences.materialize(
+            workspace.workspaceId,
+            candidate.reminderId,
+            { now },
+          );
+          stats.materialized += occurrence ? 1 : 0;
+          stats.skipped += occurrence ? 0 : 1;
+        } catch {
+          stats.errors.push(`occurrence_materialize_failed:${workspace.workspaceId}`);
+        }
+      }
+    } catch {
+      stats.errors.push(`occurrence_scan_failed:${workspace.workspaceId}`);
+    }
+
+    try {
+      const deliveryCandidates = await dependencies.deliveries.listCandidates(
+        workspace.workspaceId,
+        now,
+      );
+      for (const candidate of deliveryCandidates) {
+        try {
+          const reservation = await dependencies.deliveries.reserve(
+            workspace.workspaceId,
+            candidate.occurrenceId,
+            now,
+          );
+          if (!reservation) {
+            stats.skipped += 1;
+            continue;
+          }
+          stats.reserved += 1;
+          await dispatchReservation(config, reservation, dependencies, stats);
+        } catch {
+          stats.errors.push(`delivery_reserve_failed:${workspace.workspaceId}`);
+        }
+      }
+    } catch {
+      stats.errors.push(`delivery_scan_failed:${workspace.workspaceId}`);
     }
   }
 

@@ -1,5 +1,14 @@
 export const MEMBER_IMPORT_REQUEST_ID = 0x5a56454e;
 
+export function memberImportRequestId(workspaceId: string): number {
+  let hash = 0x811c9dc5;
+  for (const character of workspaceId) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0) & 0x7fffffff || MEMBER_IMPORT_REQUEST_ID;
+}
+
 export interface SharedTelegramUser {
   user_id: number;
 }

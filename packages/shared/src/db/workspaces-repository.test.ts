@@ -96,4 +96,24 @@ describe("WorkspacesRepository", () => {
       "workspace-a",
     );
   });
+
+  it("lists workspaces through active membership of one user", async () => {
+    const { repository, session } = repositoryDouble();
+    await repository.listForUser(20);
+
+    const [query, parameters] = session.executeQuery.mock.calls[0] ?? [];
+    expect(query).toContain("member.user_id = $user_id");
+    expect(query).toContain("member.status = 'active'");
+    expect(query).toContain("workspace.status = 'active'");
+    expect(decodeYdbValue(parameters?.$user_id)).toBe(20);
+  });
+
+  it("lists all active workspaces for the dispatcher", async () => {
+    const { repository, session } = repositoryDouble();
+    await repository.listActive();
+
+    expect(session.executeQuery.mock.calls[0]?.[0]).toContain(
+      "WHERE status = 'active'",
+    );
+  });
 });

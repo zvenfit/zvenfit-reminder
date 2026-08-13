@@ -38,7 +38,7 @@ describe("observeTelegramIdentity", () => {
     expect(deps.members.observe).not.toHaveBeenCalled();
   });
 
-  it("observes membership only in the configured group", async () => {
+  it("observes membership in the workspace resolved from the actual group", async () => {
     const deps = dependencies();
     await observeTelegramIdentity(
       config,
@@ -51,5 +51,6 @@ describe("observeTelegramIdentity", () => {
       expect.objectContaining({ privateChatId: null }),
     );
     expect(deps.members.observe).toHaveBeenCalledWith("workspace-a", 20);
+    expect(deps.workspaces.getByTelegramChatId).toHaveBeenCalledWith(-100123);
   });
 });

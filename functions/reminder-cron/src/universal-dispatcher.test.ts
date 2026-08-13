@@ -88,7 +88,7 @@ function reservedDelivery(item: ReminderOccurrence): ReservedDelivery {
 }
 
 describe("runUniversalDispatcher", () => {
-  it("scopes every scan to the configured workspace and runs reserve-before-send", async () => {
+  it("scopes every scan to each active workspace and runs reserve-before-send", async () => {
     const item = occurrence();
     const reservation = reservedDelivery(item);
     const sentDelivery: NotificationDelivery = {
@@ -99,10 +99,10 @@ describe("runUniversalDispatcher", () => {
     const sendTelegram = vi.fn().mockResolvedValue(777);
     const dependencies = {
       workspaces: {
-        getByTelegramChatId: vi.fn().mockResolvedValue({
+        listActive: vi.fn().mockResolvedValue([{
           workspaceId: "workspace-a",
           status: "active",
-        }),
+        }]),
       },
       actions: {
         listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
@@ -164,6 +164,46 @@ describe("runUniversalDispatcher", () => {
       "test-token",
       -100123,
       55,
+    );
+  });
+
+  it("continues with another workspace when one workspace scan fails", async () => {
+    const dependencies = {
+      workspaces: {
+        listActive: vi.fn().mockResolvedValue([
+          { workspaceId: "workspace-a", status: "active" },
+          { workspaceId: "workspace-b", status: "active" },
+        ]),
+      },
+      actions: {
+        listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
+        finalizeCompletion: vi.fn(),
+      },
+      occurrences: {
+        listRuntimeCandidates: vi.fn()
+          .mockRejectedValueOnce(new Error("workspace a unavailable"))
+          .mockResolvedValueOnce([]),
+        materialize: vi.fn(),
+      },
+      deliveries: {
+        listCandidates: vi.fn().mockResolvedValue([]),
+        reserve: vi.fn(),
+        recordResult: vi.fn(),
+      },
+      telegram: { send: vi.fn(), delete: vi.fn() },
+    } as unknown as UniversalDispatcherDependencies;
+
+    const stats = await runUniversalDispatcher(
+      config,
+      new Date("2026-08-14T00:00:00.000Z"),
+      dependencies,
+    );
+
+    expect(stats.workspaces).toBe(2);
+    expect(stats.errors).toContain("occurrence_scan_failed:workspace-a");
+    expect(dependencies.occurrences.listRuntimeCandidates).toHaveBeenCalledWith(
+      "workspace-b",
+      expect.any(Date),
     );
   });
 });

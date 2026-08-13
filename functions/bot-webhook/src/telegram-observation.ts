@@ -43,10 +43,10 @@ export async function observeTelegramIdentity(
     privateChatId: chat.type === "private" ? chat.id : null,
   });
 
-  if (chat.type !== "group" || chat.id !== config.allowedChatId) {
+  if (chat.type !== "group") {
     return;
   }
-  const workspace = await dependencies.workspaces.getByTelegramChatId(config.allowedChatId);
+  const workspace = await dependencies.workspaces.getByTelegramChatId(chat.id);
   if (workspace?.status === "active") {
     await dependencies.members.observe(workspace.workspaceId, user.id);
   }

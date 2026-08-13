@@ -8,6 +8,7 @@ import {
   localTimeSchema,
   workspaceStatusSchema,
   type Workspace,
+  type WorkspaceAccess,
 } from "../reminder-domain.js";
 import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
 import { withSerializableTransaction } from "./transaction.js";
@@ -56,6 +57,13 @@ function rowToWorkspace(data: Record<string, unknown>): Workspace {
   };
 }
 
+function rowToWorkspaceAccess(data: Record<string, unknown>): WorkspaceAccess {
+  return {
+    ...rowToWorkspace(data),
+    role: z.enum(["owner", "organizer", "member"]).parse(getField(data, "member_role")),
+  };
+}
+
 export class WorkspacesRepository {
   private readonly runSession: SessionRunner;
 
@@ -95,6 +103,39 @@ export class WorkspacesRepository {
       );
       const rows = mapResultRows(resultSets[0]);
       return rows[0] ? rowToWorkspace(rows[0]) : null;
+    });
+  }
+
+  async listActive(): Promise<Workspace[]> {
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          SELECT * FROM workspaces
+          WHERE status = 'active'
+          ORDER BY created_at, workspace_id;
+        `,
+      );
+      return mapResultRows(resultSets[0]).map(rowToWorkspace);
+    });
+  }
+
+  async listForUser(userId: number): Promise<WorkspaceAccess[]> {
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          DECLARE $user_id AS Int64;
+          SELECT workspace.*, member.role AS member_role
+          FROM workspace_members AS member
+          INNER JOIN workspaces AS workspace
+            ON workspace.workspace_id = member.workspace_id
+          WHERE member.user_id = $user_id
+            AND member.status = 'active'
+            AND workspace.status = 'active'
+          ORDER BY workspace.display_name, workspace.workspace_id;
+        `,
+        { $user_id: TypedValues.int64(userId) },
+      );
+      return mapResultRows(resultSets[0]).map(rowToWorkspaceAccess);
     });
   }
 

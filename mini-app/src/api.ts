@@ -2,6 +2,14 @@ export type WorkspaceRole = "owner" | "organizer" | "member";
 export type ReminderStatus = "active" | "paused" | "archived";
 export type ReminderVisibility = "group" | "private";
 
+export interface Workspace {
+  workspaceId: string;
+  telegramChatId: number;
+  displayName: string;
+  timezone: string;
+  role: WorkspaceRole;
+}
+
 export interface WorkspaceMember {
   workspaceId: string;
   userId: number;
@@ -120,6 +128,21 @@ const mockMembers: WorkspaceMember[] = [
   { workspaceId: "demo", userId: 30, role: "member", status: "active", username: null, displayName: "Маша", privateChatAvailable: false },
 ];
 
+const mockWorkspaces: Workspace[] = [
+  { workspaceId: "demo", telegramChatId: -1001, displayName: "ZvenFit · Команда", timezone: "Europe/Moscow", role: "owner" },
+  { workspaceId: "home", telegramChatId: -1002, displayName: "Дом", timezone: "Europe/Moscow", role: "member" },
+];
+
+let selectedWorkspaceId: string | null = null;
+
+function inSelectedWorkspace<T extends { workspaceId: string }>(items: T[]): T[] {
+  return items.filter((item) => item.workspaceId === selectedWorkspaceId);
+}
+
+export function selectWorkspace(workspaceId: string): void {
+  selectedWorkspaceId = workspaceId;
+}
+
 const mockReminders: Reminder[] = [
   {
     workspaceId: "demo", reminderId: "utilities", title: "Передать показания счётчиков", description: null, actionUrl: null, amountMinor: null, currency: null,
@@ -175,6 +198,7 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers: {
       "Content-Type": "application/json",
       "X-Telegram-Init-Data": getInitData(),
+      ...(selectedWorkspaceId ? { "X-Workspace-Id": selectedWorkspaceId } : {}),
       ...(options.headers ?? {}),
     },
   });
@@ -187,10 +211,15 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export function listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
+  if (MOCK_MODE) return Promise.resolve({ workspaces: mockWorkspaces });
+  return api("/api/workspaces");
+}
+
 export function loadDashboard(): Promise<{ occurrences: ReminderOccurrence[] }> {
   if (MOCK_MODE) {
     return Promise.resolve({
-      occurrences: mockOccurrences.filter((occurrence) =>
+      occurrences: inSelectedWorkspace(mockOccurrences).filter((occurrence) =>
         ["scheduled", "pending", "overdue"].includes(occurrence.status),
       ),
     });
@@ -199,17 +228,17 @@ export function loadDashboard(): Promise<{ occurrences: ReminderOccurrence[] }> 
 }
 
 export function listReminders(): Promise<{ reminders: Reminder[] }> {
-  if (MOCK_MODE) return Promise.resolve({ reminders: mockReminders });
+  if (MOCK_MODE) return Promise.resolve({ reminders: inSelectedWorkspace(mockReminders) });
   return api("/api/reminders");
 }
 
 export function listMembers(): Promise<{ members: WorkspaceMember[] }> {
-  if (MOCK_MODE) return Promise.resolve({ members: mockMembers });
+  if (MOCK_MODE) return Promise.resolve({ members: inSelectedWorkspace(mockMembers) });
   return api("/api/members");
 }
 
 export function syncMembers(): Promise<unknown> {
-  if (MOCK_MODE) return Promise.resolve({ members: mockMembers });
+  if (MOCK_MODE) return Promise.resolve({ members: inSelectedWorkspace(mockMembers) });
   return api("/api/members/sync", { method: "POST", body: "{}" });
 }
 
@@ -218,7 +247,7 @@ export function createReminder(body: CreateReminderBody): Promise<{ reminder: Re
     return Promise.resolve({
       reminder: {
         ...body,
-        workspaceId: "demo",
+        workspaceId: selectedWorkspaceId ?? "demo",
         reminderId: crypto.randomUUID(),
         creatorUserId: 10,
         status: "active",
@@ -286,6 +315,22 @@ export function updateMemberRole(
   return api(`/api/members/${userId}/role`, {
     method: "PATCH",
     body: JSON.stringify({ role }),
+  });
+}
+
+export function reassignReminder(
+  reminderId: string,
+  responsibleUserId: number,
+): Promise<{ reminder: Reminder }> {
+  if (MOCK_MODE) {
+    const reminder = mockReminders.find((item) => item.reminderId === reminderId)!;
+    reminder.assignment = { mode: "person", responsibleUserId };
+    reminder.status = "active";
+    return Promise.resolve({ reminder });
+  }
+  return api(`/api/reminders/${encodeURIComponent(reminderId)}/reassign`, {
+    method: "POST",
+    body: JSON.stringify({ responsibleUserId }),
   });
 }
 

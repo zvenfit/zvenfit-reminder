@@ -4,19 +4,23 @@ import {
   ApiError,
   completeOccurrence,
   createReminder,
+  listWorkspaces,
   listMembers,
   listReminders,
   loadDashboard,
+  reassignReminder,
   snoozeOccurrence,
   undoOccurrenceCompletion,
   updateMemberRole,
   syncMembers,
+  selectWorkspace,
   type CreateReminderBody,
   type DeadlineTiming,
   type Reminder,
   type ReminderOccurrence,
   type ScheduleSpec,
   type WorkspaceMember,
+  type Workspace,
 } from "./api";
 import "./styles.css";
 
@@ -190,14 +194,16 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.code === "private_chat_required") {
     return "Ответственный ещё не открыл личный чат с ботом. Попросите его отправить боту /start.";
   }
-  if (error instanceof ApiError && error.code === "workspace_not_initialized") {
-    return "Workspace ещё не настроен. Администратору нужно выполнить /setup в группе.";
+  if (error instanceof ApiError && error.code === "workspace_required") {
+    return "Выберите группу.";
   }
   return error instanceof Error ? error.message : "Что-то пошло не так";
 }
 
 function App() {
   const [view, setView] = useState<View>("home");
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [scope, setScope] = useState<Scope>("mine");
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [occurrences, setOccurrences] = useState<ReminderOccurrence[]>([]);
@@ -208,6 +214,8 @@ function App() {
   const [syncing, setSyncing] = useState(false);
   const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<number | null>(null);
+  const [reassigningReminderId, setReassigningReminderId] = useState<string | null>(null);
+  const [reassignment, setReassignment] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
@@ -246,7 +254,12 @@ function App() {
     [actorId, reminders, scope],
   );
 
-  async function refresh() {
+  async function refresh(selectedId = workspaceId) {
+    if (!selectedId) {
+      setLoading(false);
+      return;
+    }
+    selectWorkspace(selectedId);
     setLoading(true);
     setError(null);
     try {
@@ -268,10 +281,45 @@ function App() {
   useEffect(() => {
     window.Telegram?.WebApp?.ready();
     window.Telegram?.WebApp?.expand();
-    void refresh();
+    void (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const response = await listWorkspaces();
+        setWorkspaces(response.workspaces);
+        const storedWorkspaceId = window.localStorage.getItem("zvenfit.workspaceId");
+        const initial = response.workspaces.find((workspace) =>
+          workspace.workspaceId === storedWorkspaceId) ?? response.workspaces[0];
+        if (!initial) {
+          setError("Нет доступных групп. Добавьте бота в группу и выполните /setup.");
+          setLoading(false);
+          return;
+        }
+        setWorkspaceId(initial.workspaceId);
+        await refresh(initial.workspaceId);
+      } catch (requestError) {
+        setError(errorMessage(requestError));
+        setLoading(false);
+      }
+    })();
   }, []);
 
+  async function changeWorkspace(nextWorkspaceId: string) {
+    setWorkspaceId(nextWorkspaceId);
+    window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId);
+    setView("home");
+    setUndoableOccurrence(null);
+    setOccurrences([]);
+    setReminders([]);
+    setMembers([]);
+    await refresh(nextWorkspaceId);
+  }
+
   function openCreate() {
+    if (!workspaceId) {
+      setError("Сначала подключите группу командой /setup.");
+      return;
+    }
     const defaultResponsible = actorId ?? members[0]?.userId;
     setForm(emptyForm(defaultResponsible));
     setError(null);
@@ -429,6 +477,30 @@ function App() {
     }
   }
 
+  async function submitReassignment(reminderId: string) {
+    const responsibleUserId = Number(reassignment[reminderId]);
+    if (!responsibleUserId) {
+      setError("Выберите нового ответственного.");
+      return;
+    }
+    setReassigningReminderId(reminderId);
+    setError(null);
+    try {
+      const { reminder } = await reassignReminder(reminderId, responsibleUserId);
+      setReminders((current) => current.map((item) =>
+        item.reminderId === reminderId ? reminder : item));
+      setNotice("Ответственный изменён, напоминание снова активно");
+      window.setTimeout(() => setNotice(null), 2600);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setReassigningReminderId(null);
+    }
+  }
+
+  const selectedWorkspace = workspaces.find((workspace) =>
+    workspace.workspaceId === workspaceId);
+
   if (view === "create") {
     const selectedResponsible = memberMap.get(Number(form.responsibleUserId));
     const canAssignGroup = actor?.role === "owner" || actor?.role === "organizer";
@@ -438,7 +510,7 @@ function App() {
           <button className="back-button" type="button" onClick={() => setView("home")}>
             <span aria-hidden="true">←</span> Назад
           </button>
-          <span className="utility-label">Новое</span>
+          <span className="utility-label">{selectedWorkspace?.displayName ?? "Новое"}</span>
         </header>
 
         <section className="form-intro">
@@ -746,13 +818,33 @@ function App() {
     day: "numeric",
     month: "long",
   }).format(new Date());
-
   return (
     <main className="app app--home">
       <header className="home-header">
         <div className="brand-mark" aria-label="Звенит"><span /><b>звенит</b></div>
         <span className="utility-label">{dateCaption}</span>
       </header>
+
+      <label className="workspace-switcher">
+        <span className="workspace-switcher__signal" aria-hidden="true" />
+        <span className="workspace-switcher__copy">
+          <small>Группа</small>
+          {workspaces.length > 1 ? (
+            <select
+              aria-label="Выбранная группа"
+              value={workspaceId ?? ""}
+              onChange={(event) => void changeWorkspace(event.target.value)}
+            >
+              {workspaces.map((workspace) => (
+                <option key={workspace.workspaceId} value={workspace.workspaceId}>
+                  {workspace.displayName}
+                </option>
+              ))}
+            </select>
+          ) : <b>{selectedWorkspace?.displayName ?? "Группа не выбрана"}</b>}
+        </span>
+        {workspaces.length > 1 ? <span className="workspace-switcher__hint">сменить</span> : null}
+      </label>
 
       <section className="home-intro">
         <p className="eyebrow">Линия внимания</p>
@@ -854,7 +946,7 @@ function App() {
                 ? memberMap.get(reminder.assignment.responsibleUserId)
                 : undefined;
               return (
-                <article className="plan-row" key={reminder.reminderId}>
+                <article className={`plan-row plan-row--${reminder.status}`} key={reminder.reminderId}>
                   <div className="plan-date" aria-hidden="true">
                     <span>{reminder.schedule.frequency === "once" ? "→" : "↻"}</span>
                   </div>
@@ -864,6 +956,34 @@ function App() {
                     <small>{reminder.assignment.mode === "anyone" ? "Любой участник" : memberName(responsible)}</small>
                   </div>
                   <span className={`status-dot status-dot--${reminder.status}`} />
+                  {reminder.status === "paused" &&
+                  (actor?.role === "owner" || actor?.role === "organizer") ? (
+                    <div className="reassign-row">
+                      <span>Ответственный вышел — выберите нового</span>
+                      <select
+                        aria-label={`Новый ответственный: ${reminder.title}`}
+                        value={reassignment[reminder.reminderId] ?? ""}
+                        onChange={(event) => setReassignment((current) => ({
+                          ...current,
+                          [reminder.reminderId]: event.target.value,
+                        }))}
+                      >
+                        <option value="">Выбрать участника</option>
+                        {members.map((member) => (
+                          <option key={member.userId} value={member.userId}>
+                            {member.displayName}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        disabled={reassigningReminderId === reminder.reminderId}
+                        onClick={() => void submitReassignment(reminder.reminderId)}
+                      >
+                        {reassigningReminderId === reminder.reminderId ? "Сохраняю…" : "Переназначить"}
+                      </button>
+                    </div>
+                  ) : null}
                 </article>
               );
             })}
@@ -904,7 +1024,7 @@ function App() {
         </section>
       ) : null}
 
-      <button className="floating-create" onClick={openCreate}>
+      <button className="floating-create" disabled={!workspaceId} onClick={openCreate}>
         <span aria-hidden="true">＋</span> Новое напоминание
       </button>
     </main>

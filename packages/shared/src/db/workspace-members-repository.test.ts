@@ -78,8 +78,8 @@ describe("WorkspaceMembersRepository", () => {
       commitTransaction: vi.fn().mockResolvedValue(undefined),
       rollbackTransaction: vi.fn().mockResolvedValue(undefined),
       executeQuery: vi.fn(async (query: string) => ({
-        resultSets: query.includes("SELECT status FROM workspaces")
-          ? [resultSet({ status: "active" }), resultSet(removedRow)]
+        resultSets: query.includes("SELECT status, owner_user_id FROM workspaces")
+          ? [resultSet({ status: "active", owner_user_id: 10 }), resultSet(removedRow)]
           : [],
       })),
     };
@@ -99,6 +99,41 @@ describe("WorkspaceMembersRepository", () => {
       query.includes("UPSERT INTO workspace_members"),
     );
     expect(decodeYdbValue(writeCall?.[1]?.$role)).toBe("member");
+  });
+
+  it("restores the workspace owner's role when they rejoin", async () => {
+    const removedOwnerRow = {
+      workspace_id: "workspace-a",
+      user_id: 10,
+      role: "owner",
+      status: "removed",
+      role_granted_by: null,
+      role_granted_at: null,
+      last_observed_at: "2026-08-01T10:00:00.000Z",
+      created_at: "2026-08-01T10:00:00.000Z",
+      updated_at: "2026-08-01T10:00:00.000Z",
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-owner" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("SELECT status, owner_user_id FROM workspaces")
+          ? [resultSet({ status: "active", owner_user_id: 10 }), resultSet(removedOwnerRow)]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    const observed = await repository.observe(
+      "workspace-a",
+      10,
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    expect(observed).toMatchObject({ role: "owner", status: "active", roleGrantedBy: 10 });
   });
 
   it("lets the owner grant organizer access and audits the change", async () => {
@@ -146,5 +181,50 @@ describe("WorkspaceMembersRepository", () => {
     expect(writeCall?.[0]).toContain("UPDATE workspace_members");
     expect(decodeYdbValue(writeCall?.[1]?.$target_user_id)).toBe(20);
     expect(decodeYdbValue(writeCall?.[1]?.$role)).toBe("organizer");
+  });
+
+  it("removes a member and pauses reminders assigned to them", async () => {
+    const memberRow = {
+      workspace_id: "workspace-a",
+      user_id: 20,
+      role: "organizer",
+      status: "active",
+      role_granted_by: 10,
+      role_granted_at: "2026-08-01T10:00:00.000Z",
+      last_observed_at: "2026-08-13T10:00:00.000Z",
+      created_at: "2026-08-01T10:00:00.000Z",
+      updated_at: "2026-08-13T10:00:00.000Z",
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-remove" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("SELECT owner_user_id")
+          ? [
+              resultSet({ owner_user_id: 10, status: "active" }),
+              resultSet(memberRow),
+              resultSet({ reminder_id: "reminder-a" }),
+            ]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    const result = await repository.remove(
+      "workspace-a",
+      20,
+      new Date("2026-08-14T00:00:00.000Z"),
+    );
+
+    expect(result.member).toMatchObject({ status: "removed", role: "member" });
+    expect(result.pausedReminderIds).toEqual(["reminder-a"]);
+    const write = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("UPDATE workspace_members SET"));
+    expect(write?.[0]).toContain("UPDATE reminders SET status = 'paused'");
+    expect(write?.[0]).toContain("UPDATE reminder_occurrences SET");
+    expect(write?.[0]).toContain("'workspace_member.removed'");
   });
 });

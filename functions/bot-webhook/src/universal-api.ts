@@ -3,6 +3,7 @@ import {
   OccurrenceNotActionableError,
   OccurrencesRepository,
   PrivateChatUnavailableError,
+  ReminderReassignmentForbiddenError,
   RemindersRepository,
   WorkspaceMembersRepository,
   WorkspaceMemberNotFoundError,
@@ -15,7 +16,7 @@ import {
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
-import { getPath, jsonResponse } from "./api.js";
+import { getHeader, getPath, jsonResponse } from "./api.js";
 import {
   UniversalOccurrenceActionForbiddenError,
   UniversalOccurrenceActionNotFoundError,
@@ -25,9 +26,9 @@ import {
 } from "./universal-occurrence-actions.js";
 
 export interface UniversalApiDependencies {
-  workspaces: Pick<WorkspacesRepository, "getByTelegramChatId">;
+  workspaces: Pick<WorkspacesRepository, "getById" | "listForUser">;
   members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles" | "setRole">;
-  reminders: Pick<RemindersRepository, "listForActor" | "create">;
+  reminders: Pick<RemindersRepository, "listForActor" | "create" | "reassign">;
   occurrences: Pick<OccurrencesRepository, "listActionableForActor">;
   occurrenceActions: {
     execute(input: UniversalOccurrenceActionInput): Promise<UniversalOccurrenceActionResult>;
@@ -48,6 +49,7 @@ function createDependencies(config: AppConfig): UniversalApiDependencies {
 
 function isUniversalRoute(method: string, path: string): boolean {
   return (
+    (method === "GET" && path === "/api/workspaces") ||
     (method === "GET" && (
       path === "/api/dashboard" ||
       path === "/api/reminders" ||
@@ -55,6 +57,7 @@ function isUniversalRoute(method: string, path: string): boolean {
     )) ||
     (method === "POST" && (
       path === "/api/reminders" ||
+      /^\/api\/reminders\/[^/]+\/reassign$/.test(path) ||
       /^\/api\/occurrences\/[^/]+\/(complete|snooze|undo-completion)$/.test(path)
     )) ||
     (method === "PATCH" && /^\/api\/members\/\d+\/role$/.test(path))
@@ -73,12 +76,21 @@ export async function handleUniversalApi(
     return null;
   }
   const dependencies = providedDependencies ?? createDependencies(config);
-  const workspace = await dependencies.workspaces.getByTelegramChatId(config.allowedChatId);
-  if (!workspace || workspace.status !== "active") {
-    return jsonResponse(503, {
-      error: "Workspace is not initialized",
-      code: "workspace_not_initialized",
+  if (method === "GET" && path === "/api/workspaces") {
+    const workspaces = await dependencies.workspaces.listForUser(initData.user.id);
+    return jsonResponse(200, { workspaces });
+  }
+
+  const workspaceId = getHeader(event, "X-Workspace-Id")?.trim();
+  if (!workspaceId || workspaceId.length > 100) {
+    return jsonResponse(400, {
+      error: "Choose a workspace",
+      code: "workspace_required",
     });
+  }
+  const workspace = await dependencies.workspaces.getById(workspaceId);
+  if (!workspace || workspace.status !== "active") {
+    return jsonResponse(404, { error: "Workspace not found", code: "not_found" });
   }
   const actor = await dependencies.members.getByUserId(
     workspace.workspaceId,
@@ -107,6 +119,45 @@ export async function handleUniversalApi(
   if (method === "GET" && path === "/api/members") {
     const members = await dependencies.members.listProfiles(workspace.workspaceId);
     return jsonResponse(200, { members });
+  }
+
+  const reminderReassignMatch = path.match(/^\/api\/reminders\/([^/]+)\/reassign$/);
+  if (method === "POST" && reminderReassignMatch) {
+    let responsibleUserId: unknown;
+    try {
+      responsibleUserId = JSON.parse(event.body ?? "{}").responsibleUserId;
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    if (!Number.isSafeInteger(responsibleUserId) || Number(responsibleUserId) <= 0) {
+      return jsonResponse(400, { error: "Invalid responsible user", code: "validation_failed" });
+    }
+    try {
+      const reminder = await dependencies.reminders.reassign(
+        workspace.workspaceId,
+        decodeURIComponent(reminderReassignMatch[1]),
+        Number(responsibleUserId),
+        actor.userId,
+      );
+      return reminder
+        ? jsonResponse(200, { reminder })
+        : jsonResponse(404, { error: "Reminder not found", code: "not_found" });
+    } catch (error) {
+      if (error instanceof ReminderReassignmentForbiddenError) {
+        return jsonResponse(403, { error: "Only organizers can reassign", code: "forbidden" });
+      }
+      if (error instanceof InactiveWorkspaceMemberError) {
+        return jsonResponse(409, { error: "Choose an active member", code: "inactive_participant" });
+      }
+      if (error instanceof PrivateChatUnavailableError) {
+        return jsonResponse(409, {
+          error: "Responsible person must start the bot first",
+          code: "private_chat_required",
+          userId: error.userId,
+        });
+      }
+      throw error;
+    }
   }
 
   const memberRoleMatch = path.match(/^\/api\/members\/(\d+)\/role$/);
@@ -167,6 +218,7 @@ export async function handleUniversalApi(
     try {
       const result = await dependencies.occurrenceActions.execute({
         source: "mini-app",
+        workspaceId: workspace.workspaceId,
         action: routeAction === "complete" ? "done" : routeAction === "snooze" ? "snooze" : "undo",
         occurrenceId,
         actorUserId: actor.userId,

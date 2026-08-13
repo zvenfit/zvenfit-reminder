@@ -31,6 +31,11 @@ export class WorkspaceMemberNotFoundError extends Error {
   }
 }
 
+export interface RemovedWorkspaceMemberResult {
+  member: WorkspaceMember | null;
+  pausedReminderIds: string[];
+}
+
 function nullableNumber(value: unknown): number | null {
   return value == null ? null : Number(value);
 }
@@ -118,7 +123,7 @@ export class WorkspaceMembersRepository {
           `
             DECLARE $workspace_id AS Utf8;
             DECLARE $user_id AS Int64;
-            SELECT status FROM workspaces
+            SELECT status, owner_user_id FROM workspaces
             WHERE workspace_id = $workspace_id LIMIT 1;
 
             SELECT * FROM workspace_members
@@ -137,13 +142,18 @@ export class WorkspaceMembersRepository {
         const existingRow = mapResultRows(resultSets[1])[0];
         const existing = existingRow ? rowToWorkspaceMember(existingRow) : null;
         const reactivated = existing?.status === "removed";
+        const isWorkspaceOwner = Number(getField(workspaceRow, "owner_user_id")) === userId;
         const member: WorkspaceMember = {
           workspaceId,
           userId,
-          role: reactivated ? "member" : (existing?.role ?? "member"),
+          role: isWorkspaceOwner ? "owner" : reactivated ? "member" : (existing?.role ?? "member"),
           status: "active",
-          roleGrantedBy: reactivated ? null : (existing?.roleGrantedBy ?? null),
-          roleGrantedAt: reactivated ? null : (existing?.roleGrantedAt ?? null),
+          roleGrantedBy: isWorkspaceOwner
+            ? userId
+            : reactivated ? null : (existing?.roleGrantedBy ?? null),
+          roleGrantedAt: isWorkspaceOwner
+            ? (existing?.roleGrantedAt ?? now)
+            : reactivated ? null : (existing?.roleGrantedAt ?? null),
           lastObservedAt: now,
           createdAt: existing?.createdAt ?? now,
           updatedAt: now,
@@ -285,6 +295,114 @@ export class WorkspaceMembersRepository {
           },
         );
         return updated;
+      }),
+    );
+  }
+
+  async remove(
+    workspaceId: string,
+    userId: number,
+    now: Date = new Date(),
+  ): Promise<RemovedWorkspaceMemberResult> {
+    return this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $user_id AS Int64;
+            SELECT owner_user_id, status FROM workspaces
+            WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT * FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $user_id
+            LIMIT 1;
+
+            SELECT reminder_id FROM reminders
+            WHERE workspace_id = $workspace_id
+              AND responsible_user_id = $user_id
+              AND status = 'active'
+            ORDER BY reminder_id;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $user_id: TypedValues.int64(userId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const memberRow = mapResultRows(resultSets[1])[0];
+        if (!workspaceRow || getField(workspaceRow, "status") !== "active" || !memberRow) {
+          return { member: null, pausedReminderIds: [] };
+        }
+        const existing = rowToWorkspaceMember(memberRow);
+        if (existing.status === "removed") {
+          return { member: existing, pausedReminderIds: [] };
+        }
+        const pausedReminderIds = mapResultRows(resultSets[2]).map((row) =>
+          String(getField(row, "reminder_id")));
+        const removed: WorkspaceMember = {
+          ...existing,
+          role: existing.role === "owner" ? "owner" : "member",
+          status: "removed",
+          roleGrantedBy: null,
+          roleGrantedAt: null,
+          updatedAt: now,
+        };
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $user_id AS Int64;
+            DECLARE $role AS Utf8;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $entity_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            UPDATE workspace_members SET
+              role = $role, status = 'removed', role_granted_by = NULL,
+              role_granted_at = NULL, updated_at = $now
+            WHERE workspace_id = $workspace_id AND user_id = $user_id;
+
+            UPDATE reminders SET status = 'paused', updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND responsible_user_id = $user_id
+              AND status = 'active';
+
+            UPDATE reminder_runtime SET state = 'paused', updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND reminder_id IN (
+                SELECT reminder_id FROM reminders
+                WHERE workspace_id = $workspace_id
+                  AND responsible_user_id = $user_id
+                  AND status = 'paused'
+              );
+
+            UPDATE reminder_occurrences SET
+              notification_state = 'stopped', next_notification_at = NULL,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND responsible_user_id = $user_id
+              AND notification_state = 'waiting'
+              AND status IN ('scheduled', 'pending', 'overdue');
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $entity_id, $now, $event_id, 'workspace_member',
+              'workspace_member.removed', $user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $user_id: TypedValues.int64(userId),
+            $role: TypedValues.utf8(removed.role),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $entity_id: TypedValues.utf8(`member:${userId}`),
+            $payload: TypedValues.jsonDocument(JSON.stringify({ pausedReminderIds })),
+          },
+        );
+        return { member: removed, pausedReminderIds };
       }),
     );
   }

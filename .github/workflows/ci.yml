@@ -50,7 +50,6 @@ jobs:
           : "${BOT_TOKEN:?Missing production secret BOT_TOKEN}"
           : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
           : "${WEBHOOK_URL:?Missing production secret WEBHOOK_URL}"
-          : "${ALLOWED_CHAT_ID:?Missing production secret ALLOWED_CHAT_ID}"
           : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
           : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
           : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
@@ -73,6 +72,21 @@ jobs:
           yc config profile create ci
           yc config set service-account-key sa-key.json
           yc config set folder-id "$YC_FOLDER_ID"
+      - name: Install YDB CLI
+        run: |
+          ydb_cli_dir="$RUNNER_TEMP/ydb-cli"
+          mkdir -p "$ydb_cli_dir"
+          curl -fsSLo "$ydb_cli_dir/ydb" \
+            https://storage.yandexcloud.net/yandexcloud-ydb/release/2.31.0/linux/amd64/ydb
+          chmod +x "$ydb_cli_dir/ydb"
+          echo "$ydb_cli_dir" >> "$GITHUB_PATH"
+          "$ydb_cli_dir/ydb" version
+      - name: Apply YDB migrations
+        env:
+          YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
+          YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
+          SA_KEY_FILE: ${{ github.workspace }}/sa-key.json
+        run: ./scripts/apply-ydb-migrations.sh
       - name: Package bot-webhook
         run: |
           cd functions/bot-webhook

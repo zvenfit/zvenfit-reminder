@@ -22,7 +22,7 @@ interface UniversalOccurrenceActionInputBase {
 export type UniversalOccurrenceActionInput = UniversalOccurrenceActionInputBase &
   (
     | { source: "telegram"; chatId: number; chatType: "private" | "group" }
-    | { source: "mini-app" }
+    | { source: "mini-app"; workspaceId: string }
   );
 
 export interface UniversalOccurrenceActionResult {
@@ -45,10 +45,10 @@ export class UniversalOccurrenceActionForbiddenError extends Error {
 }
 
 export interface UniversalOccurrenceActionDependencies {
-  workspaces: Pick<WorkspacesRepository, "getByTelegramChatId">;
+  workspaces: Pick<WorkspacesRepository, "getById" | "getByTelegramChatId">;
   members: Pick<WorkspaceMembersRepository, "getByUserId">;
   reminders: Pick<RemindersRepository, "getById">;
-  occurrences: Pick<OccurrencesRepository, "getById">;
+  occurrences: Pick<OccurrencesRepository, "getById" | "findByIdForActor">;
   actions: Pick<
     OccurrenceActionsRepository,
     "complete" | "snooze" | "undoCompletion"
@@ -68,13 +68,13 @@ function createDependencies(config: AppConfig): UniversalOccurrenceActionDepende
 function callbackLocationAllowed(
   visibility: ReminderOccurrence["visibility"],
   input: UniversalOccurrenceActionInput,
-  allowedGroupChatId: number,
+  workspaceChatId: number,
 ): boolean {
   if (input.source === "mini-app") {
     return true;
   }
   if (visibility === "group") {
-    return input.chatType === "group" && input.chatId === allowedGroupChatId;
+    return input.chatType === "group" && input.chatId === workspaceChatId;
   }
   return input.chatType === "private" && input.chatId === input.actorUserId;
 }
@@ -90,19 +90,27 @@ export async function executeUniversalOccurrenceAction(
   if (!Number.isInteger(snoozeMinutes) || snoozeMinutes < 15 || snoozeMinutes > 30 * 24 * 60) {
     throw new Error("Snooze duration must be between 15 minutes and 30 days");
   }
-  const workspace = await dependencies.workspaces.getByTelegramChatId(config.allowedChatId);
+  const privateOccurrence = input.source === "telegram" && input.chatType === "private"
+    ? await dependencies.occurrences.findByIdForActor(input.occurrenceId, input.actorUserId)
+    : null;
+  const workspace = input.source === "mini-app"
+    ? await dependencies.workspaces.getById(input.workspaceId)
+    : input.chatType === "group"
+      ? await dependencies.workspaces.getByTelegramChatId(input.chatId)
+      : privateOccurrence
+        ? await dependencies.workspaces.getById(privateOccurrence.workspaceId)
+        : null;
   if (!workspace || workspace.status !== "active") {
     throw new UniversalOccurrenceActionNotFoundError();
   }
 
-  const occurrence = await dependencies.occurrences.getById(
-    workspace.workspaceId,
-    input.occurrenceId,
+  const occurrence = privateOccurrence ?? await dependencies.occurrences.getById(
+    workspace.workspaceId, input.occurrenceId,
   );
   if (!occurrence) {
     throw new UniversalOccurrenceActionNotFoundError();
   }
-  if (!callbackLocationAllowed(occurrence.visibility, input, config.allowedChatId)) {
+  if (!callbackLocationAllowed(occurrence.visibility, input, workspace.telegramChatId)) {
     throw new UniversalOccurrenceActionForbiddenError();
   }
 

@@ -168,4 +168,71 @@ describe("RemindersRepository", () => {
     expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
   });
+
+  it("reassigns a paused reminder and resumes its pending occurrence", async () => {
+    const reminderRow = {
+      workspace_id: "workspace-a",
+      reminder_id: "reminder-a",
+      title: "Передать показания",
+      description: null,
+      action_url: null,
+      amount_minor: null,
+      currency: null,
+      visibility: "group",
+      creator_user_id: 10,
+      assignment_mode: "person",
+      responsible_user_id: 20,
+      schedule_spec: JSON.stringify(draft.schedule),
+      timezone: "Europe/Moscow",
+      lead_minutes: 0,
+      repeat_interval_minutes: 360,
+      ignore_quiet_hours: false,
+      escalation_enabled: false,
+      escalation_delay_minutes: null,
+      escalation_repeat_minutes: null,
+      status: "paused",
+      version: 1,
+      created_at: "2026-08-01T10:00:00.000Z",
+      updated_at: "2026-08-13T10:00:00.000Z",
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-reassign" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => {
+        if (query.includes("SELECT role, status FROM workspace_members")) {
+          return {
+            resultSets: [
+              resultSet([{ role: "organizer", status: "active" }]),
+              resultSet([{ status: "active" }]),
+              resultSet([reminderRow]),
+              resultSet([{ private_chat_available: false }]),
+            ],
+          };
+        }
+        if (query.includes("SELECT * FROM reminders")) {
+          return { resultSets: [resultSet([{ ...reminderRow, status: "active", responsible_user_id: 30 }]), resultSet([])] };
+        }
+        return { resultSets: [] };
+      }),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new RemindersRepository("", "", runSession);
+
+    const reminder = await repository.reassign(
+      "workspace-a",
+      "reminder-a",
+      30,
+      10,
+      new Date("2026-08-14T00:00:00.000Z"),
+    );
+
+    expect(reminder?.assignment).toEqual({ mode: "person", responsibleUserId: 30 });
+    const write = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("UPDATE reminders SET"));
+    expect(write?.[0]).toContain("notification_state = 'waiting'");
+    expect(write?.[0]).toContain("state = IF(current_occurrence_id IS NULL, 'ready', 'blocked')");
+    expect(write?.[0]).toContain("'reminder.reassigned'");
+  });
 });

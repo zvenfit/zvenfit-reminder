@@ -1,6 +1,6 @@
 # UX and visual design: Quiet Pulse
 
-Status: approved target design for the Mini App and Telegram messages. Product
+Status: approved and implemented core design for the Mini App and Telegram messages. Product
 behavior is specified in [product-spec.md](product-spec.md).
 
 ## Design thesis

@@ -1,5 +1,10 @@
 import { InlineKeyboard, Keyboard } from "grammy";
-import { MEMBER_IMPORT_REQUEST_ID } from "./member-import.js";
+import { memberImportRequestId } from "./member-import.js";
+
+export interface ManagedWorkspaceOption {
+  workspaceId: string;
+  displayName: string;
+}
 
 interface StartResponse {
   message: string;
@@ -10,27 +15,32 @@ export function buildStartResponse(
   chatType: string,
   miniAppUrl: string,
   botUsername: string,
-  canImportMembers = false,
+  managedWorkspaces: ManagedWorkspaceOption[] = [],
 ): StartResponse {
   if (chatType === "private") {
     const keyboard = new Keyboard();
     if (miniAppUrl) {
       keyboard.webApp("Открыть панель", miniAppUrl);
     }
-    if (canImportMembers) {
-      if (miniAppUrl) {
+    for (const [index, workspace] of managedWorkspaces.entries()) {
+      if (miniAppUrl || index > 0) {
         keyboard.row();
       }
-      keyboard.requestUsers("Добавить участников", MEMBER_IMPORT_REQUEST_ID, {
-        user_is_bot: false,
-        max_quantity: 10,
-        request_name: true,
-        request_username: true,
-      });
+      const suffix = managedWorkspaces.length > 1 ? ` · ${workspace.displayName}` : "";
+      keyboard.requestUsers(
+        `Добавить участников${suffix}`.slice(0, 64),
+        memberImportRequestId(workspace.workspaceId),
+        {
+          user_is_bot: false,
+          max_quantity: 10,
+          request_name: true,
+          request_username: true,
+        },
+      );
     }
     return {
-      message: canImportMembers
-        ? "Готово: личные уведомления подключены. Открой панель или добавь участников основной группы."
+      message: managedWorkspaces.length > 0
+        ? "Готово: личные уведомления подключены. Открой панель или добавь участников нужной группы."
         : "Готово: личные уведомления подключены. Напоминания можно создавать в Mini App.",
       keyboard: keyboard.keyboard.length > 0
         ? keyboard.resized().persistent()
