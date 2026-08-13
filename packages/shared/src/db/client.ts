@@ -1,11 +1,10 @@
-import {
-  Driver as YdbDriver,
-  TypedValues,
-  Types,
-  getCredentialsFromEnv,
-  type Driver as YdbDriverType,
-  type TableSession,
-} from "ydb-sdk";
+import { createRequire as createNodeRequire } from "node:module";
+import type { Driver as YdbDriverType, TableSession } from "ydb-sdk";
+
+const requireYdb = createNodeRequire(import.meta.url);
+const { Driver: YdbDriver, TypedValues, Types, getCredentialsFromEnv } = requireYdb(
+  "ydb-sdk",
+) as typeof import("ydb-sdk");
 
 let driverPromise: Promise<YdbDriverType> | null = null;
 

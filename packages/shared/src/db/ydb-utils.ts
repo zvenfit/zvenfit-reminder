@@ -1,4 +1,4 @@
-import { TypedValues, Types } from "ydb-sdk";
+import { TypedValues, Types } from "./client.js";
 
 export type YdbColumn = {
   name?: string | null;

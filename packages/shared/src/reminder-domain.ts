@@ -244,7 +244,7 @@ export const reminderDraftSchema = z
       }),
     schedule: scheduleSpecSchema,
     timezone: ianaTimezoneSchema,
-    notificationPolicy: notificationPolicySchema.default({}),
+    notificationPolicy: notificationPolicySchema.prefault({}),
   })
   .strict()
   .superRefine((value, context) => {

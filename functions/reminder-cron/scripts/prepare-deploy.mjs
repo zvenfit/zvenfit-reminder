@@ -12,7 +12,7 @@ writeFileSync(
       type: "module",
       dependencies: {
         "ydb-sdk": "^5.11.1",
-        "@yandex-cloud/nodejs-sdk": "^2.7.7",
+        "@yandex-cloud/nodejs-sdk": "^2.9.3",
       },
     },
     null,
