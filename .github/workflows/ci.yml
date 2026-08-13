@@ -109,6 +109,15 @@ jobs:
           if [[ -n "$ADMIN_USER_IDS" ]]; then
             admin_user_ids_args+=(--environment "ADMIN_USER_IDS=$ADMIN_USER_IDS")
           fi
+          bot_info_response="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getMe")"
+          bot_info_json="$(printf '%s' "$bot_info_response" | jq -ce '
+            if .ok == true and
+              (.result.id | type) == "number" and
+              (.result.username | type) == "string"
+            then .result
+            else error("Telegram getMe failed")
+            end
+          ')"
           yc serverless function version create \
             --function-name zvenfit-reminder-bot \
             --runtime nodejs22 \
@@ -126,6 +135,7 @@ jobs:
             --environment MINI_APP_URL="$MINI_APP_URL" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
             --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED" \
+            --environment BOT_INFO_JSON="$bot_info_json" \
             "${admin_user_ids_args[@]}"
       - name: Deploy reminder-cron
         env:

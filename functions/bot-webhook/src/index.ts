@@ -18,7 +18,7 @@ import {
   type ParsedInitData,
   type Rule,
 } from "@zvenfit-reminder/shared";
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, type BotConfig, type Context } from "grammy";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import {
   createRuleSchema,
@@ -127,7 +127,13 @@ export function getBot(): Bot {
   const instancesRepo = new InstancesRepository(config.ydbEndpoint, config.ydbDatabase);
   const membersRepo = new MembersRepository(config.ydbEndpoint, config.ydbDatabase);
 
-  const bot = new Bot(config.botToken);
+  const cachedBotInfo = process.env.BOT_INFO_JSON
+    ? JSON.parse(process.env.BOT_INFO_JSON) as NonNullable<BotConfig<Context>["botInfo"]>
+    : undefined;
+  const bot = new Bot(
+    config.botToken,
+    cachedBotInfo ? { botInfo: cachedBotInfo } : undefined,
+  );
   const observeSyncedGroupUser = config.universalRemindersEnabled
     ? async (user: SyncedTelegramUser) =>
         observeTelegramIdentity(
