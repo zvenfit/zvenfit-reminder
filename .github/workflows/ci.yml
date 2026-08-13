@@ -107,6 +107,10 @@ jobs:
           YC_BUCKET: ${{ secrets.YC_BUCKET }}
           UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
         run: |
+          admin_user_ids_args=()
+          if [[ -n "$ADMIN_USER_IDS" ]]; then
+            admin_user_ids_args+=(--environment "ADMIN_USER_IDS=$ADMIN_USER_IDS")
+          fi
           yc serverless function version create \
             --function-name zvenfit-reminder-bot \
             --runtime nodejs22 \
@@ -123,8 +127,8 @@ jobs:
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment MINI_APP_URL="$MINI_APP_URL" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
-            --environment ADMIN_USER_IDS="$ADMIN_USER_IDS" \
-            --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED"
+            --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED" \
+            "${admin_user_ids_args[@]}"
       - name: Deploy reminder-cron
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
