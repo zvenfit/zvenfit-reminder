@@ -179,6 +179,22 @@ jobs:
             --data-urlencode 'allowed_updates=["message","callback_query","chat_member"]')"
           printf '%s' "$response" | jq -e '.ok == true and .result == true' >/dev/null
 
+          smoke_timestamp="$(date +%s)"
+          smoke_payload="$(jq -nc --argjson timestamp "$smoke_timestamp" '{
+            update_id: $timestamp,
+            channel_post: {
+              message_id: 1,
+              date: $timestamp,
+              chat: {id: 0, type: "channel", title: "Deploy smoke"},
+              text: "health"
+            }
+          }')"
+          curl -fsS -X POST "${WEBHOOK_URL}/webhook" \
+            --header "Content-Type: application/json" \
+            --header "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
+            --data "$smoke_payload" \
+            >/dev/null
+
           info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
           printf '%s' "$info" | jq -e --arg expected "${WEBHOOK_URL}/webhook" '
             .ok == true and
