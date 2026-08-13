@@ -4,6 +4,7 @@ import {
   OccurrenceNotActionableError,
   RulesRepository,
   UndoWindowExpiredError,
+  WorkspaceMembersRepository,
   WorkspaceChatAlreadyRegisteredError,
   WorkspacesRepository,
   buildOccurrenceMessage,
@@ -28,6 +29,11 @@ import {
   updateRuleSchema,
 } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
+import {
+  MEMBER_IMPORT_REQUEST_ID,
+  canImportWorkspaceMembers,
+  importSharedGroupMembers,
+} from "./member-import.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
 import { buildStartResponse } from "./start-response.js";
 import {
@@ -127,6 +133,11 @@ export function getBot(): Bot {
   const rulesRepo = new RulesRepository(config.ydbEndpoint, config.ydbDatabase);
   const instancesRepo = new InstancesRepository(config.ydbEndpoint, config.ydbDatabase);
   const membersRepo = new MembersRepository(config.ydbEndpoint, config.ydbDatabase);
+  const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
+  const workspaceMembersRepo = new WorkspaceMembersRepository(
+    config.ydbEndpoint,
+    config.ydbDatabase,
+  );
 
   const cachedBotInfo = process.env.BOT_INFO_JSON
     ? JSON.parse(process.env.BOT_INFO_JSON) as NonNullable<BotConfig<Context>["botInfo"]>
@@ -171,13 +182,19 @@ export function getBot(): Bot {
       ctx.chat?.type === "private" &&
       userId != null &&
       ctx.message?.text?.startsWith("/start") === true;
+    const isUniversalPrivateUsersShared =
+      config.universalRemindersEnabled &&
+      ctx.chat?.type === "private" &&
+      userId != null &&
+      ctx.message?.users_shared != null;
 
     if (
       !isAllowedChat &&
       !isPrivateAdmin &&
       !isAllowedPrivate &&
       !isUniversalPrivateCallback &&
-      !isUniversalPrivateStart
+      !isUniversalPrivateStart &&
+      !isUniversalPrivateUsersShared
     ) {
       return;
     }
@@ -209,14 +226,86 @@ export function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => {
+    const workspace = config.universalRemindersEnabled && ctx.chat.type === "private"
+      ? await workspacesRepo.getByTelegramChatId(config.allowedChatId)
+      : null;
+    const actor = workspace && ctx.from
+      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id)
+      : null;
     const response = buildStartResponse(
       ctx.chat.type,
       config.miniAppUrl,
       bot.botInfo.username,
+      canImportWorkspaceMembers(actor),
     );
     await ctx.reply(response.message, {
       reply_markup: response.keyboard,
     });
+  });
+
+  bot.on("message:users_shared", async (ctx) => {
+    if (
+      !config.universalRemindersEnabled ||
+      ctx.chat.type !== "private" ||
+      !ctx.from ||
+      ctx.message.users_shared.request_id !== MEMBER_IMPORT_REQUEST_ID
+    ) {
+      return;
+    }
+
+    const workspace = await workspacesRepo.getByTelegramChatId(config.allowedChatId);
+    const actor = workspace
+      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id)
+      : null;
+    if (!workspace || !canImportWorkspaceMembers(actor)) {
+      await ctx.reply("Добавлять участников может только владелец или организатор группы.");
+      return;
+    }
+
+    const result = await importSharedGroupMembers(
+      config.allowedChatId,
+      ctx.message.users_shared.users,
+      {
+        getChatMember: (chatId, userId) => bot.api.getChatMember(chatId, userId),
+        saveMember: async (membership) => {
+          const user = membership.user;
+          const displayName = [user.first_name, user.last_name]
+            .filter(Boolean)
+            .join(" ") || user.username || "User";
+          await membersRepo.upsert(
+            config.allowedChatId,
+            user.id,
+            user.username ?? null,
+            displayName,
+          );
+          await observeTelegramIdentity(
+            config,
+            {
+              id: user.id,
+              username: user.username,
+              firstName: user.first_name,
+              lastName: user.last_name,
+              languageCode: user.language_code,
+            },
+            { id: config.allowedChatId, type: "group" },
+          );
+        },
+      },
+    );
+
+    const response = buildStartResponse(
+      "private",
+      config.miniAppUrl,
+      bot.botInfo.username,
+      true,
+    );
+    const skippedText = result.skipped > 0
+      ? ` Не добавлено: ${result.skipped} — они не состоят в основной группе или недоступны.`
+      : "";
+    await ctx.reply(
+      `✅ Добавлено участников: ${result.imported}.${skippedText}`,
+      { reply_markup: response.keyboard },
+    );
   });
 
   bot.command("list", async (ctx) => {
@@ -260,17 +349,13 @@ export function getBot(): Bot {
         return;
       }
 
-      const workspaces = new WorkspacesRepository(
-        config.ydbEndpoint,
-        config.ydbDatabase,
-      );
-      const existing = await workspaces.getByTelegramChatId(config.allowedChatId);
+      const existing = await workspacesRepo.getByTelegramChatId(config.allowedChatId);
       if (existing) {
         await ctx.reply("Workspace уже настроен.");
         return;
       }
       try {
-        await workspaces.create({
+        await workspacesRepo.create({
           telegramChatId: config.allowedChatId,
           displayName: ctx.chat.title || "Группа",
           ownerUserId: ctx.from.id,
@@ -339,6 +424,7 @@ export function getBot(): Bot {
 
     const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "User";
     await membersRepo.upsert(config.allowedChatId, user.id, user.username ?? null, displayName);
+    await observeSyncedGroupUser?.(user);
   });
 
   bot.command("done", async (ctx) => {

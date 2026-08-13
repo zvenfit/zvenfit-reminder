@@ -40,12 +40,15 @@ dependencies into their deployment directories.
 
 ### Bot and member cache
 
-The bot middleware accepts updates from `ALLOWED_CHAT_ID`. In private chats it
-accepts configured admins; if no admins are configured, any private user is
-currently accepted. Every observed group sender is upserted into
-`group_members`. Telegram does not provide an API for listing every group
-member, so manual sync can only refresh admins, cached users, and the requesting
-user.
+The bot middleware accepts updates from `ALLOWED_CHAT_ID`. Universal-reminder
+callbacks, `/start`, and native user-picker results are also accepted in private
+chats and then authorized through workspace membership and role. Every observed
+group sender is upserted into `group_members` and the universal member model.
+Telegram does not provide an API for listing every group member. Owners and
+organizers can therefore select up to ten users at a time in the private bot
+chat; the backend verifies every selected ID with `getChatMember` against
+`ALLOWED_CHAT_ID` before saving it. Manual sync remains a fallback for admins,
+cached users, and the requesting user.
 
 ### Mini App API
 

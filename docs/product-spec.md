@@ -46,6 +46,14 @@ checks are scoped by `workspaceId`.
 Telegram administrator status does not implicitly grant an application role.
 The owner explicitly grants organizer access inside the Mini App.
 
+Telegram does not expose the complete group roster to bots, including bot
+administrators. An owner or organizer can import up to ten users at a time with
+Telegram's native user picker in the private bot chat. The picker is not scoped
+to a group, so the backend verifies every selected user with `getChatMember`
+against the workspace group before activating membership. Future joins and
+group activity are observed automatically. Starting the bot is required only
+when a member needs private notifications.
+
 ## Reminder content
 
 Each reminder contains:
