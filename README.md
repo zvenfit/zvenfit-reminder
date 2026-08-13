@@ -61,6 +61,7 @@ SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
 |--------|----------|
 | `YC_SA_JSON` | JSON-ключ сервисного аккаунта |
 | `YC_FOLDER_ID` | ID каталога Yandex Cloud |
+| `YC_SERVICE_ACCOUNT_ID` | ID сервисного аккаунта для runtime credentials функций |
 | `YC_BUCKET` | Bucket Object Storage для статики Mini App |
 | `YDB_ENDPOINT` | gRPC endpoint YDB |
 | `YDB_DATABASE` | Путь к базе YDB |
@@ -71,6 +72,11 @@ SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
 | `MINI_APP_URL` | Публичный URL на `index.html` Mini App |
 | `DEFAULT_TIMEZONE` | Опционально, по умолчанию `Europe/Moscow` |
 | `ADMIN_USER_IDS` | Опционально, Telegram user id админов через запятую |
+
+В GitHub Environment `production` также нужна variable
+`UNIVERSAL_REMINDERS_ENABLED`. Оставляй её равной `0` до применения миграций и
+явного cutover; текущий универсальный Mini App публикуется только при значении
+`1`, чтобы UI и backend не разъехались.
 
 ## Локальная разработка
 

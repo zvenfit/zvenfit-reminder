@@ -30,6 +30,36 @@ jobs:
         with:
           node-version: 20
           cache: npm
+      - name: Validate deploy configuration
+        env:
+          YC_SA_JSON: ${{ secrets.YC_SA_JSON }}
+          YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
+          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          YC_BUCKET: ${{ secrets.YC_BUCKET }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          ALLOWED_CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
+          YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
+          YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
+          MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
+          UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
+        run: |
+          : "${YC_SA_JSON:?Missing production secret YC_SA_JSON}"
+          : "${YC_FOLDER_ID:?Missing production secret YC_FOLDER_ID}"
+          : "${YC_SERVICE_ACCOUNT_ID:?Missing production secret YC_SERVICE_ACCOUNT_ID}"
+          : "${YC_BUCKET:?Missing production secret YC_BUCKET}"
+          : "${BOT_TOKEN:?Missing production secret BOT_TOKEN}"
+          : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
+          : "${WEBHOOK_URL:?Missing production secret WEBHOOK_URL}"
+          : "${ALLOWED_CHAT_ID:?Missing production secret ALLOWED_CHAT_ID}"
+          : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
+          : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
+          : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
+          if [[ "$UNIVERSAL_REMINDERS_ENABLED" != "1" ]]; then
+            echo "Production variable UNIVERSAL_REMINDERS_ENABLED must be 1 for the universal Mini App rollout" >&2
+            exit 1
+          fi
       - run: npm ci
       - run: npm run build
       - name: Install YC CLI
@@ -67,6 +97,8 @@ jobs:
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
           ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
         run: |
           yc serverless function version create \
             --function-name zvenfit-reminder-bot \
@@ -74,6 +106,7 @@ jobs:
             --entrypoint index.handler \
             --memory 256m \
             --execution-timeout 30s \
+            --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
             --source-path bot-webhook.zip \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
@@ -82,7 +115,8 @@ jobs:
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment MINI_APP_URL="$MINI_APP_URL" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
-            --environment ADMIN_USER_IDS="$ADMIN_USER_IDS"
+            --environment ADMIN_USER_IDS="$ADMIN_USER_IDS" \
+            --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED"
       - name: Deploy reminder-cron
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -91,6 +125,8 @@ jobs:
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
+          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
         run: |
           yc serverless function version create \
             --function-name zvenfit-reminder-cron \
@@ -98,13 +134,15 @@ jobs:
             --entrypoint index.handler \
             --memory 256m \
             --execution-timeout 60s \
+            --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
             --source-path reminder-cron.zip \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
             --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
             --environment YDB_ENDPOINT="$YDB_ENDPOINT" \
             --environment YDB_DATABASE="$YDB_DATABASE" \
-            --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}"
+            --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
+            --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED"
       - name: Upload Mini App
         env:
           YC_BUCKET: ${{ secrets.YC_BUCKET }}

@@ -25,8 +25,9 @@ done
 echo "==> Создаём YDB Serverless..."
 yc ydb database create --serverless --name "$YDB_NAME" --folder-id "$YC_FOLDER_ID" 2>/dev/null || true
 YDB_ID=$(yc ydb database get --name "$YDB_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
-YDB_ENDPOINT=$(yc ydb database get --name "$YDB_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .document_api_endpoint | sed 's|https://|grpcs://|' | sed 's|:443||'):2135
-YDB_DATABASE=$(yc ydb database get --name "$YDB_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .document_api_endpoint | sed 's|https://ydb.serverless.yandexcloud.net:443||')
+YDB_CONNECTION_STRING=$(yc ydb database get --name "$YDB_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .endpoint)
+YDB_ENDPOINT=$(jq -nr --arg value "$YDB_CONNECTION_STRING" '$value | split("/?database=")[0]')
+YDB_DATABASE=$(jq -nr --arg value "$YDB_CONNECTION_STRING" '$value | split("/?database=")[1]')
 
 echo "==> Создаём bucket Object Storage..."
 yc storage bucket create --name "$BUCKET_NAME" --folder-id "$YC_FOLDER_ID" 2>/dev/null || true
@@ -38,11 +39,14 @@ yc serverless function create --name "$CRON_FN" --folder-id "$YC_FOLDER_ID" 2>/d
 
 echo "==> Создаём API Gateway..."
 BOT_FN_ID=$(yc serverless function get --name "$BOT_FN" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
-APIGW_SPEC=$(sed "s/\${BOT_FUNCTION_ID}/$BOT_FN_ID/g; s/\${SA_ID}/$SA_ID/g" infra/api-gateway.yaml)
-yc serverless api-gateway create --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" \
-  --spec "$APIGW_SPEC" 2>/dev/null || \
-yc serverless api-gateway update --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" \
-  --spec "$APIGW_SPEC" 2>/dev/null || true
+APIGW_SPEC=$(mktemp)
+trap 'rm -f "$APIGW_SPEC"' EXIT
+sed "s/\${BOT_FUNCTION_ID}/$BOT_FN_ID/g; s/\${SA_ID}/$SA_ID/g" infra/api-gateway.yaml > "$APIGW_SPEC"
+if yc serverless api-gateway get --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" >/dev/null 2>&1; then
+  yc serverless api-gateway update --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" --spec "$APIGW_SPEC"
+else
+  yc serverless api-gateway create --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" --spec "$APIGW_SPEC"
+fi
 
 echo ""
 echo "=== Настройка завершена ==="

@@ -61,7 +61,7 @@ for migration_file in "$MIGRATIONS_DIR"/*.sql; do
   migration_name="${BASH_REMATCH[2]}"
   migration_checksum="$(checksum_file "$migration_file")"
   applied_row="$(run_ydb sql \
-    -s "SELECT checksum FROM schema_migrations WHERE version = Uint32($migration_version);" \
+    -s "SELECT checksum FROM schema_migrations WHERE version = Uint32(\"$migration_version\");" \
     --format json-unicode)"
 
   if [[ -n "$applied_row" ]]; then
@@ -78,9 +78,9 @@ for migration_file in "$MIGRATIONS_DIR"/*.sql; do
   run_ydb sql -s "
     UPSERT INTO schema_migrations (version, name, checksum, applied_at)
     VALUES (
-      Uint32($migration_version),
-      '$migration_name',
-      '$migration_checksum',
+      Uint32(\"$migration_version\"),
+      Utf8(\"$migration_name\"),
+      Utf8(\"$migration_checksum\"),
       CurrentUtcTimestamp()
     );
   " >/dev/null

@@ -77,14 +77,20 @@ active for the next month.
 - `reminder_instances`: one delivery occurrence and its completion state.
 - `group_members`: Telegram identity cache keyed by chat and user.
 
-The schema is in `infra/ydb/schema.sql`. There is no migration framework; schema
-changes need an explicit forward-safe migration plan.
+The legacy bootstrap schema is in `infra/ydb/schema.sql`. Ordered, forward-safe
+migrations live in `infra/ydb/migrations`; `scripts/apply-ydb-migrations.sh`
+records their versions and checksums in `schema_migrations`. Normal application
+deploys do not apply migrations automatically.
 
 ## Build and deployment
 
 - CI runs on Node.js 20: install, typecheck, test, build.
 - A push to `main` deploys both functions, uploads the Mini App, and resets the
   Telegram webhook.
+- The deploy job validates all required `production` secrets before changing
+  cloud resources. Both functions receive the configured runtime service
+  account, and the universal UI is deployed only when the matching runtime flag
+  is explicitly enabled.
 - Infrastructure resources use the `zvenfit-reminder-` prefix. Existing
   installations created with the former `payments-reminder-` prefix are not
   renamed in place by these scripts; provision or migrate them deliberately
