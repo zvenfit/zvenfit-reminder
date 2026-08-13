@@ -173,6 +173,25 @@ jobs:
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
-          curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
+          response="$(curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
             --data-urlencode "url=${WEBHOOK_URL}/webhook" \
-            --data-urlencode "secret_token=${WEBHOOK_SECRET}"
+            --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
+            --data-urlencode 'allowed_updates=["message","callback_query","chat_member"]')"
+          printf '%s' "$response" | jq -e '.ok == true and .result == true' >/dev/null
+
+          info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
+          printf '%s' "$info" | jq -e --arg expected "${WEBHOOK_URL}/webhook" '
+            .ok == true and
+            .result.url == $expected and
+            (.result.allowed_updates | sort) == (["message", "callback_query", "chat_member"] | sort)
+          ' >/dev/null
+          printf '%s' "$info" | jq '{
+            ok,
+            webhook: {
+              url: .result.url,
+              pending_update_count: .result.pending_update_count,
+              last_error_date: .result.last_error_date,
+              last_error_message: .result.last_error_message,
+              allowed_updates: .result.allowed_updates
+            }
+          }'
