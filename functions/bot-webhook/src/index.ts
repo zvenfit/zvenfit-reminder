@@ -29,6 +29,7 @@ import {
 } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
+import { buildStartResponse } from "./start-response.js";
 import {
   UniversalOccurrenceActionForbiddenError,
   UniversalOccurrenceActionNotFoundError,
@@ -208,15 +209,13 @@ export function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => {
-    const keyboard = config.miniAppUrl
-      ? new InlineKeyboard().webApp("Открыть панель", config.miniAppUrl)
-      : undefined;
-
-    const message = ctx.chat.type === "private"
-      ? "Готово: личные уведомления подключены. Напоминания можно создавать в Mini App."
-      : "Бот произвольных напоминаний. Управляй ими через Mini App или команды.";
-    await ctx.reply(message, {
-      reply_markup: keyboard,
+    const response = buildStartResponse(
+      ctx.chat.type,
+      config.miniAppUrl,
+      bot.botInfo.username,
+    );
+    await ctx.reply(response.message, {
+      reply_markup: response.keyboard,
     });
   });
 
