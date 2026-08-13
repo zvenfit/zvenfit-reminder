@@ -27,6 +27,7 @@ import {
   jsonResponse,
   updateRuleSchema,
 } from "./api.js";
+import { ensureBotInitialized } from "./bot-initialization.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
 import {
   UniversalOccurrenceActionForbiddenError,
@@ -618,6 +619,7 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
     }
 
     const bot = getBot();
+    await ensureBotInitialized(bot);
     const update = JSON.parse(event.body ?? "{}");
     await bot.handleUpdate(update);
     return { statusCode: 200, body: "" };
