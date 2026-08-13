@@ -87,6 +87,12 @@ jobs:
           npm run build
           cd dist
           zip -r ../../../reminder-cron.zip .
+      - name: Upload function packages
+        env:
+          YC_BUCKET: ${{ secrets.YC_BUCKET }}
+        run: |
+          yc storage s3 cp bot-webhook.zip "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/bot-webhook.zip"
+          yc storage s3 cp reminder-cron.zip "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/reminder-cron.zip"
       - name: Deploy bot-webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -98,6 +104,7 @@ jobs:
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
           ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
           YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          YC_BUCKET: ${{ secrets.YC_BUCKET }}
           UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
         run: |
           yc serverless function version create \
@@ -107,7 +114,8 @@ jobs:
             --memory 256m \
             --execution-timeout 30s \
             --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
-            --source-path bot-webhook.zip \
+            --package-bucket-name "$YC_BUCKET" \
+            --package-object-name "deployments/${GITHUB_SHA}/bot-webhook.zip" \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
             --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
@@ -126,6 +134,7 @@ jobs:
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
           YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          YC_BUCKET: ${{ secrets.YC_BUCKET }}
           UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
         run: |
           yc serverless function version create \
@@ -135,7 +144,8 @@ jobs:
             --memory 256m \
             --execution-timeout 60s \
             --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
-            --source-path reminder-cron.zip \
+            --package-bucket-name "$YC_BUCKET" \
+            --package-object-name "deployments/${GITHUB_SHA}/reminder-cron.zip" \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
             --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
@@ -143,6 +153,14 @@ jobs:
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
             --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED"
+      - name: Remove function packages
+        if: always()
+        continue-on-error: true
+        env:
+          YC_BUCKET: ${{ secrets.YC_BUCKET }}
+        run: |
+          yc storage s3 rm "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/bot-webhook.zip"
+          yc storage s3 rm "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/reminder-cron.zip"
       - name: Upload Mini App
         env:
           YC_BUCKET: ${{ secrets.YC_BUCKET }}
