@@ -84,7 +84,8 @@ deploys do not apply migrations automatically.
 
 ## Build and deployment
 
-- CI runs on Node.js 20: install, typecheck, test, build.
+- CI runs on Node.js 22, matching the supported Yandex Cloud Functions runtime:
+  install, typecheck, test, build.
 - A push to `main` deploys both functions, uploads the Mini App, and resets the
   Telegram webhook.
 - The deploy job validates all required `production` secrets before changing
@@ -125,8 +126,8 @@ deploys do not apply migrations automatically.
 ## Verification baseline
 
 Run `npm run check` before handing changes off. It covers typechecking, unit
-tests, and every production build. Local verification may use a newer Node.js
-version, while CI on Node.js 20 remains the compatibility baseline.
+tests, and every production build. Node.js 22 is the CI and production runtime
+compatibility baseline.
 
 The Codex preparation pass on 2026-08-12 completed an offline `npm ci` and
 `npm run check` on Node.js 22.22.3 with npm 12.0.1: all 28 unit tests and all

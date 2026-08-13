@@ -28,7 +28,7 @@ Functions, YDB Serverless и Telegram Mini App.
 
 ## Требования
 
-- Node.js 20+
+- Node.js 22+
 - [Yandex Cloud CLI](https://yandex.cloud/ru/docs/cli/quickstart)
 - Токен бота от [@BotFather](https://t.me/BotFather)
 - GitHub-репозиторий с включёнными Actions

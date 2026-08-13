@@ -30,7 +30,7 @@
 
 ## Development workflow
 
-- Use Node.js 20, matching CI and the Yandex Cloud Functions runtime.
+- Use Node.js 22, matching CI and the Yandex Cloud Functions runtime.
 - Install reproducibly with `npm ci`.
 - Run `npm run check` before handing off code changes. It runs typechecking,
   unit tests, and production builds for all workspaces.

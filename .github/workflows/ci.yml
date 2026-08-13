@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run typecheck
@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - name: Validate deploy configuration
         env:
@@ -109,7 +109,7 @@ jobs:
         run: |
           yc serverless function version create \
             --function-name zvenfit-reminder-bot \
-            --runtime nodejs20 \
+            --runtime nodejs22 \
             --entrypoint index.handler \
             --memory 256m \
             --execution-timeout 30s \
@@ -139,7 +139,7 @@ jobs:
         run: |
           yc serverless function version create \
             --function-name zvenfit-reminder-cron \
-            --runtime nodejs20 \
+            --runtime nodejs22 \
             --entrypoint index.handler \
             --memory 256m \
             --execution-timeout 60s \
