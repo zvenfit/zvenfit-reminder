@@ -53,6 +53,10 @@ export function resolveInitData(initData: string | undefined, botToken: string):
   return validateInitData(initData, botToken);
 }
 
+export function isWebhookRequest(path: string, method: string): boolean {
+  return method === "POST" && (path === "/webhook" || path === "/");
+}
+
 export function getBot(): Bot {
   if (botInstance) {
     return botInstance;
@@ -561,7 +565,7 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
     return handleApi(event);
   }
 
-  if (path === "/webhook" && method === "POST") {
+  if (isWebhookRequest(path, method)) {
     const config = loadConfig();
     const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
     if (secret !== config.webhookSecret) {

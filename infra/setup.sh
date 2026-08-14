@@ -52,6 +52,8 @@ BOT_FN_ID=$(yc serverless function get --name "$BOT_FN" --folder-id "$YC_FOLDER_
 CRON_FN_ID=$(yc serverless function get --name "$CRON_FN" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
 yc serverless function add-access-binding --id "$BOT_FN_ID" \
   --service-account-id "$INVOKER_SA_ID" --role functions.functionInvoker 2>/dev/null || true
+yc serverless function add-access-binding --id "$BOT_FN_ID" \
+  --role functions.functionInvoker --subject "system:allUsers" 2>/dev/null || true
 yc serverless function add-access-binding --id "$CRON_FN_ID" \
   --service-account-id "$INVOKER_SA_ID" --role functions.functionInvoker 2>/dev/null || true
 yc serverless function add-access-binding --id "$BOT_FN_ID" \
@@ -82,6 +84,7 @@ echo "Дальше:"
 echo "1. Создай JSON-ключ только для deploy SA ($DEPLOY_SA_ID) и сохрани его в YC_SA_JSON."
 echo "2. Не создавай статические ключи для runtime и invoker SA."
 echo "3. Добавь GitHub Secrets, включая YC_RUNTIME_SERVICE_ACCOUNT_ID=$RUNTIME_SA_ID."
+echo "   TELEGRAM_WEBHOOK_URL=https://functions.yandexcloud.net/$BOT_FN_ID"
 echo "4. Схема: YDB_ENDPOINT=$YDB_ENDPOINT YDB_DATABASE=$YDB_DATABASE ./scripts/apply-ydb-migrations.sh"
 echo "5. Timer: SA_ID=$INVOKER_SA_ID YC_FOLDER_ID=$YC_FOLDER_ID ./infra/create-timer.sh"
 echo "6. Push в main для деплоя"

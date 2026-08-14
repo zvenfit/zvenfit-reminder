@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveInitData } from "./index.js";
+import { isWebhookRequest, resolveInitData } from "./index.js";
 
 describe("resolveInitData", () => {
   afterEach(() => {
@@ -21,5 +21,18 @@ describe("resolveInitData", () => {
 
     expect(() => resolveInitData(undefined, "unused-token"))
       .toThrow("Missing X-Telegram-Init-Data");
+  });
+});
+
+describe("isWebhookRequest", () => {
+  it("accepts Telegram POSTs on the API Gateway and direct function paths", () => {
+    expect(isWebhookRequest("/webhook", "POST")).toBe(true);
+    expect(isWebhookRequest("/", "POST")).toBe(true);
+  });
+
+  it("does not turn other direct-function requests into webhook updates", () => {
+    expect(isWebhookRequest("/", "GET")).toBe(false);
+    expect(isWebhookRequest("/api/workspaces", "POST")).toBe(false);
+    expect(isWebhookRequest("/other", "POST")).toBe(false);
   });
 });

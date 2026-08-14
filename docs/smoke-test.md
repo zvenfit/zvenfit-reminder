@@ -8,7 +8,9 @@
 curl "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"
 ```
 
-Ожидаем `url` = `${WEBHOOK_URL}/webhook`.
+Ожидаем `url` = `${TELEGRAM_WEBHOOK_URL}` и отсутствие свежего
+`last_error_message`. Для production это прямой URL bot-функции без суффикса
+`/webhook`.
 
 ## 2. Команды бота
 

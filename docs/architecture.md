@@ -16,7 +16,7 @@ notifications until a participant explicitly completes or snoozes them.
 ## Runtime topology
 
 ```text
-Telegram updates ──> API Gateway /webhook ──> bot-webhook function
+Telegram updates ──> direct function URL ───> bot-webhook function
                                               ├─ bot commands/callbacks
 Mini App ──────────> API Gateway /api/* ──────┤
                                               └─ workspace/reminder/member API
@@ -28,6 +28,11 @@ Cloud Timer (5m) ─────────────────────
 
 bot-webhook function ────────────────────────────────> YDB
 ```
+
+The Telegram webhook uses the bot function's public invoke URL because Telegram
+connections to the Yandex API Gateway domain time out in production. The root
+POST route still requires Telegram's configured secret header before parsing an
+update. Mini App API traffic remains behind API Gateway and verified init data.
 
 The Mini App is built as static files and uploaded to Yandex Object Storage.
 Both functions bundle application code with esbuild and install the YDB runtime
@@ -143,8 +148,10 @@ already recorded migration with a changed checksum aborts the deploy.
    are covered by Playwright against an isolated HTTP mock. There are no YDB
    integration tests yet.
 5. There is no configured linter or formatter.
-6. Runtime, invocation, and deployment use separate service accounts with
-   resource-scoped bindings. CI still installs the Yandex Cloud CLI through an
+6. Runtime, timer/API-Gateway invocation, and deployment use separate service
+   accounts with resource-scoped bindings. The bot function additionally has a
+   public invoke binding for Telegram's direct webhook; the handler requires the
+   secret Telegram header. CI still installs the Yandex Cloud CLI through an
    unpinned `curl | bash` script; pinning and checksum verification remain an
    infrastructure hardening task.
 

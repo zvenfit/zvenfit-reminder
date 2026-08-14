@@ -44,6 +44,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
@@ -55,6 +56,7 @@ jobs:
           : "${BOT_TOKEN:?Missing production secret BOT_TOKEN}"
           : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
           : "${WEBHOOK_URL:?Missing production secret WEBHOOK_URL}"
+          : "${TELEGRAM_WEBHOOK_URL:?Missing production secret TELEGRAM_WEBHOOK_URL}"
           : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
           : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
           : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
@@ -170,11 +172,11 @@ jobs:
       - name: Set Telegram webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           response="$(curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-            --data-urlencode "url=${WEBHOOK_URL}/webhook" \
+            --data-urlencode "url=${TELEGRAM_WEBHOOK_URL}" \
             --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
             --data-urlencode 'allowed_updates=["message","callback_query","chat_member"]')"
           printf '%s' "$response" | jq -e '.ok == true and .result == true' >/dev/null
@@ -189,14 +191,14 @@ jobs:
               text: "health"
             }
           }')"
-          curl -fsS -X POST "${WEBHOOK_URL}/webhook" \
+          curl -fsS -X POST "${TELEGRAM_WEBHOOK_URL}" \
             --header "Content-Type: application/json" \
             --header "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
             --data "$smoke_payload" \
             >/dev/null
 
           info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
-          printf '%s' "$info" | jq -e --arg expected "${WEBHOOK_URL}/webhook" '
+          printf '%s' "$info" | jq -e --arg expected "${TELEGRAM_WEBHOOK_URL}" '
             .ok == true and
             .result.url == $expected and
             (.result.allowed_updates | sort) == (["message", "callback_query", "chat_member"] | sort)

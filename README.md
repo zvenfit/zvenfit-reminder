@@ -74,7 +74,8 @@ SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
 | `YDB_DATABASE` | Путь к базе YDB |
 | `BOT_TOKEN` | Токен Telegram-бота |
 | `WEBHOOK_SECRET` | Случайный секрет для webhook |
-| `WEBHOOK_URL` | Базовый URL API Gateway |
+| `WEBHOOK_URL` | Базовый URL API Gateway для Mini App API |
+| `TELEGRAM_WEBHOOK_URL` | Прямой URL bot-функции без завершающего `/webhook` |
 | `MINI_APP_URL` | Публичный URL на `index.html` Mini App |
 | `DEFAULT_TIMEZONE` | Опционально, по умолчанию `Europe/Moscow` |
 
@@ -85,6 +86,11 @@ Production-пайплайн перед обновлением функций п�
 конкретную YDB, invoker вызывает только функции бота и таймера, а deploy имеет
 доступ к обновлению этих функций, миграциям этой базы и публикации в bucket.
 Статический JSON-ключ нужен только deploy-аккаунту.
+
+Telegram webhook использует прямой публичный invoke URL bot-функции, потому что
+Telegram не может стабильно подключаться к домену Yandex API Gateway. Root POST
+всё равно принимается только с `X-Telegram-Bot-Api-Secret-Token`; Mini App API
+остаётся за API Gateway и проверяет Telegram init data.
 
 Если инфраструктура раньше использовала общий `zvenfit-reminder-sa`, после
 первого успешного деплоя с тремя новыми аккаунтами отдельно отзови его широкие
