@@ -12,6 +12,7 @@ import {
   validateInitData,
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
+import { setDefaultResultOrder } from "node:dns";
 import { Bot, type BotConfig, type Context } from "grammy";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
@@ -34,6 +35,9 @@ let botInstance: Bot | null = null;
 const TELEGRAM_API_TIMEOUT_SECONDS = 5;
 const WEBHOOK_FAILURE_TEXT =
   "⚠️ Бот временно не может связаться с Telegram API. Попробуйте ещё раз через минуту.";
+
+// Yandex Cloud Functions has public IPv4 egress, while Telegram may resolve to IPv6 first.
+setDefaultResultOrder("ipv4first");
 
 export function resolveInitData(initData: string | undefined, botToken: string): ParsedInitData {
   if (process.env.SKIP_INIT_DATA_VALIDATION === "1" && process.env.NODE_ENV === "development") {

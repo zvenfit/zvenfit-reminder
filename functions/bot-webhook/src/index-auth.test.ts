@@ -1,9 +1,14 @@
+import { getDefaultResultOrder } from "node:dns";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildWebhookFailureResponse,
   isWebhookRequest,
   resolveInitData,
 } from "./index.js";
+
+it("prefers IPv4 for Telegram calls from Yandex Cloud Functions", () => {
+  expect(getDefaultResultOrder()).toBe("ipv4first");
+});
 
 describe("resolveInitData", () => {
   afterEach(() => {

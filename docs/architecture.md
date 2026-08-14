@@ -37,6 +37,9 @@ Telegram API calls are time-bounded. If an update cannot be processed, the
 webhook returns a Bot API method in its HTTP response so Telegram itself can
 show a generic retry message or callback alert without another outbound request.
 The response never exposes exception details or configuration values.
+Both Cloud Functions prefer IPv4 DNS results for Telegram calls because the
+Yandex Cloud Functions public egress path is IPv4-only while Telegram may return
+an IPv6 address first.
 
 The Mini App is built as static files and uploaded to Yandex Object Storage.
 Both functions bundle application code with esbuild and install the YDB runtime

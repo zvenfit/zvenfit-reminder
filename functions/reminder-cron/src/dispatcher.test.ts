@@ -1,3 +1,4 @@
+import { getDefaultResultOrder } from "node:dns";
 import { describe, expect, it, vi } from "vitest";
 import type {
   AppConfig,
@@ -10,6 +11,10 @@ import {
   telegramClient,
   type DispatcherDependencies,
 } from "./dispatcher.js";
+
+it("prefers IPv4 for Telegram calls from Yandex Cloud Functions", () => {
+  expect(getDefaultResultOrder()).toBe("ipv4first");
+});
 
 const config: AppConfig = {
   ydbEndpoint: "grpc://unused",

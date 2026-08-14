@@ -10,7 +10,11 @@ import {
   type ReminderOccurrence,
   type ReservedDelivery,
 } from "@zvenfit-reminder/shared";
+import { setDefaultResultOrder } from "node:dns";
 import { InlineKeyboard } from "grammy";
+
+// Yandex Cloud Functions has public IPv4 egress, while Telegram may resolve to IPv6 first.
+setDefaultResultOrder("ipv4first");
 
 export interface DispatcherStats {
   mode: "workspace";

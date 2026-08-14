@@ -91,6 +91,9 @@ Telegram webhook использует прямой публичный invoke URL
 Telegram не может стабильно подключаться к домену Yandex API Gateway. Root POST
 всё равно принимается только с `X-Telegram-Bot-Api-Secret-Token`; Mini App API
 остаётся за API Gateway и проверяет Telegram init data.
+Исходящие запросы обеих функций к Telegram принудительно используют IPv4:
+serverless-egress Yandex Cloud доступен по IPv4, а DNS Telegram может первым
+вернуть IPv6-адрес.
 
 Если инфраструктура раньше использовала общий `zvenfit-reminder-sa`, после
 первого успешного деплоя с тремя новыми аккаунтами отдельно отзови его широкие
