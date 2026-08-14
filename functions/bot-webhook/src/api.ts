@@ -1,23 +1,3 @@
-import { z } from "zod";
-
-export const createRuleSchema = z.object({
-  title: z.string().min(1).max(200),
-  amount: z.number().int().nonnegative().nullable().optional(),
-  ruleType: z.enum(["recurring", "oneoff"]),
-  dayOfMonth: z.number().int().min(1).max(31).nullable().optional(),
-  dueAt: z.string().datetime().nullable().optional(),
-  timeLocal: z.string().min(4).max(5),
-  timezone: z.string().optional(),
-  mentionIds: z.array(z.number().int()).default([]),
-});
-
-export const updateRuleSchema = createRuleSchema.partial().extend({
-  status: z.enum(["active", "paused", "archived"]).optional(),
-});
-
-export type CreateRuleBody = z.infer<typeof createRuleSchema>;
-export type UpdateRuleBody = z.infer<typeof updateRuleSchema>;
-
 export function jsonResponse(statusCode: number, body: unknown): ApiGatewayResponse {
   return {
     statusCode,

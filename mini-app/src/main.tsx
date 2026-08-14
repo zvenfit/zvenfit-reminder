@@ -1,17 +1,21 @@
-import { StrictMode, useEffect, useMemo, useState } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   ApiError,
   completeOccurrence,
   createReminder,
+  changeReminderLifecycle,
   listWorkspaces,
   listMembers,
   listReminders,
   loadDashboard,
   reassignReminder,
   snoozeOccurrence,
+  transferWorkspaceOwnership,
   undoOccurrenceCompletion,
+  updateReminder,
   updateMemberRole,
+  updateWorkspaceSettings,
   syncMembers,
   selectWorkspace,
   type CreateReminderBody,
@@ -24,7 +28,7 @@ import {
 } from "./api";
 import "./styles.css";
 
-type View = "home" | "create";
+type View = "home" | "create" | "settings";
 type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
 
@@ -50,6 +54,35 @@ interface ReminderFormState {
   leadMinutes: string;
   repeatIntervalMinutes: string;
   ignoreQuietHours: boolean;
+}
+
+interface SettingsFormState {
+  timezone: string;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+  defaultAllDayReminderTime: string;
+}
+
+const TIMEZONES = [
+  "Europe/Kaliningrad",
+  "Europe/Moscow",
+  "Europe/Samara",
+  "Asia/Yekaterinburg",
+  "Asia/Omsk",
+  "Asia/Novosibirsk",
+  "Asia/Krasnoyarsk",
+  "Asia/Irkutsk",
+  "Asia/Yakutsk",
+  "Asia/Vladivostok",
+  "Asia/Magadan",
+  "Asia/Kamchatka",
+];
+
+function localDateInputValue(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 const WEEKDAYS = [
@@ -96,6 +129,58 @@ function emptyForm(responsibleUserId?: number): ReminderFormState {
     leadMinutes: "0",
     repeatIntervalMinutes: "360",
     ignoreQuietHours: false,
+  };
+}
+
+function reminderForm(reminder: Reminder): ReminderFormState {
+  const form = emptyForm(
+    reminder.assignment.mode === "person" ? reminder.assignment.responsibleUserId : undefined,
+  );
+  form.title = reminder.title;
+  form.description = reminder.description ?? "";
+  form.amountRub = reminder.amountMinor == null ? "" : String(reminder.amountMinor / 100);
+  form.visibility = reminder.visibility;
+  form.assignmentMode = reminder.assignment.mode;
+  form.responsibleUserId = reminder.assignment.mode === "person"
+    ? String(reminder.assignment.responsibleUserId)
+    : "";
+  form.watcherUserIds = [...reminder.watcherUserIds];
+  form.frequency = reminder.schedule.frequency;
+  form.allDay = reminder.schedule.timing.kind === "allDay";
+  if (reminder.schedule.timing.kind === "timed") {
+    form.timeLocal = reminder.schedule.timing.timeLocal;
+  }
+  if (reminder.schedule.frequency === "once") {
+    form.date = reminder.schedule.date;
+  } else {
+    form.startDate = reminder.schedule.startDate;
+    form.interval = String(reminder.schedule.interval);
+  }
+  if (reminder.schedule.frequency === "weekly") {
+    form.weekdays = [...reminder.schedule.weekdays];
+  }
+  if (reminder.schedule.frequency === "monthly") {
+    form.monthlyLastDay = reminder.schedule.day.type === "lastDay";
+    if (reminder.schedule.day.type === "dayOfMonth") {
+      form.monthlyDay = String(reminder.schedule.day.value);
+    }
+  }
+  if (reminder.schedule.frequency === "yearly") {
+    form.yearlyMonth = String(reminder.schedule.month);
+    form.yearlyDay = String(reminder.schedule.day);
+  }
+  form.leadMinutes = String(reminder.notificationPolicy.leadMinutes);
+  form.repeatIntervalMinutes = String(reminder.notificationPolicy.repeatIntervalMinutes);
+  form.ignoreQuietHours = reminder.notificationPolicy.ignoreQuietHours;
+  return form;
+}
+
+function workspaceSettings(workspace: Workspace): SettingsFormState {
+  return {
+    timezone: workspace.timezone,
+    quietHoursStart: workspace.quietHoursStart,
+    quietHoursEnd: workspace.quietHoursEnd,
+    defaultAllDayReminderTime: workspace.defaultAllDayReminderTime,
   };
 }
 
@@ -209,16 +294,41 @@ function App() {
   const [occurrences, setOccurrences] = useState<ReminderOccurrence[]>([]);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [form, setForm] = useState<ReminderFormState>(() => emptyForm());
+  const [settingsForm, setSettingsForm] = useState<SettingsFormState>({
+    timezone: "Europe/Moscow",
+    quietHoursStart: "22:00",
+    quietHoursEnd: "08:00",
+    defaultAllDayReminderTime: "09:00",
+  });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [ownershipTarget, setOwnershipTarget] = useState("");
+  const [confirmingOwnership, setConfirmingOwnership] = useState(false);
+  const [transferringOwnership, setTransferringOwnership] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<number | null>(null);
   const [reassigningReminderId, setReassigningReminderId] = useState<string | null>(null);
+  const [managingReminderId, setManagingReminderId] = useState<string | null>(null);
+  const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
   const [reassignment, setReassignment] = useState<Record<string, string>>({});
+  const activeWorkspaceIdRef = useRef<string | null>(null);
+  const refreshGenerationRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
+
+  useEffect(() => {
+    if (!undoableOccurrence?.undoUntil) return;
+    const remaining = new Date(undoableOccurrence.undoUntil).getTime() - Date.now();
+    if (remaining <= 0) {
+      setUndoableOccurrence(null);
+      return;
+    }
+    const timeout = window.setTimeout(() => setUndoableOccurrence(null), remaining);
+    return () => window.clearTimeout(timeout);
+  }, [undoableOccurrence]);
 
   const previewMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
   const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
@@ -226,6 +336,10 @@ function App() {
   const memberMap = useMemo(
     () => new Map(members.map((member) => [member.userId, member])),
     [members],
+  );
+  const reminderMap = useMemo(
+    () => new Map(reminders.map((reminder) => [reminder.reminderId, reminder])),
+    [reminders],
   );
   const actor = actorId ? memberMap.get(actorId) : undefined;
 
@@ -235,15 +349,17 @@ function App() {
         if (scope === "group" || !actorId) return true;
         return (
           occurrence.assignment.mode === "anyone" ||
-          occurrence.assignment.responsibleUserId === actorId
+          occurrence.assignment.responsibleUserId === actorId ||
+          reminderMap.get(occurrence.reminderId)?.creatorUserId === actorId
         );
       }),
-    [actorId, occurrences, scope],
+    [actorId, occurrences, reminderMap, scope],
   );
 
   const visibleReminders = useMemo(
     () =>
       reminders.filter((reminder) => {
+        if (reminder.status === "archived") return false;
         if (scope === "group" || !actorId) return true;
         return (
           reminder.creatorUserId === actorId ||
@@ -259,6 +375,10 @@ function App() {
       setLoading(false);
       return;
     }
+    if (activeWorkspaceIdRef.current !== selectedId) {
+      return;
+    }
+    const generation = ++refreshGenerationRef.current;
     selectWorkspace(selectedId);
     setLoading(true);
     setError(null);
@@ -268,13 +388,29 @@ function App() {
         listReminders(),
         listMembers(),
       ]);
+      if (
+        generation !== refreshGenerationRef.current ||
+        activeWorkspaceIdRef.current !== selectedId
+      ) {
+        return;
+      }
       setOccurrences(dashboardResponse.occurrences);
       setReminders(remindersResponse.reminders);
       setMembers(membersResponse.members);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (
+        generation === refreshGenerationRef.current &&
+        activeWorkspaceIdRef.current === selectedId
+      ) {
+        setError(errorMessage(requestError));
+      }
     } finally {
-      setLoading(false);
+      if (
+        generation === refreshGenerationRef.current &&
+        activeWorkspaceIdRef.current === selectedId
+      ) {
+        setLoading(false);
+      }
     }
   }
 
@@ -295,6 +431,7 @@ function App() {
           setLoading(false);
           return;
         }
+        activeWorkspaceIdRef.current = initial.workspaceId;
         setWorkspaceId(initial.workspaceId);
         await refresh(initial.workspaceId);
       } catch (requestError) {
@@ -305,10 +442,17 @@ function App() {
   }, []);
 
   async function changeWorkspace(nextWorkspaceId: string) {
+    activeWorkspaceIdRef.current = nextWorkspaceId;
     setWorkspaceId(nextWorkspaceId);
     window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId);
     setView("home");
     setUndoableOccurrence(null);
+    setActingOccurrenceId(null);
+    setReassigningReminderId(null);
+    setManagingReminderId(null);
+    setUpdatingRoleUserId(null);
+    setNotice(null);
+    setError(null);
     setOccurrences([]);
     setReminders([]);
     setMembers([]);
@@ -321,10 +465,84 @@ function App() {
       return;
     }
     const defaultResponsible = actorId ?? members[0]?.userId;
-    setForm(emptyForm(defaultResponsible));
+    const nextForm = emptyForm(defaultResponsible);
+    if (actor?.role !== "owner" && actor?.role !== "organizer") {
+      nextForm.visibility = "private";
+      nextForm.assignmentMode = "person";
+      nextForm.responsibleUserId = actorId ? String(actorId) : "";
+    }
+    setForm(nextForm);
+    setEditingReminderId(null);
     setError(null);
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openEdit(reminder: Reminder) {
+    setForm(reminderForm(reminder));
+    setEditingReminderId(reminder.reminderId);
+    setError(null);
+    setView("create");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openSettings() {
+    const workspace = workspaces.find((item) => item.workspaceId === workspaceId);
+    if (!workspace || (workspace.role !== "owner" && workspace.role !== "organizer")) return;
+    setSettingsForm(workspaceSettings(workspace));
+    setOwnershipTarget("");
+    setConfirmingOwnership(false);
+    setError(null);
+    setView("settings");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function saveWorkspaceSettings() {
+    setSettingsSaving(true);
+    setError(null);
+    try {
+      const { workspace } = await updateWorkspaceSettings(settingsForm);
+      setWorkspaces((current) => current.map((item) =>
+        item.workspaceId === workspace.workspaceId ? workspace : item));
+      setSettingsForm(workspaceSettings(workspace));
+      setNotice("Ритм группы обновлён");
+      window.setTimeout(() => setNotice(null), 2600);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSettingsSaving(false);
+    }
+  }
+
+  async function confirmOwnershipTransfer() {
+    const targetUserId = Number(ownershipTarget);
+    if (!targetUserId) {
+      setError("Выберите нового владельца.");
+      return;
+    }
+    setTransferringOwnership(true);
+    setError(null);
+    try {
+      const { workspace } = await transferWorkspaceOwnership(targetUserId);
+      setWorkspaces((current) => current.map((item) =>
+        item.workspaceId === workspace.workspaceId ? workspace : item));
+      setMembers((current) => current.map((member) => {
+        if (member.userId === targetUserId) return { ...member, role: "owner" };
+        if (member.userId === actorId && member.role === "owner") {
+          return { ...member, role: "organizer" };
+        }
+        return member;
+      }));
+      setConfirmingOwnership(false);
+      setOwnershipTarget("");
+      setView("home");
+      setNotice("Владелец группы изменён");
+      window.setTimeout(() => setNotice(null), 2600);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setTransferringOwnership(false);
+    }
   }
 
   async function syncWorkspaceMembers() {
@@ -373,12 +591,14 @@ function App() {
     setError(null);
     const amount = form.amountRub.trim() ? Math.round(Number(form.amountRub) * 100) : null;
     const responsibleUserId = Number(form.responsibleUserId);
+    const editingReminder = reminders.find((reminder) =>
+      reminder.reminderId === editingReminderId);
     const payload: CreateReminderBody = {
       title: form.title.trim(),
       description: form.description.trim() || null,
-      actionUrl: null,
+      actionUrl: editingReminder?.actionUrl ?? null,
       amountMinor: amount,
-      currency: amount == null ? null : "RUB",
+      currency: amount == null ? null : (editingReminder?.currency ?? "RUB"),
       visibility: form.visibility,
       assignment:
         form.assignmentMode === "anyone"
@@ -386,17 +606,28 @@ function App() {
           : { mode: "person", responsibleUserId },
       watcherUserIds: form.watcherUserIds.filter((id) => id !== responsibleUserId),
       schedule: buildSchedule(form),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Moscow",
+      timezone: editingReminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow",
       notificationPolicy: {
         leadMinutes: Number(form.leadMinutes),
         repeatIntervalMinutes: Number(form.repeatIntervalMinutes),
         ignoreQuietHours: form.ignoreQuietHours,
-        escalation: { enabled: true, delayMinutes: 1440, repeatMinutes: 1440 },
+        escalation: editingReminder?.notificationPolicy.escalation ?? {
+          enabled: true,
+          delayMinutes: 1440,
+          repeatMinutes: 1440,
+        },
       },
     };
 
     try {
-      await createReminder(payload);
+      if (editingReminderId) {
+        await updateReminder(editingReminderId, payload);
+        setNotice("Изменения сохранены для следующих повторов");
+        window.setTimeout(() => setNotice(null), 2600);
+      } else {
+        await createReminder(payload);
+      }
+      setEditingReminderId(null);
       setView("home");
       await refresh();
     } catch (requestError) {
@@ -410,38 +641,51 @@ function App() {
     occurrenceId: string,
     action: "complete" | "snooze",
   ) {
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
     setActingOccurrenceId(occurrenceId);
     setError(null);
     try {
       if (action === "complete") {
         const { occurrence } = await completeOccurrence(occurrenceId);
+        if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
         setOccurrences((current) =>
           current.filter((occurrence) => occurrence.occurrenceId !== occurrenceId),
         );
         setUndoableOccurrence(occurrence);
       } else {
         const { occurrence } = await snoozeOccurrence(occurrenceId, 60);
+        if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
         setOccurrences((current) =>
           current.map((item) => (item.occurrenceId === occurrenceId ? occurrence : item)),
         );
         setNotice("Следующий сигнал — через час");
       }
-      window.setTimeout(() => setNotice(null), 2600);
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
     } finally {
-      setActingOccurrenceId(null);
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setActingOccurrenceId(null);
+      }
     }
   }
 
   async function undoLastCompletion() {
     if (!undoableOccurrence) return;
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
     setActingOccurrenceId(undoableOccurrence.occurrenceId);
     setError(null);
     try {
       const { occurrence } = await undoOccurrenceCompletion(
         undoableOccurrence.occurrenceId,
       );
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
       setOccurrences((current) =>
         [...current, occurrence].sort(
           (left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime(),
@@ -449,11 +693,23 @@ function App() {
       );
       setUndoableOccurrence(null);
       setNotice("Выполнение отменено");
-      window.setTimeout(() => setNotice(null), 2600);
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        if (
+          requestError instanceof ApiError &&
+          (requestError.code === "undo_expired" || requestError.code === "not_actionable")
+        ) {
+          setUndoableOccurrence(null);
+        }
+        setError(errorMessage(requestError));
+      }
     } finally {
-      setActingOccurrenceId(null);
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setActingOccurrenceId(null);
+      }
     }
   }
 
@@ -461,19 +717,28 @@ function App() {
     userId: number,
     role: "organizer" | "member",
   ) {
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
     setUpdatingRoleUserId(userId);
     setError(null);
     try {
       const { member } = await updateMemberRole(userId, role);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
       setMembers((current) =>
         current.map((item) => (item.userId === userId ? { ...item, role: member.role } : item)),
       );
       setNotice(role === "organizer" ? "Доступ организатора выдан" : "Доступ организатора отозван");
-      window.setTimeout(() => setNotice(null), 2600);
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
     } finally {
-      setUpdatingRoleUserId(null);
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setUpdatingRoleUserId(null);
+      }
     }
   }
 
@@ -483,23 +748,192 @@ function App() {
       setError("Выберите нового ответственного.");
       return;
     }
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
     setReassigningReminderId(reminderId);
     setError(null);
     try {
       const { reminder } = await reassignReminder(reminderId, responsibleUserId);
-      setReminders((current) => current.map((item) =>
-        item.reminderId === reminderId ? reminder : item));
-      setNotice("Ответственный изменён, напоминание снова активно");
-      window.setTimeout(() => setNotice(null), 2600);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      await refresh(actionWorkspaceId);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setNotice(reminder.status === "active"
+        ? "Ответственный изменён, напоминание снова активно"
+        : "Ответственный изменён");
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
     } finally {
-      setReassigningReminderId(null);
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setReassigningReminderId(null);
+      }
+    }
+  }
+
+  async function manageReminder(
+    reminder: Reminder,
+    action: "pause" | "resume" | "archive",
+  ) {
+    if (action === "archive" && !window.confirm("Завершить серию? История сохранится, новые уведомления не появятся.")) {
+      return;
+    }
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
+    setManagingReminderId(reminder.reminderId);
+    setError(null);
+    try {
+      await changeReminderLifecycle(reminder.reminderId, action);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      await refresh(actionWorkspaceId);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setNotice(action === "pause" ? "Серия приостановлена" : action === "resume" ? "Серия продолжена" : "Серия завершена");
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
+    } catch (requestError) {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
+    } finally {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setManagingReminderId(null);
+      }
     }
   }
 
   const selectedWorkspace = workspaces.find((workspace) =>
     workspace.workspaceId === workspaceId);
+
+  if (view === "settings" && selectedWorkspace) {
+    const targetMember = members.find((member) => String(member.userId) === ownershipTarget);
+    return (
+      <main className="app app--form app--settings">
+        <header className="topbar">
+          <button className="back-button" type="button" onClick={() => setView("home")}>
+            <span aria-hidden="true">←</span> Назад
+          </button>
+          <span className="utility-label">{selectedWorkspace.displayName}</span>
+        </header>
+
+        <section className="form-intro settings-intro">
+          <p className="eyebrow">Ритм группы</p>
+          <h1>Когда можно звенеть</h1>
+          <p>Эти правила действуют для всей группы. Срочные напоминания могут обходить тихие часы.</p>
+        </section>
+
+        <form
+          className="reminder-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void saveWorkspaceSettings();
+          }}
+        >
+          <section
+            className="rhythm-map"
+            aria-label="Карта ритма группы"
+            style={{
+              "--quiet-start": `${(Number(settingsForm.quietHoursStart.slice(0, 2)) * 60 + Number(settingsForm.quietHoursStart.slice(3))) / 14.4}%`,
+              "--quiet-end": `${(Number(settingsForm.quietHoursEnd.slice(0, 2)) * 60 + Number(settingsForm.quietHoursEnd.slice(3))) / 14.4}%`,
+              "--all-day-time": `${(Number(settingsForm.defaultAllDayReminderTime.slice(0, 2)) * 60 + Number(settingsForm.defaultAllDayReminderTime.slice(3))) / 14.4}%`,
+            } as CSSProperties}
+          >
+            <div className="rhythm-map__heading">
+              <span><small>Тишина</small><b>{settingsForm.quietHoursStart} → {settingsForm.quietHoursEnd}</b></span>
+              <span><small>Напоминания на весь день</small><b>{settingsForm.defaultAllDayReminderTime}</b></span>
+            </div>
+            <div className="rhythm-map__line" aria-hidden="true">
+              <i className="rhythm-map__night" />
+              <i className="rhythm-map__signal" />
+            </div>
+            <div className="rhythm-map__ticks" aria-hidden="true"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div>
+          </section>
+
+          <section className="form-panel settings-panel">
+            <p className="eyebrow">Часовой пояс</p>
+            <h2>Местное время группы</h2>
+            <label className="field">
+              <span>Часовой пояс</span>
+              <input
+                list="timezone-options"
+                required
+                value={settingsForm.timezone}
+                onChange={(event) => setSettingsForm({ ...settingsForm, timezone: event.target.value })}
+              />
+              <datalist id="timezone-options">
+                {TIMEZONES.map((timezone) => <option key={timezone} value={timezone} />)}
+              </datalist>
+              <small>Используется для новых напоминаний. Уже созданные сохраняют свой график.</small>
+            </label>
+          </section>
+
+          <section className="form-panel settings-panel">
+            <p className="eyebrow">Не беспокоить</p>
+            <h2>Тихие часы</h2>
+            <div className="schedule-grid">
+              <label className="field">
+                <span>Начало тишины</span>
+                <input type="time" required value={settingsForm.quietHoursStart} onChange={(event) => setSettingsForm({ ...settingsForm, quietHoursStart: event.target.value })} />
+              </label>
+              <label className="field">
+                <span>Конец тишины</span>
+                <input type="time" required value={settingsForm.quietHoursEnd} onChange={(event) => setSettingsForm({ ...settingsForm, quietHoursEnd: event.target.value })} />
+              </label>
+              <label className="field field--wide">
+                <span>Напоминать о событиях «на весь день»</span>
+                <input type="time" required value={settingsForm.defaultAllDayReminderTime} onChange={(event) => setSettingsForm({ ...settingsForm, defaultAllDayReminderTime: event.target.value })} />
+              </label>
+            </div>
+          </section>
+
+          {error ? <div className="error-banner" role="alert">{error}</div> : null}
+          {notice ? <div className="notice-toast notice-toast--inline" role="status">{notice}</div> : null}
+
+          <button className="settings-save primary-action" type="submit" disabled={settingsSaving}>
+            {settingsSaving ? "Сохраняю…" : "Сохранить настройки"}
+          </button>
+        </form>
+
+        {selectedWorkspace.role === "owner" ? (
+          <section className="ownership-panel">
+            <p className="eyebrow">Владелец</p>
+            <h2>Передача управления</h2>
+            <p>Новый владелец сможет назначать организаторов и передавать эту роль дальше. Вы останетесь организатором.</p>
+            {!confirmingOwnership ? (
+              <div className="ownership-controls">
+                <label className="field">
+                  <span>Новый владелец</span>
+                  <select value={ownershipTarget} onChange={(event) => setOwnershipTarget(event.target.value)}>
+                    <option value="">Выберите участника</option>
+                    {members.filter((member) => member.userId !== actorId).map((member) => (
+                      <option key={member.userId} value={member.userId}>{member.displayName}</option>
+                    ))}
+                  </select>
+                </label>
+                <button className="danger-action" type="button" disabled={!ownershipTarget} onClick={() => setConfirmingOwnership(true)}>
+                  Передать управление
+                </button>
+              </div>
+            ) : (
+              <div className="ownership-confirm" role="alert">
+                <b>Передать управление участнику «{targetMember?.displayName}»?</b>
+                <p>Это действие сразу изменит владельца группы.</p>
+                <div>
+                  <button type="button" onClick={() => setConfirmingOwnership(false)}>Отмена</button>
+                  <button className="danger-action" type="button" disabled={transferringOwnership} onClick={() => void confirmOwnershipTransfer()}>
+                    {transferringOwnership ? "Передаю…" : "Да, передать"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        ) : null}
+      </main>
+    );
+  }
 
   if (view === "create") {
     const selectedResponsible = memberMap.get(Number(form.responsibleUserId));
@@ -510,13 +944,17 @@ function App() {
           <button className="back-button" type="button" onClick={() => setView("home")}>
             <span aria-hidden="true">←</span> Назад
           </button>
-          <span className="utility-label">{selectedWorkspace?.displayName ?? "Новое"}</span>
+          <span className="utility-label">
+            {editingReminderId ? "Редактирование" : selectedWorkspace?.displayName ?? "Новое"}
+          </span>
         </header>
 
         <section className="form-intro">
-          <p className="eyebrow">Обязательство</p>
-          <h1>О чём не дать забыть?</h1>
-          <p>Бот будет возвращать напоминание, пока ответственный не отметит выполнение.</p>
+          <p className="eyebrow">{editingReminderId ? "Текущее и будущие" : "Обязательство"}</p>
+          <h1>{editingReminderId ? "Что изменить?" : "О чём не дать забыть?"}</h1>
+          <p>{editingReminderId
+            ? "Новые параметры применятся к текущему незавершённому поручению и следующим повторам. История не изменится."
+            : "Бот будет возвращать напоминание, пока ответственный не отметит выполнение."}</p>
         </section>
 
         <form
@@ -571,20 +1009,23 @@ function App() {
                 <p className="eyebrow">Видимость и ответственность</p>
                 <h2>Кто отвечает</h2>
               </div>
-              <button
-                className="sync-button"
-                type="button"
-                disabled={syncing}
-                onClick={() => void syncWorkspaceMembers()}
-              >
-                {syncing ? "Обновляю…" : "Обновить людей"}
-              </button>
+              {canAssignGroup ? (
+                <button
+                  className="sync-button"
+                  type="button"
+                  disabled={syncing}
+                  onClick={() => void syncWorkspaceMembers()}
+                >
+                  {syncing ? "Обновляю…" : "Обновить людей"}
+                </button>
+              ) : null}
             </div>
 
             <div className="choice-grid choice-grid--visibility" role="radiogroup" aria-label="Видимость">
               <button
                 className={form.visibility === "group" ? "choice-card is-selected" : "choice-card"}
                 type="button"
+                disabled={!canAssignGroup}
                 onClick={() => setForm({ ...form, visibility: "group" })}
               >
                 <span className="choice-icon">◎</span>
@@ -619,11 +1060,13 @@ function App() {
                 }
               >
                 {form.visibility === "group" ? <option value="anyone">Может выполнить любой</option> : null}
-                {members.map((member) => (
+                {members
+                  .filter((member) => canAssignGroup || member.userId === actorId)
+                  .map((member) => (
                   <option key={member.userId} value={member.userId}>
                     {member.displayName}{member.userId === actorId ? " · вы" : ""}
                   </option>
-                ))}
+                  ))}
               </select>
               {form.visibility === "private" && selectedResponsible && !selectedResponsible.privateChatAvailable ? (
                 <small className="field-warning">Нужно, чтобы {selectedResponsible.displayName} сначала отправил боту /start.</small>
@@ -679,7 +1122,7 @@ function App() {
               {form.frequency === "once" ? (
                 <label className="field">
                   <span>Дата</span>
-                  <input type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} required />
+                  <input type="date" min={localDateInputValue()} value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} required />
                 </label>
               ) : (
                 <label className="field">
@@ -805,7 +1248,7 @@ function App() {
               <b>{form.assignmentMode === "anyone" ? "Выполнит любой" : memberName(selectedResponsible)}</b>
             </div>
             <button className="primary-action" type="submit" disabled={saving}>
-              {saving ? "Создаю…" : "Создать"}
+              {saving ? "Сохраняю…" : editingReminderId ? "Сохранить" : "Создать"}
             </button>
           </div>
         </form>
@@ -846,6 +1289,14 @@ function App() {
         {workspaces.length > 1 ? <span className="workspace-switcher__hint">сменить</span> : null}
       </label>
 
+      {selectedWorkspace?.role === "owner" || selectedWorkspace?.role === "organizer" ? (
+        <button className="workspace-settings-link" type="button" onClick={openSettings}>
+          <span aria-hidden="true">◴</span>
+          <span><b>Ритм группы</b><small>{selectedWorkspace.quietHoursStart}–{selectedWorkspace.quietHoursEnd} · {selectedWorkspace.timezone}</small></span>
+          <span aria-hidden="true">→</span>
+        </button>
+      ) : null}
+
       <section className="home-intro">
         <p className="eyebrow">Линия внимания</p>
         <h1>Что требует<br />действия</h1>
@@ -885,10 +1336,21 @@ function App() {
         ) : (
           <div className="rail">
             {visibleOccurrences.map((occurrence) => {
+              const definition = reminderMap.get(occurrence.reminderId);
               const responsible = occurrence.assignment.mode === "person"
                 ? memberMap.get(occurrence.assignment.responsibleUserId)
                 : undefined;
               const amount = formatAmount(occurrence.amountMinor, occurrence.currency);
+              const isManager = actor?.role === "owner" || actor?.role === "organizer";
+              const isResponsible = occurrence.assignment.mode === "person" &&
+                occurrence.assignment.responsibleUserId === actorId;
+              const isCreator = definition?.creatorUserId === actorId;
+              const canComplete = occurrence.visibility === "private"
+                ? isCreator || isResponsible
+                : isCreator || isManager || isResponsible || occurrence.assignment.mode === "anyone";
+              const canSnooze = occurrence.visibility === "private"
+                ? isCreator || isResponsible
+                : isCreator || isManager || isResponsible;
               return (
                 <article className={`rail-item rail-item--${occurrence.status}`} key={occurrence.occurrenceId}>
                   <span className="rail-node" />
@@ -903,24 +1365,24 @@ function App() {
                     </div>
                     <h3>{occurrence.title}</h3>
                     <p>{occurrence.assignment.mode === "anyone" ? "Может выполнить любой" : `Ответственный · ${memberName(responsible)}`}</p>
-                    <div className="rail-actions">
-                      <button
+                    {canComplete || canSnooze ? <div className="rail-actions">
+                      {canComplete ? <button
                         className="rail-action rail-action--complete"
                         type="button"
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
                         onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}
                       >
                         ✓ Выполнено
-                      </button>
-                      <button
+                      </button> : null}
+                      {canSnooze ? <button
                         className="rail-action"
                         type="button"
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
                         onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze")}
                       >
                         +1 час
-                      </button>
-                    </div>
+                      </button> : null}
+                    </div> : null}
                   </div>
                 </article>
               );
@@ -945,6 +1407,11 @@ function App() {
               const responsible = reminder.assignment.mode === "person"
                 ? memberMap.get(reminder.assignment.responsibleUserId)
                 : undefined;
+              const missingResponsible = reminder.assignment.mode === "person" && !responsible;
+              const canManageReminder = reminder.visibility === "group"
+                ? actor?.role === "owner" || actor?.role === "organizer"
+                : reminder.creatorUserId === actorId ||
+                  (reminder.assignment.mode === "person" && reminder.assignment.responsibleUserId === actorId);
               return (
                 <article className={`plan-row plan-row--${reminder.status}`} key={reminder.reminderId}>
                   <div className="plan-date" aria-hidden="true">
@@ -956,7 +1423,40 @@ function App() {
                     <small>{reminder.assignment.mode === "anyone" ? "Любой участник" : memberName(responsible)}</small>
                   </div>
                   <span className={`status-dot status-dot--${reminder.status}`} />
-                  {reminder.status === "paused" &&
+                  {canManageReminder ? (
+                    <div className="series-actions" aria-label={`Управление серией: ${reminder.title}`}>
+                      <button
+                        type="button"
+                        disabled={managingReminderId === reminder.reminderId}
+                        onClick={() => openEdit(reminder)}
+                      >
+                        Изменить
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          managingReminderId === reminder.reminderId ||
+                          (reminder.status === "paused" && missingResponsible)
+                        }
+                        onClick={() => void manageReminder(
+                          reminder,
+                          reminder.status === "paused" ? "resume" : "pause",
+                        )}
+                      >
+                        {reminder.status === "paused" ? "Продолжить" : "Пауза"}
+                      </button>
+                      <button
+                        className="series-actions__archive"
+                        type="button"
+                        disabled={managingReminderId === reminder.reminderId}
+                        onClick={() => void manageReminder(reminder, "archive")}
+                      >
+                        Завершить
+                      </button>
+                    </div>
+                  ) : null}
+                  {reminder.status === "paused" && reminder.assignment.mode === "person" &&
+                  missingResponsible &&
                   (actor?.role === "owner" || actor?.role === "organizer") ? (
                     <div className="reassign-row">
                       <span>Ответственный вышел — выберите нового</span>

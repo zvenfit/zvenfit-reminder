@@ -5,9 +5,7 @@ import {
   type TelegramObservationDependencies,
 } from "./telegram-observation.js";
 
-const config = {
-  allowedChatId: -100123,
-} as AppConfig;
+const config = {} as AppConfig;
 
 function dependencies(): TelegramObservationDependencies {
   return {
@@ -52,5 +50,19 @@ describe("observeTelegramIdentity", () => {
     );
     expect(deps.members.observe).toHaveBeenCalledWith("workspace-a", 20);
     expect(deps.workspaces.getByTelegramChatId).toHaveBeenCalledWith(-100123);
+  });
+
+  it("ignores Telegram service bots and anonymous-admin identities", async () => {
+    const deps = dependencies();
+    await observeTelegramIdentity(
+      config,
+      { id: 1087968824, isBot: true, firstName: "Group Anonymous Bot" },
+      { id: -100123, type: "group" },
+      deps,
+    );
+
+    expect(deps.users.observe).not.toHaveBeenCalled();
+    expect(deps.workspaces.getByTelegramChatId).not.toHaveBeenCalled();
+    expect(deps.members.observe).not.toHaveBeenCalled();
   });
 });

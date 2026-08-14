@@ -76,6 +76,10 @@ summary:focus-visible {
   width: min(100%, 820px);
 }
 
+.app--settings {
+  width: min(100%, 700px);
+}
+
 .home-header,
 .topbar {
   display: flex;
@@ -172,6 +176,205 @@ summary:focus-visible {
   display: grid;
   min-width: 0;
   gap: 2px;
+}
+
+.workspace-settings-link {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  gap: 11px;
+  margin-top: 10px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--paper) 76%, transparent);
+  text-align: left;
+}
+
+.workspace-settings-link > span:nth-child(2) {
+  display: grid;
+  gap: 1px;
+}
+
+.workspace-settings-link b {
+  font-size: 12px;
+}
+
+.workspace-settings-link small {
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-settings-link:hover {
+  border-color: color-mix(in srgb, var(--signal) 40%, var(--line));
+}
+
+.settings-intro {
+  padding-bottom: 22px;
+}
+
+.rhythm-map {
+  position: relative;
+  padding: 22px;
+  overflow: hidden;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 74% 18%, rgba(255, 255, 255, 0.19), transparent 24%),
+    linear-gradient(145deg, #18223b, #263661);
+  box-shadow: 0 22px 55px rgba(24, 34, 59, 0.2);
+  color: #fff;
+}
+
+.rhythm-map__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.rhythm-map__heading > span {
+  display: grid;
+  gap: 3px;
+}
+
+.rhythm-map__heading > span:last-child {
+  text-align: right;
+}
+
+.rhythm-map__heading small,
+.rhythm-map__ticks {
+  color: #aeb9d1;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rhythm-map__heading b {
+  font-size: 15px;
+}
+
+.rhythm-map__line {
+  position: relative;
+  display: block;
+  height: 9px;
+  margin: 28px 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.rhythm-map__night {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #6f86f4 0 var(--quiet-end), transparent var(--quiet-end) var(--quiet-start), #6f86f4 var(--quiet-start) 100%);
+}
+
+.rhythm-map__signal {
+  position: absolute;
+  top: 50%;
+  left: var(--all-day-time);
+  width: 13px;
+  height: 13px;
+  border: 3px solid #fff;
+  border-radius: 50%;
+  background: #ff6868;
+  box-shadow: 0 0 0 5px rgba(255, 104, 104, 0.2);
+  transform: translate(-50%, -50%);
+}
+
+.rhythm-map__ticks {
+  display: flex;
+  justify-content: space-between;
+}
+
+.settings-panel {
+  margin-top: 14px;
+}
+
+.settings-panel .field > small {
+  margin-top: 7px;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
+.settings-save {
+  width: 100%;
+  min-height: 54px;
+  margin-top: 14px;
+}
+
+.notice-toast--inline {
+  position: static;
+  width: 100%;
+  margin-top: 12px;
+  transform: none;
+}
+
+.ownership-panel {
+  margin-top: 28px;
+  padding: 24px;
+  border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--line));
+  border-radius: 22px;
+  background: color-mix(in srgb, var(--danger) 3%, var(--paper));
+}
+
+.ownership-panel h2 {
+  margin: 4px 0 8px;
+  font-size: 20px;
+}
+
+.ownership-panel > p:not(.eyebrow),
+.ownership-confirm p {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.ownership-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.ownership-controls .field {
+  margin: 0;
+}
+
+.danger-action {
+  min-height: 46px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--danger) 10%, var(--paper));
+  color: var(--danger);
+  font-weight: 800;
+}
+
+.ownership-confirm {
+  margin-top: 18px;
+  padding: 17px;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--danger) 8%, var(--paper));
+}
+
+.ownership-confirm > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.ownership-confirm > div > button:first-child {
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
 }
 
 .workspace-switcher__copy small,
@@ -461,6 +664,28 @@ summary:focus-visible {
 .plan-row--paused {
   grid-template-columns: 40px minmax(0, 1fr) 10px;
   background: color-mix(in srgb, var(--amber) 7%, var(--paper));
+}
+
+.series-actions {
+  display: flex;
+  grid-column: 2 / -1;
+  gap: 8px;
+}
+
+.series-actions button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--canvas);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.series-actions .series-actions__archive {
+  border-color: color-mix(in srgb, var(--danger) 22%, var(--line));
+  color: var(--danger);
 }
 
 .reassign-row {
@@ -939,6 +1164,11 @@ textarea:focus {
   box-shadow: inset 0 0 0 1px var(--signal);
 }
 
+.choice-card:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .choice-icon {
   display: grid;
   width: 34px;
@@ -1269,6 +1499,19 @@ button:disabled {
   }
 
   .schedule-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rhythm-map__heading {
+    display: grid;
+    gap: 10px;
+  }
+
+  .rhythm-map__heading > span:last-child {
+    text-align: left;
+  }
+
+  .ownership-controls {
     grid-template-columns: 1fr;
   }
 

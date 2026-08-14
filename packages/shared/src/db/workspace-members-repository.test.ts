@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TableSession } from "ydb-sdk";
 import type { SessionRunner } from "./client.js";
+import { DeliveryInProgressError } from "./delivery-guard.js";
 import { WorkspaceMembersRepository } from "./workspace-members-repository.js";
 import { decodeYdbValue } from "./ydb-utils.js";
 
@@ -224,7 +225,52 @@ describe("WorkspaceMembersRepository", () => {
     const write = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("UPDATE workspace_members SET"));
     expect(write?.[0]).toContain("UPDATE reminders SET status = 'paused'");
+    expect(write?.[0]).toContain("reminder_id IN $paused_reminder_ids");
     expect(write?.[0]).toContain("UPDATE reminder_occurrences SET");
     expect(write?.[0]).toContain("'workspace_member.removed'");
+  });
+
+  it("does not remove a private recipient while their Telegram send is fenced", async () => {
+    const memberRow = {
+      workspace_id: "workspace-a",
+      user_id: 20,
+      role: "member",
+      status: "active",
+      role_granted_by: null,
+      role_granted_at: null,
+      last_observed_at: "2026-08-13T10:00:00.000Z",
+      created_at: "2026-08-01T10:00:00.000Z",
+      updated_at: "2026-08-13T10:00:00.000Z",
+    };
+    const lockedOccurrence = {
+      occurrence_id: "occurrence-a",
+      delivery_lock_key: "delivery-a",
+      delivery_locked_at: "2026-08-14T00:00:00.000Z",
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-remove-locked" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("SELECT owner_user_id")
+          ? [
+              resultSet({ owner_user_id: 10, status: "active" }),
+              resultSet(memberRow),
+              resultSet({ reminder_id: "reminder-a" }),
+              resultSet(lockedOccurrence),
+            ]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    await expect(repository.remove(
+      "workspace-a",
+      20,
+      new Date("2026-08-14T00:00:30.000Z"),
+    )).rejects.toBeInstanceOf(DeliveryInProgressError);
+    expect(session.commitTransaction).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,4 @@
--- Greenfield universal-reminder schema.
--- Legacy tables (rules, reminder_instances, group_members) intentionally remain untouched.
+-- Complete greenfield schema for the multi-workspace reminder product.
 
 CREATE TABLE IF NOT EXISTS workspaces (
   workspace_id Utf8 NOT NULL,
@@ -91,11 +90,14 @@ CREATE TABLE IF NOT EXISTS reminder_runtime (
   reminder_id Utf8 NOT NULL,
   state Utf8 NOT NULL,
   next_due_at Timestamp,
+  next_reminder_start_at Timestamp,
   current_occurrence_id Utf8,
   schedule_version Uint64 NOT NULL,
   updated_at Timestamp NOT NULL,
   INDEX idx_reminder_runtime_due GLOBAL ON (state, next_due_at, workspace_id)
     COVER (schedule_version),
+  INDEX idx_reminder_runtime_start GLOBAL ON (state, next_reminder_start_at, workspace_id)
+    COVER (next_due_at, schedule_version),
   PRIMARY KEY (workspace_id, reminder_id)
 );
 
@@ -118,11 +120,13 @@ CREATE TABLE IF NOT EXISTS reminder_occurrences (
   amount_minor Int64,
   currency Utf8,
   visibility Utf8 NOT NULL,
+  timezone Utf8 NOT NULL,
   repeat_interval_minutes Uint32 NOT NULL,
   ignore_quiet_hours Bool NOT NULL,
   escalation_enabled Bool NOT NULL,
   escalation_delay_minutes Uint32,
   escalation_repeat_minutes Uint32,
+  watcher_user_ids JsonDocument NOT NULL,
   next_notification_at Timestamp,
   notification_sequence Uint32 NOT NULL,
   snoozed_by Int64,
@@ -130,9 +134,16 @@ CREATE TABLE IF NOT EXISTS reminder_occurrences (
   snooze_until Timestamp,
   latest_message_chat_id Int64,
   latest_message_id Int64,
+  message_sync_required Bool NOT NULL,
+  message_sync_retire_only Bool NOT NULL,
+  state_revision Uint64 NOT NULL,
+  delivery_lock_key Utf8,
+  delivery_locked_at Timestamp,
   completed_by Int64,
+  completed_by_display_name Utf8,
   completed_at Timestamp,
   undo_until Timestamp,
+  completion_finalized_at Timestamp,
   cancelled_by Int64,
   cancellation_reason Utf8,
   cancelled_at Timestamp,
@@ -142,6 +153,11 @@ CREATE TABLE IF NOT EXISTS reminder_occurrences (
     COVER (reminder_id),
   INDEX idx_occurrences_plan GLOBAL ON (workspace_id, due_at)
     COVER (reminder_id, status, visibility, responsible_user_id),
+  INDEX idx_occurrences_completion_finalize GLOBAL ON (status, undo_until, workspace_id)
+    COVER (reminder_id),
+  INDEX idx_occurrences_message_sync GLOBAL ON (message_sync_required, workspace_id)
+    COVER (state_revision),
+  INDEX idx_occurrences_id GLOBAL ON (occurrence_id),
   PRIMARY KEY (workspace_id, occurrence_id)
 );
 
@@ -165,6 +181,7 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
   sequence Uint32 NOT NULL,
   scheduled_at Timestamp NOT NULL,
   claimed_at Timestamp NOT NULL,
+  occurrence_revision Uint64 NOT NULL,
   status Utf8 NOT NULL,
   telegram_chat_id Int64,
   telegram_message_id Int64,

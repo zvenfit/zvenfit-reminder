@@ -1,46 +1,10 @@
 import type { ReminderOccurrence } from "./reminder-domain.js";
-import type { GroupMember, Rule } from "./types.js";
-
-export function buildMentionHtml(mentionIds: number[], members: GroupMember[]): string {
-  if (mentionIds.length === 0) {
-    return "";
-  }
-
-  const memberMap = new Map(members.map((member) => [member.userId, member]));
-
-  return mentionIds
-    .map((userId) => {
-      const member = memberMap.get(userId);
-      const label = escapeHtml(member?.displayName ?? "User");
-      return `<a href="tg://user?id=${userId}">${label}</a>`;
-    })
-    .join(" ");
-}
-
-export function buildReminderMessage(rule: Rule, members: GroupMember[]): string {
-  const amountPart = rule.amount != null ? ` — ${(rule.amount / 100).toLocaleString("ru-RU")} ₽` : "";
-  const mentions = buildMentionHtml(rule.mentionIds, members);
-  const mentionPart = mentions ? `\n${mentions}` : "";
-  return `🔔 <b>${escapeHtml(rule.title)}</b>${amountPart}\nНапоминание о платеже${mentionPart}`;
-}
 
 export function escapeHtml(text: string): string {
   return text
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
-}
-
-export function instanceCallbackData(action: "done" | "skip", instanceId: string): string {
-  return `${action}:${instanceId}`;
-}
-
-export function parseInstanceCallbackData(data: string): { action: "done" | "skip"; instanceId: string } | null {
-  const [action, instanceId] = data.split(":");
-  if ((action !== "done" && action !== "skip") || !instanceId) {
-    return null;
-  }
-  return { action, instanceId };
 }
 
 export function occurrenceCallbackData(
@@ -91,6 +55,9 @@ function formatOccurrenceAmount(occurrence: ReminderOccurrence): string | null {
 export function buildOccurrenceMessage(
   occurrence: ReminderOccurrence,
   now: Date = new Date(),
+  options: {
+    escalationWatchers?: Array<{ userId: number; displayName: string }>;
+  } = {},
 ): string {
   const overdue = occurrence.dueAt <= now;
   const formattedDue = new Intl.DateTimeFormat("ru-RU", {
@@ -116,6 +83,12 @@ export function buildOccurrenceMessage(
     lines.push(
       `<a href="tg://user?id=${occurrence.assignment.responsibleUserId}">Ответственный</a>`,
     );
+  }
+  if (options.escalationWatchers?.length) {
+    const mentions = options.escalationWatchers.map(({ userId, displayName }) =>
+      `<a href="tg://user?id=${userId}">${escapeHtml(displayName)}</a>`
+    ).join(" ");
+    lines.push(`⚠️ Нужна помощь наблюдателей: ${mentions}`);
   }
   return lines.join("\n");
 }

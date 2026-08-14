@@ -1,6 +1,6 @@
 # Product specification: persistent reminders
 
-Status: approved product design. Core universal reminders are implemented;
+Status: approved product design. Core reminders are implemented;
 calendar subscriptions and later roadmap items remain planned separately.
 
 ## Product thesis
@@ -47,8 +47,11 @@ Mini App. Membership and role are independent in every group.
 | Organizer | Create and manage group reminders; create private reminders for members; intervene in group reminder completion when necessary. |
 | Member | View group reminders, act on assigned work, and create private reminders for themselves. |
 
-Telegram administrator status does not implicitly grant an application role.
-The owner explicitly grants organizer access inside the Mini App.
+The Telegram administrator who first runs `/setup` becomes the workspace
+owner. Later Telegram admin changes do not implicitly alter application roles;
+the owner explicitly grants organizer access or transfers ownership inside the
+Mini App. If the owner has left, another Telegram administrator can recover
+vacant ownership with `/setup`.
 
 Telegram does not expose the complete group roster to bots, including bot
 administrators. An owner or organizer can import up to ten users at a time with
@@ -247,7 +250,11 @@ Editing an active occurrence offers two scopes:
 - **Only this occurrence** changes its deadline, responsible person, content,
   or notification policy without changing the series.
 - **This and future occurrences** updates the reminder definition and the
-  current incomplete occurrence. Completed history is unchanged.
+  current incomplete occurrence. This is the currently implemented edit mode;
+  completed history is unchanged. If the schedule changes, the current
+  occurrence and its uniqueness slot move atomically; content-only edits keep
+  the existing deadline. Editing and pausing are temporarily unavailable during
+  the ten-minute completion undo window.
 
 Pausing stops current and future notifications. Resuming starts from the next
 valid schedule date and does not create occurrences for dates missed during the
@@ -265,8 +272,10 @@ There is one live Telegram message per active occurrence:
    text so there is only one actionable message.
 4. Snooze edits the current message in place.
 5. Completion edits the current message to its final state and temporarily
-   exposes `Undo completion`.
-6. The Mini App, not chat history, is the canonical audit surface.
+   exposes `Undo completion`; later refreshes preserve the actor and timestamp.
+6. Changing group/private visibility or a private recipient retires the old
+   message without copying new content into the previous audience.
+7. The Mini App, not chat history, is the canonical audit surface.
 
 ## Calendar strategy
 

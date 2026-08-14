@@ -32,6 +32,7 @@ function occurrenceRow(overrides: Record<string, Cell> = {}): Record<string, Cel
     occurrence_id: "occurrence-a",
     reminder_id: "reminder-a",
     reminder_version: 1,
+    state_revision: 1,
     due_at: "2026-08-25T15:00:00.000Z",
     due_local_date: "2026-08-25",
     all_day: false,
@@ -52,6 +53,7 @@ function occurrenceRow(overrides: Record<string, Cell> = {}): Record<string, Cel
     escalation_enabled: true,
     escalation_delay_minutes: 1440,
     escalation_repeat_minutes: 1440,
+    watcher_user_ids: JSON.stringify([10]),
     next_notification_at: "2026-08-13T12:00:00.000Z",
     notification_sequence: 0,
     snoozed_by: null,
@@ -81,6 +83,8 @@ const workspaceRow: Record<string, Cell> = {
 function reservationDouble(
   occurrence: Record<string, Cell>,
   userRows: Array<Record<string, Cell>> = [],
+  watcherRows: Array<Record<string, Cell>> = [],
+  lastEscalationRows: Array<Record<string, Cell>> = [],
 ) {
   const session = {
     beginTransaction: vi.fn().mockResolvedValue({ id: "tx-delivery" }),
@@ -88,7 +92,14 @@ function reservationDouble(
     rollbackTransaction: vi.fn().mockResolvedValue(undefined),
     executeQuery: vi.fn(async (query: string) => {
       if (query.includes("AND next_notification_at <= $now")) {
-        return { resultSets: [resultSet([occurrence]), resultSet([workspaceRow])] };
+        return {
+          resultSets: [
+            resultSet([occurrence]),
+            resultSet([workspaceRow]),
+            resultSet(watcherRows),
+            resultSet(lastEscalationRows),
+          ],
+        };
       }
       if (query.includes("SELECT private_chat_available")) {
         return { resultSets: [resultSet(userRows)] };
@@ -124,8 +135,26 @@ describe("DeliveriesRepository.reserve", () => {
       query.includes("INSERT INTO notification_deliveries"),
     );
     expect(writeCall?.[0]).toContain("notification_sequence = $next_sequence");
+    expect(writeCall?.[0]).toContain("delivery_lock_key = $delivery_key");
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(writeCall?.[1]?.$next_sequence)).toBe(1);
+    expect(decodeYdbValue(writeCall?.[1]?.$occurrence_revision)).toBe(1);
+  });
+
+  it("does not advance a due ping while Telegram message sync owns the occurrence", async () => {
+    const { repository, session } = reservationDouble(occurrenceRow({
+      delivery_lock_key: "message-sync:occurrence-a:7:active",
+      delivery_locked_at: "2026-08-13T11:59:30.000Z",
+    }));
+
+    await expect(repository.reserve(
+      "workspace-a",
+      "occurrence-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    )).resolves.toBeNull();
+
+    expect(session.executeQuery.mock.calls.some(([query]) =>
+      query.includes("INSERT INTO notification_deliveries"))).toBe(false);
   });
 
   it("defers a late cron claim to 08:00 instead of sending in quiet hours", async () => {
@@ -171,6 +200,185 @@ describe("DeliveriesRepository.reserve", () => {
     ).rejects.toBeInstanceOf(DeliveryTargetUnavailableError);
     expect(session.rollbackTransaction).toHaveBeenCalledWith({ txId: "tx-delivery" });
   });
+
+  it("escalates overdue work to active watchers no more often than configured", async () => {
+    const { repository } = reservationDouble(
+      occurrenceRow({
+        status: "overdue",
+        due_at: "2026-08-12T12:00:00.000Z",
+        next_notification_at: "2026-08-13T12:00:00.000Z",
+        notification_sequence: 3,
+      }),
+      [],
+      [{ user_id: 10, display_name: "Анна" }],
+    );
+
+    const reservation = await repository.reserve(
+      "workspace-a",
+      "occurrence-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    expect(reservation?.delivery.deliveryType).toBe("escalation");
+    expect(reservation?.escalationWatchers).toEqual([{ userId: 10, displayName: "Анна" }]);
+  });
+
+  it("keeps regular repeats before the next watcher escalation window", async () => {
+    const { repository } = reservationDouble(
+      occurrenceRow({
+        status: "overdue",
+        due_at: "2026-08-10T12:00:00.000Z",
+        next_notification_at: "2026-08-13T12:00:00.000Z",
+        notification_sequence: 4,
+      }),
+      [],
+      [{ user_id: 10, display_name: "Анна" }],
+      [{ claimed_at: "2026-08-13T06:00:00.000Z" }],
+    );
+
+    const reservation = await repository.reserve(
+      "workspace-a",
+      "occurrence-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    expect(reservation?.delivery.deliveryType).toBe("repeat");
+    expect(reservation?.escalationWatchers).toEqual([]);
+  });
+
+  it("uses the latest failed escalation attempt to prevent rapid watcher retries", async () => {
+    const { repository, session } = reservationDouble(
+      occurrenceRow({
+        status: "overdue",
+        due_at: "2026-08-10T12:00:00.000Z",
+        next_notification_at: "2026-08-13T12:00:00.000Z",
+        notification_sequence: 4,
+      }),
+      [],
+      [{ user_id: 10, display_name: "Анна" }],
+      [{ claimed_at: "2026-08-13T06:00:00.000Z" }],
+    );
+
+    const reservation = await repository.reserve(
+      "workspace-a",
+      "occurrence-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    const read = session.executeQuery.mock.calls[0]?.[0];
+    expect(read).not.toContain("status IN ('reserved', 'sent')");
+    expect(reservation?.delivery.deliveryType).toBe("repeat");
+  });
+
+  it("does not reuse an old escalation window after the due date moves forward", async () => {
+    const { repository } = reservationDouble(
+      occurrenceRow({
+        due_at: "2026-08-25T15:00:00.000Z",
+        next_notification_at: "2026-08-13T12:00:00.000Z",
+        notification_sequence: 4,
+      }),
+      [],
+      [{ user_id: 10, display_name: "Анна" }],
+      [{ claimed_at: "2026-08-12T06:00:00.000Z" }],
+    );
+
+    const reservation = await repository.reserve(
+      "workspace-a",
+      "occurrence-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    expect(reservation?.delivery.deliveryType).toBe("repeat");
+  });
+});
+
+describe("DeliveriesRepository.beginSend", () => {
+  it("rejects a private reservation whose responsible chat changed", async () => {
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-send" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn().mockResolvedValue({
+        resultSets: [resultSet([{
+          delivery_status: "reserved",
+          reserved_chat_id: 100,
+          occurrence_revision: 1,
+          occurrence_id: "occurrence-a",
+          occurrence_status: "pending",
+          state_revision: 1,
+          delivery_lock_key: null,
+          delivery_locked_at: null,
+          notification_state: "waiting",
+          visibility: "private",
+          assignment_mode: "person",
+          responsible_user_id: 30,
+          reminder_status: "active",
+          workspace_status: "active",
+          workspace_chat_id: -100123,
+          private_chat_available: true,
+          private_chat_id: 200,
+        }])],
+      }),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new DeliveriesRepository("", "", runSession);
+
+    await expect(repository.beginSend(
+      "workspace-a",
+      "delivery-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    ))
+      .resolves.toEqual({ valid: false, targetChatId: 200 });
+    expect(session.executeQuery.mock.calls[0]?.[0]).toContain("delivery.status AS delivery_status");
+    expect(session.executeQuery.mock.calls[1]?.[0]).toContain("reservation_stale");
+  });
+
+  it("atomically fences a valid reservation before Telegram send", async () => {
+    const row = {
+      delivery_status: "reserved",
+      reserved_chat_id: -100123,
+      occurrence_revision: 7,
+      occurrence_id: "occurrence-a",
+      occurrence_status: "overdue",
+      state_revision: 7,
+      delivery_lock_key: "delivery-a",
+      delivery_locked_at: "2026-08-13T11:59:30.000Z",
+      notification_state: "waiting",
+      visibility: "group",
+      assignment_mode: "person",
+      responsible_user_id: 20,
+      reminder_status: "active",
+      workspace_status: "active",
+      workspace_chat_id: -100123,
+      private_chat_available: false,
+      private_chat_id: null,
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-send" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("delivery.status AS delivery_status")
+          ? [resultSet([row])]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new DeliveriesRepository("", "", runSession);
+
+    await expect(repository.beginSend(
+      "workspace-a",
+      "delivery-a",
+      new Date("2026-08-13T12:00:00.000Z"),
+    )).resolves.toEqual({ valid: true, targetChatId: -100123 });
+
+    const write = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("status = 'sending'"));
+    expect(write?.[0]).toContain("delivery_lock_key = $delivery_key");
+    expect(session.commitTransaction).toHaveBeenCalled();
+  });
 });
 
 describe("DeliveriesRepository.recordResult", () => {
@@ -187,7 +395,7 @@ describe("DeliveriesRepository.recordResult", () => {
     expect(runSession).not.toHaveBeenCalled();
   });
 
-  it("finalizes a reserved delivery and stores the live Telegram message", async () => {
+  it("finalizes a sending delivery and releases its occurrence lease", async () => {
     const existing = {
       workspace_id: "workspace-a",
       delivery_key: "delivery-a",
@@ -197,7 +405,10 @@ describe("DeliveriesRepository.recordResult", () => {
       sequence: 0,
       scheduled_at: "2026-08-13T12:00:00.000Z",
       claimed_at: "2026-08-13T12:00:00.000Z",
-      status: "reserved",
+      status: "sending",
+      occurrence_revision: 1,
+      current_state_revision: 1,
+      delivery_lock_key: "delivery-a",
       telegram_chat_id: -100123,
       telegram_message_id: null,
       error_code: null,
@@ -209,7 +420,7 @@ describe("DeliveriesRepository.recordResult", () => {
       commitTransaction: vi.fn().mockResolvedValue(undefined),
       rollbackTransaction: vi.fn().mockResolvedValue(undefined),
       executeQuery: vi.fn(async (query: string) => ({
-        resultSets: query.includes("SELECT * FROM notification_deliveries")
+        resultSets: query.includes("FROM notification_deliveries AS delivery")
           ? [resultSet([existing])]
           : [],
       })),
@@ -230,7 +441,55 @@ describe("DeliveriesRepository.recordResult", () => {
       query.includes("UPDATE notification_deliveries SET"),
     );
     expect(writeCall?.[0]).toContain("UPDATE reminder_occurrences SET");
+    expect(writeCall?.[0]).toContain("delivery_lock_key = NULL");
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(writeCall?.[1]?.$occurrence_id)).toBe("occurrence-a");
+  });
+
+  it("marks a late result unknown after its occurrence lease was reclaimed", async () => {
+    const existing = {
+      workspace_id: "workspace-a",
+      delivery_key: "delivery-a",
+      occurrence_id: "occurrence-a",
+      reminder_id: "reminder-a",
+      delivery_type: "initial",
+      sequence: 0,
+      scheduled_at: "2026-08-13T12:00:00.000Z",
+      claimed_at: "2026-08-13T12:00:00.000Z",
+      status: "sending",
+      occurrence_revision: 1,
+      current_state_revision: 2,
+      delivery_lock_key: null,
+      telegram_chat_id: -100123,
+      telegram_message_id: null,
+      error_code: null,
+      created_at: "2026-08-13T12:00:00.000Z",
+      updated_at: "2026-08-13T12:00:00.000Z",
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-late-result" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("FROM notification_deliveries AS delivery")
+          ? [resultSet([existing])]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new DeliveriesRepository("", "", runSession);
+
+    await expect(repository.recordResult(
+      "workspace-a",
+      "delivery-a",
+      { status: "sent", telegramMessageId: 777 },
+      new Date("2026-08-13T12:03:00.000Z"),
+    )).resolves.toMatchObject({ status: "unknown", errorCode: "send_lease_lost" });
+
+    const write = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("send_lease_lost"),
+    );
+    expect(write?.[0]).not.toContain("latest_message_id");
   });
 });

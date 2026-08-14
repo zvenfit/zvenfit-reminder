@@ -5,7 +5,8 @@ import {
   type WorkspaceMember,
   type WorkspaceMemberProfile,
 } from "../reminder-domain.js";
-import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
+import { createSessionRunner, TypedValues, Types, type SessionRunner } from "./client.js";
+import { prepareOccurrenceMutation } from "./delivery-guard.js";
 import { withSerializableTransaction } from "./transaction.js";
 import {
   getField,
@@ -319,9 +320,24 @@ export class WorkspaceMembersRepository {
 
             SELECT reminder_id FROM reminders
             WHERE workspace_id = $workspace_id
-              AND responsible_user_id = $user_id
               AND status = 'active'
+              AND (
+                responsible_user_id = $user_id
+                OR reminder_id IN (
+                  SELECT reminder_id FROM reminder_occurrences
+                  WHERE workspace_id = $workspace_id
+                    AND responsible_user_id = $user_id
+                    AND notification_state = 'waiting'
+                    AND status IN ('scheduled', 'pending', 'overdue')
+                )
+              )
             ORDER BY reminder_id;
+
+            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            WHERE occurrence.workspace_id = $workspace_id
+              AND occurrence.responsible_user_id = $user_id
+              AND occurrence.status IN ('scheduled', 'pending', 'overdue')
+              AND occurrence.delivery_lock_key IS NOT NULL;
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -339,6 +355,15 @@ export class WorkspaceMembersRepository {
         }
         const pausedReminderIds = mapResultRows(resultSets[2]).map((row) =>
           String(getField(row, "reminder_id")));
+        for (const occurrenceRow of mapResultRows(resultSets[3])) {
+          await prepareOccurrenceMutation(
+            transaction,
+            workspaceId,
+            occurrenceRow,
+            String(getField(occurrenceRow, "occurrence_id")),
+            now,
+          );
+        }
         const removed: WorkspaceMember = {
           ...existing,
           role: existing.role === "owner" ? "owner" : "member",
@@ -357,6 +382,7 @@ export class WorkspaceMembersRepository {
             DECLARE $event_id AS Utf8;
             DECLARE $entity_id AS Utf8;
             DECLARE $payload AS JsonDocument;
+            DECLARE $paused_reminder_ids AS List<Utf8>;
             UPDATE workspace_members SET
               role = $role, status = 'removed', role_granted_by = NULL,
               role_granted_at = NULL, updated_at = $now
@@ -364,20 +390,19 @@ export class WorkspaceMembersRepository {
 
             UPDATE reminders SET status = 'paused', updated_at = $now
             WHERE workspace_id = $workspace_id
-              AND responsible_user_id = $user_id
+              AND reminder_id IN $paused_reminder_ids
               AND status = 'active';
 
             UPDATE reminder_runtime SET state = 'paused', updated_at = $now
             WHERE workspace_id = $workspace_id
-              AND reminder_id IN (
-                SELECT reminder_id FROM reminders
-                WHERE workspace_id = $workspace_id
-                  AND responsible_user_id = $user_id
-                  AND status = 'paused'
-              );
+              AND reminder_id IN $paused_reminder_ids;
 
             UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
               notification_state = 'stopped', next_notification_at = NULL,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
               updated_at = $now
             WHERE workspace_id = $workspace_id
               AND responsible_user_id = $user_id
@@ -400,6 +425,7 @@ export class WorkspaceMembersRepository {
             $event_id: TypedValues.utf8(randomUUID()),
             $entity_id: TypedValues.utf8(`member:${userId}`),
             $payload: TypedValues.jsonDocument(JSON.stringify({ pausedReminderIds })),
+            $paused_reminder_ids: TypedValues.list(Types.UTF8, pausedReminderIds),
           },
         );
         return { member: removed, pausedReminderIds };

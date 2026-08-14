@@ -13,6 +13,11 @@ import {
   type ReminderRuntime,
 } from "../reminder-domain.js";
 import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
+import {
+  DELIVERY_LOCK_TTL_MILLISECONDS,
+  hasActiveDeliveryLock,
+  prepareOccurrenceMutation,
+} from "./delivery-guard.js";
 import { withSerializableTransaction } from "./transaction.js";
 import {
   getField,
@@ -30,6 +35,16 @@ export interface RuntimeCandidate {
   workspaceId: string;
   reminderId: string;
   reminderStartAt: Date;
+}
+
+export interface OccurrenceMessageSyncCandidate {
+  occurrence: ReminderOccurrence;
+  stateRevision: number;
+  retireOnly: boolean;
+}
+
+export interface OccurrenceMessageSyncClaim extends OccurrenceMessageSyncCandidate {
+  syncKey: string;
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -53,7 +68,10 @@ export function rowToRuntime(data: Record<string, unknown>): ReminderRuntime {
   };
 }
 
-export function rowToReminder(data: Record<string, unknown>): ReminderDefinition {
+export function rowToReminder(
+  data: Record<string, unknown>,
+  watcherUserIds: number[] = [],
+): ReminderDefinition {
   const escalationEnabled = Boolean(getField(data, "escalation_enabled"));
   const draft = reminderDraftSchema.parse({
     title: getField(data, "title"),
@@ -69,7 +87,7 @@ export function rowToReminder(data: Record<string, unknown>): ReminderDefinition
             responsibleUserId: Number(getField(data, "responsible_user_id")),
           }
         : { mode: "anyone" },
-    watcherUserIds: [],
+    watcherUserIds,
     schedule: parseJsonDocument(getField(data, "schedule_spec"), null),
     timezone: getField(data, "timezone"),
     notificationPolicy: {
@@ -105,6 +123,7 @@ export function rowToOccurrence(data: Record<string, unknown>): ReminderOccurren
     occurrenceId: String(getField(data, "occurrence_id")),
     reminderId: String(getField(data, "reminder_id")),
     reminderVersion: Number(getField(data, "reminder_version")),
+    stateRevision: Number(getField(data, "state_revision")),
     dueAt: parseYdbTimestampRequired(getField(data, "due_at"), "due_at"),
     dueLocalDate: String(getField(data, "due_local_date")),
     allDay: Boolean(getField(data, "all_day")),
@@ -149,6 +168,7 @@ export function rowToOccurrence(data: Record<string, unknown>): ReminderOccurren
     latestMessageChatId: nullableNumber(getField(data, "latest_message_chat_id")),
     latestMessageId: nullableNumber(getField(data, "latest_message_id")),
     completedBy: nullableNumber(getField(data, "completed_by")),
+    completedByDisplayName: nullableString(getField(data, "completed_by_display_name")),
     completedAt: parseYdbTimestamp(getField(data, "completed_at")),
     undoUntil: parseYdbTimestamp(getField(data, "undo_until")),
     cancelledBy: nullableNumber(getField(data, "cancelled_by")),
@@ -267,6 +287,7 @@ export class OccurrencesRepository {
             AND occurrence.reminder_id = reminder.reminder_id
           WHERE occurrence.workspace_id = $workspace_id
             AND occurrence.status IN ('scheduled', 'pending', 'overdue')
+            AND reminder.status = 'active'
             AND (
               occurrence.visibility = 'group'
               OR reminder.creator_user_id = $actor_user_id
@@ -280,6 +301,143 @@ export class OccurrencesRepository {
         },
       );
       return mapResultRows(resultSets[0]).map(rowToOccurrence);
+    });
+  }
+
+  async listMessageSyncCandidates(
+    workspaceId: string,
+    limit = 100,
+  ): Promise<OccurrenceMessageSyncCandidate[]> {
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          DECLARE $workspace_id AS Utf8;
+          DECLARE $limit AS Uint64;
+          SELECT * FROM reminder_occurrences
+          WHERE workspace_id = $workspace_id
+            AND message_sync_required = true
+          ORDER BY updated_at, occurrence_id
+          LIMIT $limit;
+        `,
+        {
+          $workspace_id: TypedValues.utf8(workspaceId),
+          $limit: TypedValues.uint64(limit),
+        },
+      );
+      return mapResultRows(resultSets[0]).map((row) => ({
+        occurrence: rowToOccurrence(row),
+        stateRevision: Number(getField(row, "state_revision")),
+        retireOnly: Boolean(getField(row, "message_sync_retire_only")),
+      }));
+    });
+  }
+
+  async beginMessageSync(
+    workspaceId: string,
+    occurrenceId: string,
+    stateRevision: number,
+    now: Date = new Date(),
+  ): Promise<OccurrenceMessageSyncClaim | null> {
+    return this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $occurrence_id AS Utf8;
+            SELECT * FROM reminder_occurrences
+            WHERE workspace_id = $workspace_id
+              AND occurrence_id = $occurrence_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $occurrence_id: TypedValues.utf8(occurrenceId),
+          },
+        );
+        const row = mapResultRows(resultSets[0])[0];
+        const currentStateRevision = Number(getField(row ?? {}, "state_revision"));
+        if (
+          !row ||
+          !Boolean(getField(row, "message_sync_required")) ||
+          currentStateRevision !== stateRevision ||
+          hasActiveDeliveryLock(row, now)
+        ) {
+          return null;
+        }
+        await prepareOccurrenceMutation(transaction, workspaceId, row, occurrenceId, now);
+        const syncKey = `message-sync:${occurrenceId}:${currentStateRevision}:${randomUUID()}`;
+        const expiredBefore = new Date(now.getTime() - DELIVERY_LOCK_TTL_MILLISECONDS);
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $occurrence_id AS Utf8;
+            DECLARE $state_revision AS Uint64;
+            DECLARE $sync_key AS Utf8;
+            DECLARE $now AS Timestamp;
+            DECLARE $expired_before AS Timestamp;
+            UPDATE reminder_occurrences SET
+              delivery_lock_key = $sync_key,
+              delivery_locked_at = $now
+            WHERE workspace_id = $workspace_id
+              AND occurrence_id = $occurrence_id
+              AND state_revision = $state_revision
+              AND message_sync_required = true
+              AND (
+                delivery_lock_key IS NULL OR delivery_locked_at <= $expired_before
+              );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $occurrence_id: TypedValues.utf8(occurrenceId),
+            $state_revision: TypedValues.uint64(currentStateRevision),
+            $sync_key: TypedValues.utf8(syncKey),
+            $now: timestampValue(now),
+            $expired_before: timestampValue(expiredBefore),
+          },
+        );
+        return {
+          occurrence: rowToOccurrence(row),
+          stateRevision: currentStateRevision,
+          retireOnly: Boolean(getField(row, "message_sync_retire_only")),
+          syncKey,
+        };
+      }),
+    );
+  }
+
+  async finishMessageSync(
+    workspaceId: string,
+    occurrenceId: string,
+    stateRevision: number,
+    syncKey: string,
+    succeeded: boolean,
+  ): Promise<void> {
+    await this.runSession(async (session) => {
+      await session.executeQuery(
+        `
+          DECLARE $workspace_id AS Utf8;
+          DECLARE $occurrence_id AS Utf8;
+          DECLARE $state_revision AS Uint64;
+          DECLARE $sync_key AS Utf8;
+          DECLARE $succeeded AS Bool;
+          UPDATE reminder_occurrences SET
+            delivery_lock_key = NULL,
+            delivery_locked_at = NULL,
+            message_sync_required = IF($succeeded, false, message_sync_required),
+            message_sync_retire_only = IF($succeeded, false, message_sync_retire_only)
+          WHERE workspace_id = $workspace_id
+            AND occurrence_id = $occurrence_id
+            AND state_revision = $state_revision
+            AND delivery_lock_key = $sync_key;
+        `,
+        {
+          $workspace_id: TypedValues.utf8(workspaceId),
+          $occurrence_id: TypedValues.utf8(occurrenceId),
+          $state_revision: TypedValues.uint64(stateRevision),
+          $sync_key: TypedValues.utf8(syncKey),
+          $succeeded: TypedValues.bool(succeeded),
+        },
+      );
     });
   }
 
@@ -305,6 +463,10 @@ export class OccurrencesRepository {
             SELECT * FROM reminders
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
             LIMIT 1;
+
+            SELECT user_id FROM reminder_watchers
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+            ORDER BY user_id;
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -318,7 +480,10 @@ export class OccurrencesRepository {
           return null;
         }
         const runtime = rowToRuntime(runtimeRow);
-        const reminder = rowToReminder(reminderRow);
+        const reminder = rowToReminder(
+          reminderRow,
+          mapResultRows(resultSets[2]).map((row) => Number(getField(row, "user_id"))),
+        );
         if (
           runtime.state !== "ready" ||
           reminder.status !== "active" ||
@@ -335,6 +500,7 @@ export class OccurrencesRepository {
           occurrenceId,
           reminderId,
           reminderVersion: reminder.version,
+          stateRevision: 1,
           dueAt: runtime.nextDueAt,
           dueLocalDate:
             DateTime.fromJSDate(runtime.nextDueAt, { zone: reminder.timezone }).toISODate() ?? "",
@@ -361,6 +527,7 @@ export class OccurrencesRepository {
           latestMessageChatId: null,
           latestMessageId: null,
           completedBy: null,
+          completedByDisplayName: null,
           completedAt: null,
           undoUntil: null,
           cancelledBy: null,
@@ -400,8 +567,12 @@ export class OccurrencesRepository {
             DECLARE $escalation_enabled AS Bool;
             DECLARE $escalation_delay_minutes AS Uint32?;
             DECLARE $escalation_repeat_minutes AS Uint32?;
+            DECLARE $watcher_user_ids AS JsonDocument;
             DECLARE $next_notification_at AS Timestamp;
             DECLARE $notification_sequence AS Uint32;
+            DECLARE $message_sync_required AS Bool;
+            DECLARE $message_sync_retire_only AS Bool;
+            DECLARE $state_revision AS Uint64;
             DECLARE $created_at AS Timestamp;
             DECLARE $updated_at AS Timestamp;
 
@@ -418,8 +589,10 @@ export class OccurrencesRepository {
               title, description, action_url, amount_minor, currency, visibility,
               timezone, repeat_interval_minutes, ignore_quiet_hours,
               escalation_enabled, escalation_delay_minutes,
-              escalation_repeat_minutes, next_notification_at,
-              notification_sequence, created_at, updated_at
+              escalation_repeat_minutes, watcher_user_ids, next_notification_at,
+              notification_sequence, message_sync_required,
+              message_sync_retire_only, state_revision,
+              created_at, updated_at
             ) VALUES (
               $workspace_id, $occurrence_id, $reminder_id, $reminder_version,
               $due_at, $due_local_date, $all_day, $reminder_start_at, $status,
@@ -427,8 +600,10 @@ export class OccurrencesRepository {
               $title, $description, $action_url, $amount_minor, $currency, $visibility,
               $timezone, $repeat_interval_minutes, $ignore_quiet_hours,
               $escalation_enabled, $escalation_delay_minutes,
-              $escalation_repeat_minutes, $next_notification_at,
-              $notification_sequence, $created_at, $updated_at
+              $escalation_repeat_minutes, $watcher_user_ids, $next_notification_at,
+              $notification_sequence, $message_sync_required,
+              $message_sync_retire_only, $state_revision,
+              $created_at, $updated_at
             );
 
             UPDATE reminder_runtime SET
@@ -477,8 +652,14 @@ export class OccurrencesRepository {
             $escalation_repeat_minutes: optionalUint32(
               escalation.enabled ? escalation.repeatMinutes : null,
             ),
+            $watcher_user_ids: TypedValues.jsonDocument(
+              JSON.stringify(reminder.watcherUserIds),
+            ),
             $next_notification_at: timestampValue(occurrence.reminderStartAt),
             $notification_sequence: TypedValues.uint32(occurrence.notificationSequence),
+            $message_sync_required: TypedValues.bool(false),
+            $message_sync_retire_only: TypedValues.bool(false),
+            $state_revision: TypedValues.uint64(1),
             $created_at: timestampValue(occurrence.createdAt),
             $updated_at: timestampValue(occurrence.updatedAt),
           },

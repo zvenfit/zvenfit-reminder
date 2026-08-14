@@ -1,53 +1,69 @@
 import {
+  DeliveryInProgressError,
   InactiveWorkspaceMemberError,
   OccurrenceNotActionableError,
   OccurrencesRepository,
   PrivateChatUnavailableError,
+  ReminderCreateForbiddenError,
   ReminderReassignmentForbiddenError,
+  ReminderLifecycleConflictError,
+  ReminderLifecycleForbiddenError,
+  ReminderUpdateForbiddenError,
+  ReminderUpdateConflictError,
+  ScheduleHasNoFutureDeadlineError,
   RemindersRepository,
   WorkspaceMembersRepository,
   WorkspaceMemberNotFoundError,
+  WorkspaceOwnershipTransferForbiddenError,
   WorkspaceRoleChangeForbiddenError,
+  WorkspaceSettingsForbiddenError,
   WorkspacesRepository,
   UndoWindowExpiredError,
   canCreateReminder,
   reminderDraftSchema,
+  workspaceSettingsSchema,
   type AppConfig,
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import {
-  UniversalOccurrenceActionForbiddenError,
-  UniversalOccurrenceActionNotFoundError,
-  executeUniversalOccurrenceAction,
-  type UniversalOccurrenceActionInput,
-  type UniversalOccurrenceActionResult,
-} from "./universal-occurrence-actions.js";
+  OccurrenceActionForbiddenError,
+  OccurrenceActionNotFoundError,
+  executeOccurrenceAction,
+  type OccurrenceActionInput,
+  type OccurrenceActionResult,
+} from "./occurrence-actions.js";
 
-export interface UniversalApiDependencies {
-  workspaces: Pick<WorkspacesRepository, "getById" | "listForUser">;
+export interface WorkspaceApiDependencies {
+  workspaces: Pick<
+    WorkspacesRepository,
+    "getById" | "listForUser" | "updateSettings" | "transferOwnership"
+  >;
   members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles" | "setRole">;
-  reminders: Pick<RemindersRepository, "listForActor" | "create" | "reassign">;
+  reminders: Pick<
+    RemindersRepository,
+    "listForActor" | "create" | "update" | "reassign" | "changeLifecycle"
+  >;
   occurrences: Pick<OccurrencesRepository, "listActionableForActor">;
   occurrenceActions: {
-    execute(input: UniversalOccurrenceActionInput): Promise<UniversalOccurrenceActionResult>;
+    execute(input: OccurrenceActionInput): Promise<OccurrenceActionResult>;
   };
 }
 
-function createDependencies(config: AppConfig): UniversalApiDependencies {
+function createDependencies(config: AppConfig): WorkspaceApiDependencies {
   return {
     workspaces: new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase),
     members: new WorkspaceMembersRepository(config.ydbEndpoint, config.ydbDatabase),
     reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
     occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
     occurrenceActions: {
-      execute: (input) => executeUniversalOccurrenceAction(config, input),
+      execute: (input) => executeOccurrenceAction(config, input),
     },
   };
 }
 
-function isUniversalRoute(method: string, path: string): boolean {
+function isWorkspaceRoute(method: string, path: string): boolean {
   return (
     (method === "GET" && path === "/api/workspaces") ||
     (method === "GET" && (
@@ -57,22 +73,28 @@ function isUniversalRoute(method: string, path: string): boolean {
     )) ||
     (method === "POST" && (
       path === "/api/reminders" ||
+      path === "/api/workspace/transfer-ownership" ||
       /^\/api\/reminders\/[^/]+\/reassign$/.test(path) ||
+      /^\/api\/reminders\/[^/]+\/(pause|resume|archive)$/.test(path) ||
       /^\/api\/occurrences\/[^/]+\/(complete|snooze|undo-completion)$/.test(path)
     )) ||
-    (method === "PATCH" && /^\/api\/members\/\d+\/role$/.test(path))
+    (method === "PATCH" && (
+      path === "/api/workspace/settings" ||
+      /^\/api\/reminders\/[^/]+$/.test(path) ||
+      /^\/api\/members\/\d+\/role$/.test(path)
+    ))
   );
 }
 
-export async function handleUniversalApi(
+export async function handleWorkspaceApi(
   event: ApiGatewayEvent,
   config: AppConfig,
   initData: ParsedInitData,
-  providedDependencies?: UniversalApiDependencies,
+  providedDependencies?: WorkspaceApiDependencies,
 ): Promise<ApiGatewayResponse | null> {
   const method = event.httpMethod ?? "GET";
   const path = getPath(event);
-  if (!isUniversalRoute(method, path)) {
+  if (!isWorkspaceRoute(method, path)) {
     return null;
   }
   const dependencies = providedDependencies ?? createDependencies(config);
@@ -100,6 +122,67 @@ export async function handleUniversalApi(
     return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
   }
 
+  if (method === "PATCH" && path === "/api/workspace/settings") {
+    let body: unknown;
+    try {
+      body = JSON.parse(event.body ?? "{}");
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    const settings = workspaceSettingsSchema.safeParse(body);
+    if (!settings.success) {
+      return jsonResponse(400, {
+        error: "Invalid workspace settings",
+        code: "validation_failed",
+        issues: settings.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+    }
+    try {
+      const updated = await dependencies.workspaces.updateSettings(
+        workspace.workspaceId,
+        settings.data,
+        actor.userId,
+      );
+      return jsonResponse(200, { workspace: { ...updated, role: actor.role } });
+    } catch (error) {
+      if (error instanceof WorkspaceSettingsForbiddenError) {
+        return jsonResponse(403, { error: "Only organizers can change settings", code: "forbidden" });
+      }
+      throw error;
+    }
+  }
+
+  if (method === "POST" && path === "/api/workspace/transfer-ownership") {
+    let targetUserId: unknown;
+    try {
+      targetUserId = JSON.parse(event.body ?? "{}").targetUserId;
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    if (!Number.isSafeInteger(targetUserId) || Number(targetUserId) <= 0) {
+      return jsonResponse(400, { error: "Invalid target user", code: "validation_failed" });
+    }
+    try {
+      const updated = await dependencies.workspaces.transferOwnership(
+        workspace.workspaceId,
+        Number(targetUserId),
+        actor.userId,
+      );
+      return jsonResponse(200, { workspace: { ...updated, role: "organizer" } });
+    } catch (error) {
+      if (error instanceof WorkspaceOwnershipTransferForbiddenError) {
+        return jsonResponse(403, {
+          error: "Only the owner can transfer ownership to an active member",
+          code: "forbidden",
+        });
+      }
+      throw error;
+    }
+  }
+
   if (method === "GET" && path === "/api/reminders") {
     const reminders = await dependencies.reminders.listForActor(
       workspace.workspaceId,
@@ -119,6 +202,75 @@ export async function handleUniversalApi(
   if (method === "GET" && path === "/api/members") {
     const members = await dependencies.members.listProfiles(workspace.workspaceId);
     return jsonResponse(200, { members });
+  }
+
+  const reminderUpdateMatch = path.match(/^\/api\/reminders\/([^/]+)$/);
+  if (method === "PATCH" && reminderUpdateMatch) {
+    let body: unknown;
+    try {
+      body = JSON.parse(event.body ?? "{}");
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    const parsedDraft = reminderDraftSchema.safeParse(body);
+    if (!parsedDraft.success) {
+      return jsonResponse(400, {
+        error: "Invalid reminder",
+        code: "validation_failed",
+        issues: parsedDraft.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+    }
+    try {
+      const reminder = await dependencies.reminders.update(
+        workspace.workspaceId,
+        decodeURIComponent(reminderUpdateMatch[1]),
+        parsedDraft.data,
+        actor.userId,
+      );
+      return reminder
+        ? jsonResponse(200, { reminder })
+        : jsonResponse(404, { error: "Reminder not found", code: "not_found" });
+    } catch (error) {
+      if (error instanceof DeliveryInProgressError) {
+        return jsonResponse(409, {
+          error: "A notification is being sent; retry in a moment",
+          code: "delivery_in_progress",
+        });
+      }
+      if (error instanceof ReminderUpdateForbiddenError) {
+        return jsonResponse(403, { error: "Cannot edit this reminder", code: "forbidden" });
+      }
+      if (error instanceof ReminderUpdateConflictError) {
+        return jsonResponse(409, {
+          error: "Wait until the completion undo window closes before editing",
+          code: "update_conflict",
+        });
+      }
+      if (error instanceof ScheduleHasNoFutureDeadlineError) {
+        return jsonResponse(409, {
+          error: "Choose a future reminder date",
+          code: "schedule_has_no_future_deadline",
+        });
+      }
+      if (error instanceof PrivateChatUnavailableError) {
+        return jsonResponse(409, {
+          error: "Responsible person must start the bot first",
+          code: "private_chat_required",
+          userId: error.userId,
+        });
+      }
+      if (error instanceof InactiveWorkspaceMemberError) {
+        return jsonResponse(409, {
+          error: "Every participant must be an active workspace member",
+          code: "inactive_participant",
+          userIds: error.userIds,
+        });
+      }
+      throw error;
+    }
   }
 
   const reminderReassignMatch = path.match(/^\/api\/reminders\/([^/]+)\/reassign$/);
@@ -143,6 +295,12 @@ export async function handleUniversalApi(
         ? jsonResponse(200, { reminder })
         : jsonResponse(404, { error: "Reminder not found", code: "not_found" });
     } catch (error) {
+      if (error instanceof DeliveryInProgressError) {
+        return jsonResponse(409, {
+          error: "A notification is being sent; retry in a moment",
+          code: "delivery_in_progress",
+        });
+      }
       if (error instanceof ReminderReassignmentForbiddenError) {
         return jsonResponse(403, { error: "Only organizers can reassign", code: "forbidden" });
       }
@@ -155,6 +313,38 @@ export async function handleUniversalApi(
           code: "private_chat_required",
           userId: error.userId,
         });
+      }
+      throw error;
+    }
+  }
+
+  const reminderLifecycleMatch = path.match(
+    /^\/api\/reminders\/([^/]+)\/(pause|resume|archive)$/,
+  );
+  if (method === "POST" && reminderLifecycleMatch) {
+    const action = reminderLifecycleMatch[2] as "pause" | "resume" | "archive";
+    try {
+      const reminder = await dependencies.reminders.changeLifecycle(
+        workspace.workspaceId,
+        decodeURIComponent(reminderLifecycleMatch[1]),
+        action,
+        actor.userId,
+      );
+      return reminder
+        ? jsonResponse(200, { reminder })
+        : jsonResponse(404, { error: "Reminder not found", code: "not_found" });
+    } catch (error) {
+      if (error instanceof DeliveryInProgressError) {
+        return jsonResponse(409, {
+          error: "A notification is being sent; retry in a moment",
+          code: "delivery_in_progress",
+        });
+      }
+      if (error instanceof ReminderLifecycleForbiddenError) {
+        return jsonResponse(403, { error: "Cannot manage this reminder", code: "forbidden" });
+      }
+      if (error instanceof ReminderLifecycleConflictError) {
+        return jsonResponse(409, { error: error.message, code: "lifecycle_conflict" });
       }
       throw error;
     }
@@ -222,14 +412,23 @@ export async function handleUniversalApi(
         action: routeAction === "complete" ? "done" : routeAction === "snooze" ? "snooze" : "undo",
         occurrenceId,
         actorUserId: actor.userId,
+        actorDisplayName: [initData.user.first_name, initData.user.last_name]
+          .filter(Boolean)
+          .join(" ") || "Участник",
         ...(routeAction === "snooze" ? { snoozeMinutes } : {}),
       });
       return jsonResponse(200, { occurrence: result.occurrence });
     } catch (error) {
-      if (error instanceof UniversalOccurrenceActionForbiddenError) {
+      if (error instanceof DeliveryInProgressError) {
+        return jsonResponse(409, {
+          error: "A notification is being sent; retry in a moment",
+          code: "delivery_in_progress",
+        });
+      }
+      if (error instanceof OccurrenceActionForbiddenError) {
         return jsonResponse(403, { error: "Cannot act on this reminder", code: "forbidden" });
       }
-      if (error instanceof UniversalOccurrenceActionNotFoundError) {
+      if (error instanceof OccurrenceActionNotFoundError) {
         return jsonResponse(404, { error: "Reminder occurrence not found", code: "not_found" });
       }
       if (error instanceof UndoWindowExpiredError) {
@@ -271,6 +470,15 @@ export async function handleUniversalApi(
     );
     return jsonResponse(201, { reminder });
   } catch (error) {
+    if (error instanceof ReminderCreateForbiddenError) {
+      return jsonResponse(403, { error: "Cannot create this reminder", code: "forbidden" });
+    }
+    if (error instanceof ScheduleHasNoFutureDeadlineError) {
+      return jsonResponse(409, {
+        error: "Choose a future reminder date",
+        code: "schedule_has_no_future_deadline",
+      });
+    }
     if (error instanceof PrivateChatUnavailableError) {
       return jsonResponse(409, {
         error: "Responsible person must start the bot first",

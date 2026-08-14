@@ -17,6 +17,7 @@ export function canActOnOccurrence(context: OccurrenceActionContext): boolean {
   const { action, actor, reminder, occurrence } = context;
   if (
     actor.status !== "active" ||
+    reminder.status !== "active" ||
     actor.workspaceId !== occurrence.workspaceId ||
     reminder.workspaceId !== occurrence.workspaceId ||
     reminder.reminderId !== occurrence.reminderId

@@ -10,11 +10,13 @@ import {
   getNextScheduledDeadline,
 } from "../reminder-scheduling.js";
 import { createSessionRunner, TypedValues, Types, type SessionRunner } from "./client.js";
+import { prepareOccurrenceMutation } from "./delivery-guard.js";
 import { withSerializableTransaction } from "./transaction.js";
 import {
   getField,
   mapResultRows,
   optionalInt64,
+  optionalTimestamp,
   optionalUint32,
   optionalUtf8,
   parseJsonDocument,
@@ -57,6 +59,41 @@ export class ReminderReassignmentForbiddenError extends Error {
   constructor() {
     super("Only an owner or organizer can reassign reminders");
     this.name = "ReminderReassignmentForbiddenError";
+  }
+}
+
+export class ReminderLifecycleForbiddenError extends Error {
+  constructor() {
+    super("Actor cannot change this reminder lifecycle");
+    this.name = "ReminderLifecycleForbiddenError";
+  }
+}
+
+export class ReminderLifecycleConflictError extends Error {
+  constructor(readonly status: string, readonly action: string) {
+    super(`Cannot ${action} a reminder in ${status} status`);
+    this.name = "ReminderLifecycleConflictError";
+  }
+}
+
+export class ReminderUpdateForbiddenError extends Error {
+  constructor() {
+    super("Actor cannot edit this reminder");
+    this.name = "ReminderUpdateForbiddenError";
+  }
+}
+
+export class ReminderCreateForbiddenError extends Error {
+  constructor() {
+    super("Actor cannot create this reminder");
+    this.name = "ReminderCreateForbiddenError";
+  }
+}
+
+export class ReminderUpdateConflictError extends Error {
+  constructor(readonly reason: string) {
+    super(`Reminder cannot be edited right now: ${reason}`);
+    this.name = "ReminderUpdateConflictError";
   }
 }
 
@@ -120,9 +157,14 @@ function rowToReminder(
   };
 }
 
-function effectiveWatcherIds(draft: ReminderDraft, creatorUserId: number): number[] {
+function effectiveWatcherIds(
+  draft: ReminderDraft,
+  creatorUserId: number,
+  includeCreator = true,
+): number[] {
   const watcherIds = new Set(draft.watcherUserIds);
   if (
+    includeCreator &&
     draft.visibility === "group" &&
     draft.assignment.mode === "person" &&
     draft.assignment.responsibleUserId !== creatorUserId
@@ -150,9 +192,14 @@ export class RemindersRepository {
           WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
           LIMIT 1;
 
-          SELECT user_id FROM reminder_watchers
-          WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
-          ORDER BY user_id;
+          SELECT watcher.user_id AS user_id FROM reminder_watchers AS watcher
+          INNER JOIN workspace_members AS member
+            ON member.workspace_id = watcher.workspace_id
+            AND member.user_id = watcher.user_id
+          WHERE watcher.workspace_id = $workspace_id
+            AND watcher.reminder_id = $reminder_id
+            AND member.status = 'active'
+          ORDER BY watcher.user_id;
         `,
         {
           $workspace_id: TypedValues.utf8(workspaceId),
@@ -187,9 +234,14 @@ export class RemindersRepository {
             )
           ORDER BY updated_at DESC, reminder_id;
 
-          SELECT reminder_id, user_id FROM reminder_watchers
-          WHERE workspace_id = $workspace_id
-          ORDER BY reminder_id, user_id;
+          SELECT watcher.reminder_id AS reminder_id, watcher.user_id AS user_id
+          FROM reminder_watchers AS watcher
+          INNER JOIN workspace_members AS member
+            ON member.workspace_id = watcher.workspace_id
+            AND member.user_id = watcher.user_id
+          WHERE watcher.workspace_id = $workspace_id
+            AND member.status = 'active'
+          ORDER BY watcher.reminder_id, watcher.user_id;
         `,
         {
           $workspace_id: TypedValues.utf8(workspaceId),
@@ -250,7 +302,7 @@ export class RemindersRepository {
             WHERE workspace_id = $workspace_id
             LIMIT 1;
 
-            SELECT user_id, status FROM workspace_members
+            SELECT user_id, role, status FROM workspace_members
             WHERE workspace_id = $workspace_id AND user_id IN $participant_ids;
 
             SELECT user_id, private_chat_available FROM users
@@ -275,8 +327,27 @@ export class RemindersRepository {
           ),
         };
 
+        const memberRows = mapResultRows(resultSets[1]);
+        const creatorMember = memberRows.find(
+          (row) => Number(getField(row, "user_id")) === creatorUserId,
+        );
+        const creatorRole = creatorMember ? String(getField(creatorMember, "role")) : null;
+        const canCreate = Boolean(
+          creatorMember &&
+          getField(creatorMember, "status") === "active" &&
+          (reminder.visibility === "group"
+            ? creatorRole === "owner" || creatorRole === "organizer"
+            : reminder.assignment.mode === "person" &&
+              (creatorRole === "owner" ||
+                creatorRole === "organizer" ||
+                reminder.assignment.responsibleUserId === creatorUserId)),
+        );
+        if (!canCreate) {
+          throw new ReminderCreateForbiddenError();
+        }
+
         const activeUserIds = new Set(
-          mapResultRows(resultSets[1])
+          memberRows
             .filter((row) => getField(row, "status") === "active")
             .map((row) => Number(getField(row, "user_id"))),
         );
@@ -461,12 +532,35 @@ export class RemindersRepository {
             WHERE workspace_id = $workspace_id AND user_id = $responsible_user_id
             LIMIT 1;
 
-            SELECT * FROM reminders
-            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+            SELECT reminder.*, creator.status AS creator_member_status
+            FROM reminders AS reminder
+            LEFT JOIN workspace_members AS creator
+              ON creator.workspace_id = reminder.workspace_id
+              AND creator.user_id = reminder.creator_user_id
+            WHERE reminder.workspace_id = $workspace_id
+              AND reminder.reminder_id = $reminder_id
             LIMIT 1;
 
             SELECT private_chat_available FROM users
             WHERE user_id = $responsible_user_id LIMIT 1;
+
+            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            INNER JOIN reminder_runtime AS runtime
+              ON runtime.workspace_id = occurrence.workspace_id
+              AND runtime.current_occurrence_id = occurrence.occurrence_id
+            WHERE runtime.workspace_id = $workspace_id
+              AND runtime.reminder_id = $reminder_id
+            LIMIT 1;
+
+            SELECT watcher.user_id AS user_id FROM reminder_watchers AS watcher
+            INNER JOIN workspace_members AS member
+              ON member.workspace_id = watcher.workspace_id
+              AND member.user_id = watcher.user_id
+            WHERE watcher.workspace_id = $workspace_id
+              AND watcher.reminder_id = $reminder_id
+              AND watcher.user_id != $responsible_user_id
+              AND member.status = 'active'
+            ORDER BY watcher.user_id;
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -479,13 +573,32 @@ export class RemindersRepository {
         const targetRow = mapResultRows(resultSets[1])[0];
         const reminderRow = mapResultRows(resultSets[2])[0];
         const userRow = mapResultRows(resultSets[3])[0];
+        const currentOccurrenceRow = mapResultRows(resultSets[4])[0];
+        const existingWatcherUserIds = mapResultRows(resultSets[5])
+          .map((row) => Number(getField(row, "user_id")))
+          .filter((userId) => userId !== responsibleUserId);
         if (!reminderRow) {
           return;
         }
         if (
           !actorRow ||
           getField(actorRow, "status") !== "active" ||
-          !["owner", "organizer"].includes(String(getField(actorRow, "role")))
+          (
+            getField(reminderRow, "visibility") === "group"
+              ? !["owner", "organizer"].includes(String(getField(actorRow, "role")))
+              : actorUserId !== Number(getField(reminderRow, "creator_user_id")) &&
+                actorUserId !== Number(getField(reminderRow, "responsible_user_id"))
+          )
+        ) {
+          throw new ReminderReassignmentForbiddenError();
+        }
+        if (getField(reminderRow, "status") === "archived") {
+          throw new ReminderReassignmentForbiddenError();
+        }
+        if (
+          getField(reminderRow, "visibility") === "private" &&
+          !["owner", "organizer"].includes(String(getField(actorRow, "role"))) &&
+          responsibleUserId !== actorUserId
         ) {
           throw new ReminderReassignmentForbiddenError();
         }
@@ -498,6 +611,37 @@ export class RemindersRepository {
         ) {
           throw new PrivateChatUnavailableError(responsibleUserId);
         }
+        if (currentOccurrenceRow) {
+          await prepareOccurrenceMutation(
+            transaction,
+            workspaceId,
+            currentOccurrenceRow,
+            String(getField(currentOccurrenceRow, "occurrence_id")),
+            now,
+          );
+        }
+        const creatorUserId = Number(getField(reminderRow, "creator_user_id"));
+        const creatorIsActive =
+          getField(reminderRow, "creator_member_status") === "active" ||
+          (creatorUserId === actorUserId && getField(actorRow, "status") === "active") ||
+          (creatorUserId === responsibleUserId && getField(targetRow, "status") === "active");
+        const shouldWatchCreator =
+          getField(reminderRow, "visibility") === "group" &&
+          creatorIsActive &&
+          creatorUserId !== responsibleUserId;
+        const watcherUserIds = [...new Set(existingWatcherUserIds)];
+        if (shouldWatchCreator && !watcherUserIds.includes(creatorUserId)) {
+          watcherUserIds.push(creatorUserId);
+        }
+        watcherUserIds.sort((left, right) => left - right);
+        const activateReminder =
+          getField(reminderRow, "status") === "active" || Boolean(currentOccurrenceRow);
+        const retireOldMessage = Boolean(
+          getField(reminderRow, "visibility") === "private" &&
+          Number(getField(reminderRow, "responsible_user_id")) !== responsibleUserId &&
+          currentOccurrenceRow &&
+          getField(currentOccurrenceRow, "latest_message_id") != null,
+        );
 
         await transaction.executeQuery(
           `
@@ -508,9 +652,12 @@ export class RemindersRepository {
             DECLARE $now AS Timestamp;
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
+            DECLARE $watcher_user_ids AS JsonDocument;
+            DECLARE $activate_reminder AS Bool;
+            DECLARE $retire_old_message AS Bool;
             UPDATE reminders SET
               assignment_mode = 'person', responsible_user_id = $responsible_user_id,
-              status = 'active', updated_at = $now
+              status = IF($activate_reminder, 'active', status), updated_at = $now
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
 
             DELETE FROM reminder_watchers
@@ -518,15 +665,26 @@ export class RemindersRepository {
               AND user_id = $responsible_user_id;
 
             UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
               assignment_mode = 'person', responsible_user_id = $responsible_user_id,
               notification_state = 'waiting', next_notification_at = $now,
+              watcher_user_ids = $watcher_user_ids,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
+              message_sync_retire_only = IF(
+                $retire_old_message, true, message_sync_retire_only
+              ),
               updated_at = $now
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
-              AND status IN ('scheduled', 'pending', 'overdue')
-              AND notification_state = 'stopped';
+              AND status IN ('scheduled', 'pending', 'overdue');
 
             UPDATE reminder_runtime SET
-              state = IF(current_occurrence_id IS NULL, 'ready', 'blocked'),
+              state = IF(
+                current_occurrence_id IS NULL,
+                IF($activate_reminder, 'ready', 'paused'),
+                'blocked'
+              ),
               updated_at = $now
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
 
@@ -549,6 +707,740 @@ export class RemindersRepository {
               fromUserId: Number(getField(reminderRow, "responsible_user_id")),
               toUserId: responsibleUserId,
             })),
+            $watcher_user_ids: TypedValues.jsonDocument(JSON.stringify(watcherUserIds)),
+            $activate_reminder: TypedValues.bool(activateReminder),
+            $retire_old_message: TypedValues.bool(retireOldMessage),
+          },
+        );
+
+        if (shouldWatchCreator && !existingWatcherUserIds.includes(creatorUserId)) {
+          await transaction.executeQuery(
+            `
+              DECLARE $workspace_id AS Utf8;
+              DECLARE $reminder_id AS Utf8;
+              DECLARE $user_id AS Int64;
+              DECLARE $created_at AS Timestamp;
+              INSERT INTO reminder_watchers (
+                workspace_id, reminder_id, user_id, created_at
+              ) VALUES ($workspace_id, $reminder_id, $user_id, $created_at);
+            `,
+            {
+              $workspace_id: TypedValues.utf8(workspaceId),
+              $reminder_id: TypedValues.utf8(reminderId),
+              $user_id: TypedValues.int64(creatorUserId),
+              $created_at: timestampValue(now),
+            },
+          );
+        }
+      }),
+    );
+    return this.getById(workspaceId, reminderId);
+  }
+
+  async update(
+    workspaceId: string,
+    reminderId: string,
+    input: ReminderDraft,
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<ReminderDefinition | null> {
+    const parsed = reminderDraftSchema.parse(input);
+
+    await this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $reminder_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+
+            SELECT status, quiet_hours_start, quiet_hours_end,
+              default_all_day_reminder_time
+            FROM workspaces WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT role, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT * FROM reminders
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+            LIMIT 1;
+
+            SELECT runtime.current_occurrence_id AS current_occurrence_id,
+              occurrence.due_at AS current_due_at,
+              occurrence.status AS current_status,
+              occurrence.latest_message_id AS current_latest_message_id,
+              occurrence.delivery_lock_key AS delivery_lock_key,
+              occurrence.delivery_locked_at AS delivery_locked_at
+            FROM reminder_runtime AS runtime
+            LEFT JOIN reminder_occurrences AS occurrence
+              ON occurrence.workspace_id = runtime.workspace_id
+              AND occurrence.occurrence_id = runtime.current_occurrence_id
+            WHERE runtime.workspace_id = $workspace_id
+              AND runtime.reminder_id = $reminder_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $reminder_id: TypedValues.utf8(reminderId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const actorRow = mapResultRows(resultSets[1])[0];
+        const reminderRow = mapResultRows(resultSets[2])[0];
+        const runtimeRow = mapResultRows(resultSets[3])[0];
+        if (!reminderRow) return;
+        if (!workspaceRow || !runtimeRow) {
+          throw new WorkspaceUnavailableError(workspaceId);
+        }
+        const existingVisibility = String(getField(reminderRow, "visibility"));
+        const actorIsManager = Boolean(
+          actorRow &&
+          getField(actorRow, "status") === "active" &&
+          ["owner", "organizer"].includes(String(getField(actorRow, "role"))),
+        );
+        const canEdit = Boolean(
+          getField(workspaceRow, "status") === "active" &&
+          actorRow &&
+          getField(actorRow, "status") === "active" &&
+          (existingVisibility === "group"
+            ? actorIsManager
+            : actorUserId === Number(getField(reminderRow, "creator_user_id")) ||
+              actorUserId === Number(getField(reminderRow, "responsible_user_id"))) &&
+          (parsed.visibility !== "group" || actorIsManager),
+        );
+        const canAssignPrivateTarget = parsed.visibility !== "private" ||
+          parsed.assignment.mode !== "person" ||
+          actorIsManager ||
+          parsed.assignment.responsibleUserId === actorUserId;
+        if (
+          !canEdit ||
+          !canAssignPrivateTarget ||
+          getField(reminderRow, "status") === "archived"
+        ) {
+          throw new ReminderUpdateForbiddenError();
+        }
+        const currentOccurrenceId = getField(runtimeRow, "current_occurrence_id");
+        if (currentOccurrenceId != null) {
+          await prepareOccurrenceMutation(
+            transaction,
+            workspaceId,
+            runtimeRow,
+            String(currentOccurrenceId),
+            now,
+          );
+          if (getField(runtimeRow, "current_status") === "completed") {
+            throw new ReminderUpdateConflictError("completion_undo_window");
+          }
+        }
+
+        const creatorUserId = Number(getField(reminderRow, "creator_user_id"));
+        const requiredParticipantIds = new Set<number>(parsed.watcherUserIds);
+        if (parsed.assignment.mode === "person") {
+          requiredParticipantIds.add(parsed.assignment.responsibleUserId);
+        }
+        const lookupUserIds = [...new Set([creatorUserId, ...requiredParticipantIds])]
+          .sort((left, right) => left - right);
+        const { resultSets: participantResultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $participant_ids AS List<Int64>;
+            SELECT user_id, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id IN $participant_ids;
+
+            SELECT user_id, private_chat_available FROM users
+            WHERE user_id IN $participant_ids;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $participant_ids: TypedValues.list(Types.INT64, lookupUserIds),
+          },
+        );
+        const activeUserIds = new Set(
+          mapResultRows(participantResultSets[0])
+            .filter((row) => getField(row, "status") === "active")
+            .map((row) => Number(getField(row, "user_id"))),
+        );
+        const inactiveUserIds = [...requiredParticipantIds]
+          .filter((userId) => !activeUserIds.has(userId));
+        if (inactiveUserIds.length > 0) {
+          throw new InactiveWorkspaceMemberError(workspaceId, inactiveUserIds);
+        }
+        const watcherUserIds = effectiveWatcherIds(
+          parsed,
+          creatorUserId,
+          activeUserIds.has(creatorUserId),
+        );
+        if (parsed.visibility === "private" && parsed.assignment.mode === "person") {
+          const responsibleUserId = parsed.assignment.responsibleUserId;
+          const responsibleUser = mapResultRows(participantResultSets[1]).find(
+            (row) => Number(getField(row, "user_id")) === responsibleUserId,
+          );
+          if (!responsibleUser || !Boolean(getField(responsibleUser, "private_chat_available"))) {
+            throw new PrivateChatUnavailableError(responsibleUserId);
+          }
+        }
+
+        const hasCurrentOccurrence = getField(runtimeRow, "current_occurrence_id") != null;
+        const nextResponsibleUserId = parsed.assignment.mode === "person"
+          ? parsed.assignment.responsibleUserId
+          : null;
+        const currentResponsibleUserId = getField(reminderRow, "responsible_user_id") == null
+          ? null
+          : Number(getField(reminderRow, "responsible_user_id"));
+        const deliveryTargetChanged =
+          existingVisibility !== parsed.visibility ||
+          (existingVisibility === "private" &&
+            parsed.visibility === "private" &&
+            currentResponsibleUserId !== nextResponsibleUserId);
+        const migrateLiveMessage = Boolean(
+          deliveryTargetChanged && getField(runtimeRow, "current_latest_message_id") != null,
+        );
+        const scheduleChanged =
+          JSON.stringify(parseJsonDocument(getField(reminderRow, "schedule_spec"), null)) !==
+            JSON.stringify(parsed.schedule) ||
+          String(getField(reminderRow, "timezone")) !== parsed.timezone;
+        const currentDueAt = hasCurrentOccurrence
+          ? parseYdbTimestampRequired(getField(runtimeRow, "current_due_at"), "current_due_at")
+          : null;
+        const deadline = getNextScheduledDeadline(
+          parsed.schedule,
+          parsed.timezone,
+          now,
+          {
+          defaultAllDayReminderTime: String(
+            getField(workspaceRow, "default_all_day_reminder_time"),
+          ),
+          },
+        );
+        if (!deadline && (!hasCurrentOccurrence || scheduleChanged)) {
+          throw new ScheduleHasNoFutureDeadlineError();
+        }
+        const reminderStartAt = deadline
+          ? calculateFirstNotificationAt(
+              deadline,
+              parsed.notificationPolicy.leadMinutes,
+              parsed.timezone,
+              {
+                startLocal: String(getField(workspaceRow, "quiet_hours_start")),
+                endLocal: String(getField(workspaceRow, "quiet_hours_end")),
+              },
+              {
+                ignoreQuietHours: parsed.notificationPolicy.ignoreQuietHours,
+                notBefore: now,
+              },
+            )
+          : null;
+        const nextVersion = Number(getField(reminderRow, "version")) + 1;
+        const escalation = parsed.notificationPolicy.escalation;
+
+        if (scheduleChanged && currentOccurrenceId != null && currentDueAt && deadline) {
+          await transaction.executeQuery(
+            `
+              DECLARE $workspace_id AS Utf8;
+              DECLARE $reminder_id AS Utf8;
+              DECLARE $occurrence_id AS Utf8;
+              DECLARE $old_due_at AS Timestamp;
+              DECLARE $new_due_at AS Timestamp;
+              DECLARE $now AS Timestamp;
+              DELETE FROM reminder_occurrence_slots
+              WHERE workspace_id = $workspace_id
+                AND reminder_id = $reminder_id
+                AND due_at = $old_due_at
+                AND occurrence_id = $occurrence_id;
+
+              INSERT INTO reminder_occurrence_slots (
+                workspace_id, reminder_id, due_at, occurrence_id, created_at
+              ) VALUES (
+                $workspace_id, $reminder_id, $new_due_at, $occurrence_id, $now
+              );
+            `,
+            {
+              $workspace_id: TypedValues.utf8(workspaceId),
+              $reminder_id: TypedValues.utf8(reminderId),
+              $occurrence_id: TypedValues.utf8(String(currentOccurrenceId)),
+              $old_due_at: timestampValue(currentDueAt),
+              $new_due_at: timestampValue(deadline.dueAt),
+              $now: timestampValue(now),
+            },
+          );
+        }
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $reminder_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $title AS Utf8;
+            DECLARE $description AS Utf8?;
+            DECLARE $action_url AS Utf8?;
+            DECLARE $amount_minor AS Int64?;
+            DECLARE $currency AS Utf8?;
+            DECLARE $visibility AS Utf8;
+            DECLARE $assignment_mode AS Utf8;
+            DECLARE $responsible_user_id AS Int64?;
+            DECLARE $schedule_spec AS JsonDocument;
+            DECLARE $timezone AS Utf8;
+            DECLARE $lead_minutes AS Uint32;
+            DECLARE $repeat_interval_minutes AS Uint32;
+            DECLARE $ignore_quiet_hours AS Bool;
+            DECLARE $escalation_enabled AS Bool;
+            DECLARE $escalation_delay_minutes AS Uint32?;
+            DECLARE $escalation_repeat_minutes AS Uint32?;
+            DECLARE $version AS Uint64;
+            DECLARE $schedule_changed AS Bool;
+            DECLARE $migrate_live_message AS Bool;
+            DECLARE $next_due_at AS Timestamp?;
+            DECLARE $next_due_local_date AS Utf8?;
+            DECLARE $next_all_day AS Bool?;
+            DECLARE $next_reminder_start_at AS Timestamp?;
+            DECLARE $watcher_user_ids AS JsonDocument;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+
+            UPDATE reminders SET
+              title = $title, description = $description, action_url = $action_url,
+              amount_minor = $amount_minor, currency = $currency,
+              visibility = $visibility, assignment_mode = $assignment_mode,
+              responsible_user_id = $responsible_user_id,
+              schedule_spec = $schedule_spec, timezone = $timezone,
+              lead_minutes = $lead_minutes,
+              repeat_interval_minutes = $repeat_interval_minutes,
+              ignore_quiet_hours = $ignore_quiet_hours,
+              escalation_enabled = $escalation_enabled,
+              escalation_delay_minutes = $escalation_delay_minutes,
+              escalation_repeat_minutes = $escalation_repeat_minutes,
+              version = $version, updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            UPDATE reminder_runtime SET
+              next_due_at = IF(current_occurrence_id IS NULL, $next_due_at, next_due_at),
+              next_reminder_start_at = IF(
+                current_occurrence_id IS NULL,
+                $next_reminder_start_at,
+                next_reminder_start_at
+              ),
+              schedule_version = $version,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
+              reminder_version = $version,
+              due_at = IF($schedule_changed, COALESCE($next_due_at, due_at), due_at),
+              due_local_date = IF(
+                $schedule_changed, COALESCE($next_due_local_date, due_local_date), due_local_date
+              ),
+              all_day = IF($schedule_changed, COALESCE($next_all_day, all_day), all_day),
+              reminder_start_at = IF(
+                $schedule_changed,
+                COALESCE($next_reminder_start_at, reminder_start_at),
+                reminder_start_at
+              ),
+              status = IF(
+                $schedule_changed,
+                IF(COALESCE($next_due_at, due_at) <= $now, 'overdue', 'pending'),
+                status
+              ),
+              next_notification_at = IF(
+                notification_state = 'waiting',
+                IF(
+                  $migrate_live_message,
+                  $now,
+                  IF(
+                    $schedule_changed,
+                    COALESCE($next_reminder_start_at, $now),
+                    $now
+                  )
+                ),
+                next_notification_at
+              ),
+              title = $title, description = $description, action_url = $action_url,
+              amount_minor = $amount_minor, currency = $currency,
+              visibility = $visibility, assignment_mode = $assignment_mode,
+              responsible_user_id = $responsible_user_id,
+              timezone = $timezone,
+              repeat_interval_minutes = $repeat_interval_minutes,
+              ignore_quiet_hours = $ignore_quiet_hours,
+              escalation_enabled = $escalation_enabled,
+              escalation_delay_minutes = $escalation_delay_minutes,
+              escalation_repeat_minutes = $escalation_repeat_minutes,
+              watcher_user_ids = $watcher_user_ids,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
+              message_sync_retire_only = IF(
+                $migrate_live_message, true, message_sync_retire_only
+              ),
+              updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND reminder_id = $reminder_id
+              AND occurrence_id IN (
+                SELECT current_occurrence_id FROM reminder_runtime
+                WHERE workspace_id = $workspace_id
+                  AND reminder_id = $reminder_id
+                  AND current_occurrence_id IS NOT NULL
+              )
+              AND status IN ('scheduled', 'pending', 'overdue');
+
+            DELETE FROM reminder_watchers
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $reminder_id, $now, $event_id, 'reminder',
+              'reminder.updated', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $reminder_id: TypedValues.utf8(reminderId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $title: TypedValues.utf8(parsed.title),
+            $description: optionalUtf8(parsed.description),
+            $action_url: optionalUtf8(parsed.actionUrl),
+            $amount_minor: optionalInt64(parsed.amountMinor),
+            $currency: optionalUtf8(parsed.currency),
+            $visibility: TypedValues.utf8(parsed.visibility),
+            $assignment_mode: TypedValues.utf8(parsed.assignment.mode),
+            $responsible_user_id: optionalInt64(
+              parsed.assignment.mode === "person" ? parsed.assignment.responsibleUserId : null,
+            ),
+            $schedule_spec: TypedValues.jsonDocument(JSON.stringify(parsed.schedule)),
+            $timezone: TypedValues.utf8(parsed.timezone),
+            $lead_minutes: TypedValues.uint32(parsed.notificationPolicy.leadMinutes),
+            $repeat_interval_minutes: TypedValues.uint32(
+              parsed.notificationPolicy.repeatIntervalMinutes,
+            ),
+            $ignore_quiet_hours: TypedValues.bool(parsed.notificationPolicy.ignoreQuietHours),
+            $escalation_enabled: TypedValues.bool(escalation.enabled),
+            $escalation_delay_minutes: optionalUint32(
+              escalation.enabled ? escalation.delayMinutes : null,
+            ),
+            $escalation_repeat_minutes: optionalUint32(
+              escalation.enabled ? escalation.repeatMinutes : null,
+            ),
+            $version: TypedValues.uint64(nextVersion),
+            $watcher_user_ids: TypedValues.jsonDocument(JSON.stringify(watcherUserIds)),
+            $schedule_changed: TypedValues.bool(scheduleChanged),
+            $migrate_live_message: TypedValues.bool(migrateLiveMessage),
+            $next_due_local_date: deadline
+              ? TypedValues.optional(TypedValues.utf8(deadline.dueLocalDate))
+              : TypedValues.optionalNull(Types.UTF8),
+            $next_all_day: deadline
+              ? TypedValues.optional(TypedValues.bool(deadline.allDay))
+              : TypedValues.optionalNull(Types.BOOL),
+            $next_due_at: optionalTimestamp(deadline?.dueAt),
+            $next_reminder_start_at: optionalTimestamp(reminderStartAt),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(JSON.stringify({
+              fromVersion: nextVersion - 1,
+              toVersion: nextVersion,
+              currentOccurrenceUpdated: hasCurrentOccurrence,
+            })),
+          },
+        );
+
+        for (const watcherUserId of watcherUserIds) {
+          await transaction.executeQuery(
+            `
+              DECLARE $workspace_id AS Utf8;
+              DECLARE $reminder_id AS Utf8;
+              DECLARE $user_id AS Int64;
+              DECLARE $created_at AS Timestamp;
+              INSERT INTO reminder_watchers (
+                workspace_id, reminder_id, user_id, created_at
+              ) VALUES ($workspace_id, $reminder_id, $user_id, $created_at);
+            `,
+            {
+              $workspace_id: TypedValues.utf8(workspaceId),
+              $reminder_id: TypedValues.utf8(reminderId),
+              $user_id: TypedValues.int64(watcherUserId),
+              $created_at: timestampValue(now),
+            },
+          );
+        }
+      }),
+    );
+
+    return this.getById(workspaceId, reminderId);
+  }
+
+  async changeLifecycle(
+    workspaceId: string,
+    reminderId: string,
+    action: "pause" | "resume" | "archive",
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<ReminderDefinition | null> {
+    await this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $reminder_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            SELECT role, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT * FROM reminders
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id
+            LIMIT 1;
+
+            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            INNER JOIN reminder_runtime AS runtime
+              ON runtime.workspace_id = occurrence.workspace_id
+              AND runtime.current_occurrence_id = occurrence.occurrence_id
+            WHERE runtime.workspace_id = $workspace_id
+              AND runtime.reminder_id = $reminder_id
+            LIMIT 1;
+
+            SELECT member.status AS status FROM workspace_members AS member
+            INNER JOIN reminders AS reminder
+              ON reminder.workspace_id = member.workspace_id
+              AND reminder.responsible_user_id = member.user_id
+            WHERE reminder.workspace_id = $workspace_id
+              AND reminder.reminder_id = $reminder_id
+              AND reminder.assignment_mode = 'person'
+            LIMIT 1;
+
+            SELECT quiet_hours_start, quiet_hours_end,
+              default_all_day_reminder_time
+            FROM workspaces WHERE workspace_id = $workspace_id LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $reminder_id: TypedValues.utf8(reminderId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+          },
+        );
+        const actorRow = mapResultRows(resultSets[0])[0];
+        const reminderRow = mapResultRows(resultSets[1])[0];
+        const currentOccurrenceRow = mapResultRows(resultSets[2])[0];
+        const responsibleRow = mapResultRows(resultSets[3])[0];
+        const workspaceRow = mapResultRows(resultSets[4])[0];
+        if (!reminderRow) return;
+        const currentStatus = String(getField(reminderRow, "status"));
+        const visibility = String(getField(reminderRow, "visibility"));
+        const canManage = Boolean(
+          actorRow &&
+          getField(actorRow, "status") === "active" &&
+          (visibility === "group"
+            ? ["owner", "organizer"].includes(String(getField(actorRow, "role")))
+            : actorUserId === Number(getField(reminderRow, "creator_user_id")) ||
+              actorUserId === Number(getField(reminderRow, "responsible_user_id"))),
+        );
+        if (!canManage) throw new ReminderLifecycleForbiddenError();
+
+        const nextStatus = action === "archive" ? "archived" : action === "pause" ? "paused" : "active";
+        if (currentStatus === nextStatus) {
+          return;
+        }
+        if (
+          currentStatus === "archived" ||
+          (action === "pause" && currentStatus !== "active") ||
+          (action === "resume" && currentStatus !== "paused")
+        ) {
+          throw new ReminderLifecycleConflictError(currentStatus, action);
+        }
+        if (
+          action === "resume" &&
+          getField(reminderRow, "assignment_mode") === "person" &&
+          getField(responsibleRow ?? {}, "status") !== "active"
+        ) {
+          throw new ReminderLifecycleConflictError(currentStatus, action);
+        }
+        if (
+          action !== "archive" &&
+          currentOccurrenceRow &&
+          getField(currentOccurrenceRow, "status") === "completed" &&
+          getField(currentOccurrenceRow, "undo_until") != null
+        ) {
+          throw new ReminderLifecycleConflictError(currentStatus, action);
+        }
+        if (currentOccurrenceRow) {
+          await prepareOccurrenceMutation(
+            transaction,
+            workspaceId,
+            currentOccurrenceRow,
+            String(getField(currentOccurrenceRow, "occurrence_id")),
+            now,
+          );
+        }
+
+        const currentOccurrence = currentOccurrenceRow
+          ? {
+              occurrenceId: String(getField(currentOccurrenceRow, "occurrence_id")),
+              status: String(getField(currentOccurrenceRow, "status")),
+              dueAt: parseYdbTimestampRequired(
+                getField(currentOccurrenceRow, "due_at"),
+                "due_at",
+              ),
+            }
+          : null;
+        const restoreCurrent = Boolean(
+          action === "resume" &&
+          currentOccurrence &&
+          ["scheduled", "pending", "overdue"].includes(currentOccurrence.status) &&
+          currentOccurrence.dueAt > now,
+        );
+        let nextDueAt: Date | null = null;
+        let nextReminderStartAt: Date | null = null;
+        if (action === "resume" && !restoreCurrent) {
+          if (!workspaceRow) throw new WorkspaceUnavailableError(workspaceId);
+          const reminder = rowToReminder(reminderRow, []);
+          const deadline = getNextScheduledDeadline(
+            reminder.schedule,
+            reminder.timezone,
+            now,
+            {
+              defaultAllDayReminderTime: String(
+                getField(workspaceRow, "default_all_day_reminder_time"),
+              ),
+            },
+          );
+          if (!deadline) {
+            throw new ReminderLifecycleConflictError(currentStatus, action);
+          }
+          nextDueAt = deadline.dueAt;
+          nextReminderStartAt = calculateFirstNotificationAt(
+            deadline,
+            reminder.notificationPolicy.leadMinutes,
+            reminder.timezone,
+            {
+              startLocal: String(getField(workspaceRow, "quiet_hours_start")),
+              endLocal: String(getField(workspaceRow, "quiet_hours_end")),
+            },
+            {
+              ignoreQuietHours: reminder.notificationPolicy.ignoreQuietHours,
+              notBefore: now,
+            },
+          );
+        }
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $reminder_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $next_status AS Utf8;
+            DECLARE $action AS Utf8;
+            DECLARE $current_occurrence_id AS Utf8?;
+            DECLARE $restore_current AS Bool;
+            DECLARE $next_due_at AS Timestamp?;
+            DECLARE $next_reminder_start_at AS Timestamp?;
+            DECLARE $schedule_version AS Uint64;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $event_type AS Utf8;
+            DECLARE $payload AS JsonDocument;
+
+            UPDATE reminders SET status = $next_status, updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            UPDATE reminder_runtime SET
+              state = IF(
+                $action != 'resume',
+                'paused',
+                IF($restore_current, 'blocked', 'ready')
+              ),
+              next_due_at = IF($action = 'resume', $next_due_at, NULL),
+              next_reminder_start_at = IF(
+                $action = 'resume', $next_reminder_start_at, NULL
+              ),
+              current_occurrence_id = IF(
+                $action = 'pause',
+                current_occurrence_id,
+                IF($restore_current, current_occurrence_id, NULL)
+              ),
+              schedule_version = $schedule_version,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
+
+            UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
+              notification_state = IF(
+                $action = 'resume' AND $restore_current,
+                'waiting',
+                IF(status IN ('scheduled', 'pending', 'overdue'), 'stopped', notification_state)
+              ),
+              next_notification_at = IF(
+                $action = 'resume' AND $restore_current, $now, NULL
+              ),
+              status = IF(
+                status IN ('scheduled', 'pending', 'overdue')
+                  AND ($action = 'archive' OR ($action = 'resume' AND NOT $restore_current)),
+                'cancelled', status
+              ),
+              cancelled_by = IF(
+                status IN ('scheduled', 'pending', 'overdue')
+                  AND ($action = 'archive' OR ($action = 'resume' AND NOT $restore_current)),
+                $actor_user_id, cancelled_by
+              ),
+              cancellation_reason = IF(
+                status IN ('scheduled', 'pending', 'overdue') AND $action = 'archive',
+                'reminder_archived',
+                IF(
+                  status IN ('scheduled', 'pending', 'overdue')
+                    AND $action = 'resume' AND NOT $restore_current,
+                  'missed_while_paused', cancellation_reason
+                )
+              ),
+              cancelled_at = IF(
+                status IN ('scheduled', 'pending', 'overdue')
+                  AND ($action = 'archive' OR ($action = 'resume' AND NOT $restore_current)),
+                $now, cancelled_at
+              ),
+              completion_finalized_at = IF(
+                $action = 'archive' AND status = 'completed',
+                $now,
+                completion_finalized_at
+              ),
+              undo_until = IF(
+                $action = 'archive' AND status = 'completed',
+                $now,
+                undo_until
+              ),
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
+              updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND reminder_id = $reminder_id
+              AND occurrence_id = $current_occurrence_id;
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $reminder_id, $now, $event_id, 'reminder',
+              $event_type, $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $reminder_id: TypedValues.utf8(reminderId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $next_status: TypedValues.utf8(nextStatus),
+            $action: TypedValues.utf8(action),
+            $current_occurrence_id: optionalUtf8(currentOccurrence?.occurrenceId),
+            $restore_current: TypedValues.bool(restoreCurrent),
+            $next_due_at: optionalTimestamp(nextDueAt),
+            $next_reminder_start_at: optionalTimestamp(nextReminderStartAt),
+            $schedule_version: TypedValues.uint64(Number(getField(reminderRow, "version"))),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $event_type: TypedValues.utf8(
+              action === "pause" ? "reminder.paused" :
+                action === "resume" ? "reminder.resumed" : "reminder.archived",
+            ),
+            $payload: TypedValues.jsonDocument(JSON.stringify({ from: currentStatus, to: nextStatus })),
           },
         );
       }),

@@ -17,7 +17,7 @@ function generateInitData(botToken: string, userId: number, firstName = "Dev"): 
 }
 
 const botToken = process.env.BOT_TOKEN;
-const userId = Number(process.env.DEV_USER_ID ?? process.env.ADMIN_USER_IDS?.split(",")[0]?.trim() ?? "0");
+const userId = Number(process.env.DEV_USER_ID ?? "0");
 
 if (!botToken) {
   console.error("BOT_TOKEN is required");
@@ -25,11 +25,11 @@ if (!botToken) {
 }
 
 if (!userId) {
-  console.error("DEV_USER_ID or ADMIN_USER_IDS is required");
+  console.error("DEV_USER_ID is required");
   process.exit(1);
 }
 
 const initData = generateInitData(botToken, userId);
 console.log(initData);
 console.error("\nExample:");
-console.error(`  curl -H "X-Telegram-Init-Data: ${initData}" http://localhost:3000/api/rules`);
+console.error(`  curl -H "X-Telegram-Init-Data: ${initData}" http://localhost:3000/api/workspaces`);

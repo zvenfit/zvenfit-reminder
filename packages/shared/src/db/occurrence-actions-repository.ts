@@ -7,6 +7,7 @@ import {
   getNextScheduledDeadline,
 } from "../reminder-scheduling.js";
 import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
+import { prepareOccurrenceMutation } from "./delivery-guard.js";
 import {
   rowToOccurrence,
   rowToReminder,
@@ -17,6 +18,7 @@ import {
   getField,
   mapResultRows,
   optionalTimestamp,
+  parseYdbTimestamp,
   parseYdbTimestampRequired,
   timestampValue,
 } from "./ydb-utils.js";
@@ -36,6 +38,7 @@ export interface CompletionFinalization {
   archivedReminder: boolean;
   nextDueAt: Date | null;
   nextReminderStartAt: Date | null;
+  occurrence: ReminderOccurrence;
 }
 
 export class OccurrenceNotActionableError extends Error {
@@ -97,8 +100,26 @@ export class OccurrenceActionsRepository {
           `
             DECLARE $workspace_id AS Utf8;
             DECLARE $occurrence_id AS Utf8;
-            SELECT * FROM reminder_occurrences
-            WHERE workspace_id = $workspace_id AND occurrence_id = $occurrence_id
+            DECLARE $actor_user_id AS Int64;
+            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            INNER JOIN reminders AS reminder
+              ON reminder.workspace_id = occurrence.workspace_id
+              AND reminder.reminder_id = occurrence.reminder_id
+            INNER JOIN workspace_members AS actor
+              ON actor.workspace_id = occurrence.workspace_id
+              AND actor.user_id = $actor_user_id
+            WHERE occurrence.workspace_id = $workspace_id
+              AND occurrence.occurrence_id = $occurrence_id
+              AND actor.status = 'active'
+              AND reminder.status = 'active'
+              AND (
+                occurrence.responsible_user_id = $actor_user_id
+                OR reminder.creator_user_id = $actor_user_id
+                OR (
+                  occurrence.visibility = 'group'
+                  AND actor.role IN ('owner', 'organizer')
+                )
+              )
             LIMIT 1;
 
             SELECT quiet_hours_start, quiet_hours_end, status FROM workspaces
@@ -108,6 +129,7 @@ export class OccurrenceActionsRepository {
           {
             $workspace_id: TypedValues.utf8(workspaceId),
             $occurrence_id: TypedValues.utf8(occurrenceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
           },
         );
         const occurrenceRow = mapResultRows(resultSets[0])[0];
@@ -116,6 +138,9 @@ export class OccurrenceActionsRepository {
           return null;
         }
         const occurrence = rowToOccurrence(occurrenceRow);
+        await prepareOccurrenceMutation(
+          transaction, workspaceId, occurrenceRow, occurrenceId, now,
+        );
         if (
           getField(workspaceRow, "status") !== "active" ||
           occurrence.notificationState !== "waiting" ||
@@ -144,10 +169,15 @@ export class OccurrenceActionsRepository {
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
             UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
+              status = IF(due_at <= $now, 'overdue', status),
               next_notification_at = $snooze_until,
               snoozed_by = $actor_user_id,
               snoozed_at = $now,
               snooze_until = $snooze_until,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
               updated_at = $now
             WHERE workspace_id = $workspace_id
               AND occurrence_id = $occurrence_id
@@ -176,6 +206,8 @@ export class OccurrenceActionsRepository {
 
         return {
           ...occurrence,
+          stateRevision: occurrence.stateRevision + 1,
+          status: occurrence.dueAt <= now ? "overdue" : occurrence.status,
           nextNotificationAt: snoozeUntil,
           snoozedBy: actorUserId,
           snoozedAt: now,
@@ -199,8 +231,32 @@ export class OccurrenceActionsRepository {
           `
             DECLARE $workspace_id AS Utf8;
             DECLARE $occurrence_id AS Utf8;
-            SELECT * FROM reminder_occurrences
-            WHERE workspace_id = $workspace_id AND occurrence_id = $occurrence_id
+            DECLARE $actor_user_id AS Int64;
+            SELECT occurrence.*, actor_user.display_name AS actor_display_name
+            FROM reminder_occurrences AS occurrence
+            INNER JOIN reminders AS reminder
+              ON reminder.workspace_id = occurrence.workspace_id
+              AND reminder.reminder_id = occurrence.reminder_id
+            INNER JOIN workspace_members AS actor
+              ON actor.workspace_id = occurrence.workspace_id
+              AND actor.user_id = $actor_user_id
+            INNER JOIN users AS actor_user
+              ON actor_user.user_id = actor.user_id
+            WHERE occurrence.workspace_id = $workspace_id
+              AND occurrence.occurrence_id = $occurrence_id
+              AND actor.status = 'active'
+              AND reminder.status = 'active'
+              AND (
+                occurrence.responsible_user_id = $actor_user_id
+                OR reminder.creator_user_id = $actor_user_id
+                OR (
+                  occurrence.visibility = 'group'
+                  AND (
+                    actor.role IN ('owner', 'organizer')
+                    OR occurrence.assignment_mode = 'anyone'
+                  )
+                )
+              )
             LIMIT 1;
 
             SELECT runtime.* FROM reminder_runtime AS runtime
@@ -214,6 +270,7 @@ export class OccurrenceActionsRepository {
           {
             $workspace_id: TypedValues.utf8(workspaceId),
             $occurrence_id: TypedValues.utf8(occurrenceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
           },
         );
         const occurrenceRow = mapResultRows(resultSets[0])[0];
@@ -222,8 +279,12 @@ export class OccurrenceActionsRepository {
           return null;
         }
         const occurrence = rowToOccurrence(occurrenceRow);
+        const actorDisplayName = String(getField(occurrenceRow, "actor_display_name"));
+        await prepareOccurrenceMutation(
+          transaction, workspaceId, occurrenceRow, occurrenceId, now,
+        );
         if (occurrence.status === "completed") {
-          return occurrence;
+          throw new OccurrenceNotActionableError(occurrenceId);
         }
         if (
           occurrence.status !== "pending" &&
@@ -243,18 +304,28 @@ export class OccurrenceActionsRepository {
             DECLARE $occurrence_id AS Utf8;
             DECLARE $reminder_id AS Utf8;
             DECLARE $actor_user_id AS Int64;
+            DECLARE $actor_display_name AS Utf8;
             DECLARE $now AS Timestamp;
             DECLARE $undo_until AS Timestamp;
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
 
             UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
               status = 'completed',
               notification_state = 'stopped',
               next_notification_at = NULL,
+              snoozed_by = NULL,
+              snoozed_at = NULL,
+              snooze_until = NULL,
               completed_by = $actor_user_id,
+              completed_by_display_name = $actor_display_name,
               completed_at = $now,
               undo_until = $undo_until,
+              completion_finalized_at = NULL,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
               updated_at = $now
             WHERE workspace_id = $workspace_id
               AND occurrence_id = $occurrence_id
@@ -279,6 +350,7 @@ export class OccurrenceActionsRepository {
             $occurrence_id: TypedValues.utf8(occurrenceId),
             $reminder_id: TypedValues.utf8(occurrence.reminderId),
             $actor_user_id: TypedValues.int64(actorUserId),
+            $actor_display_name: TypedValues.utf8(actorDisplayName),
             $now: timestampValue(now),
             $undo_until: timestampValue(undoUntil),
             $event_id: TypedValues.utf8(randomUUID()),
@@ -290,10 +362,15 @@ export class OccurrenceActionsRepository {
 
         return {
           ...occurrence,
+          stateRevision: occurrence.stateRevision + 1,
           status: "completed",
           notificationState: "stopped",
           nextNotificationAt: null,
+          snoozedBy: null,
+          snoozedAt: null,
+          snoozeUntil: null,
           completedBy: actorUserId,
+          completedByDisplayName: actorDisplayName,
           completedAt: now,
           undoUntil,
           updatedAt: now,
@@ -315,8 +392,29 @@ export class OccurrenceActionsRepository {
           `
             DECLARE $workspace_id AS Utf8;
             DECLARE $occurrence_id AS Utf8;
-            SELECT * FROM reminder_occurrences
-            WHERE workspace_id = $workspace_id AND occurrence_id = $occurrence_id
+            DECLARE $actor_user_id AS Int64;
+            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            INNER JOIN reminders AS reminder
+              ON reminder.workspace_id = occurrence.workspace_id
+              AND reminder.reminder_id = occurrence.reminder_id
+            INNER JOIN workspace_members AS actor
+              ON actor.workspace_id = occurrence.workspace_id
+              AND actor.user_id = $actor_user_id
+            WHERE occurrence.workspace_id = $workspace_id
+              AND occurrence.occurrence_id = $occurrence_id
+              AND actor.status = 'active'
+              AND reminder.status = 'active'
+              AND (
+                occurrence.responsible_user_id = $actor_user_id
+                OR reminder.creator_user_id = $actor_user_id
+                OR (
+                  occurrence.visibility = 'group'
+                  AND (
+                    actor.role IN ('owner', 'organizer')
+                    OR occurrence.assignment_mode = 'anyone'
+                  )
+                )
+              )
             LIMIT 1;
 
             SELECT runtime.* FROM reminder_runtime AS runtime
@@ -334,6 +432,7 @@ export class OccurrenceActionsRepository {
           {
             $workspace_id: TypedValues.utf8(workspaceId),
             $occurrence_id: TypedValues.utf8(occurrenceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
           },
         );
         const occurrenceRow = mapResultRows(resultSets[0])[0];
@@ -343,8 +442,11 @@ export class OccurrenceActionsRepository {
           return null;
         }
         const occurrence = rowToOccurrence(occurrenceRow);
+        await prepareOccurrenceMutation(
+          transaction, workspaceId, occurrenceRow, occurrenceId, now,
+        );
         if (occurrence.status !== "completed") {
-          return occurrence;
+          throw new OccurrenceNotActionableError(occurrenceId);
         }
         if (!occurrence.undoUntil || now > occurrence.undoUntil) {
           throw new UndoWindowExpiredError(occurrenceId);
@@ -375,12 +477,18 @@ export class OccurrenceActionsRepository {
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
             UPDATE reminder_occurrences SET
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
               status = $status,
               notification_state = 'waiting',
               next_notification_at = $next_notification_at,
               completed_by = NULL,
+              completed_by_display_name = NULL,
               completed_at = NULL,
               undo_until = NULL,
+              completion_finalized_at = NULL,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
               updated_at = $now
             WHERE workspace_id = $workspace_id
               AND occurrence_id = $occurrence_id
@@ -410,10 +518,12 @@ export class OccurrenceActionsRepository {
 
         return {
           ...occurrence,
+          stateRevision: occurrence.stateRevision + 1,
           status,
           notificationState: "waiting",
           nextNotificationAt,
           completedBy: null,
+          completedByDisplayName: null,
           completedAt: null,
           undoUntil: null,
           updatedAt: now,
@@ -506,6 +616,9 @@ export class OccurrenceActionsRepository {
           return null;
         }
         const occurrence = rowToOccurrence(occurrenceRow);
+        await prepareOccurrenceMutation(
+          transaction, workspaceId, occurrenceRow, occurrenceId, now,
+        );
         if (
           occurrence.status !== "completed" ||
           !occurrence.undoUntil ||
@@ -514,20 +627,41 @@ export class OccurrenceActionsRepository {
           return null;
         }
         const runtime = rowToRuntime(runtimeRow);
-        if (!ownsRuntimeSlot(occurrence, runtime)) {
+        const completionFinalizedAt = parseYdbTimestamp(
+          getField(occurrenceRow, "completion_finalized_at"),
+        );
+        const ownsPausedFinalizationSlot =
+          runtime.state === "paused" &&
+          runtime.currentOccurrenceId === occurrence.occurrenceId &&
+          runtime.reminderId === occurrence.reminderId;
+        if (
+          !completionFinalizedAt &&
+          !ownsRuntimeSlot(occurrence, runtime) &&
+          !ownsPausedFinalizationSlot
+        ) {
           throw new OccurrenceRuntimeMismatchError(occurrenceId);
         }
         const reminder = rowToReminder(reminderRow);
-        const oneOff = reminder.schedule.frequency === "once";
-        let nextDueAt: Date | null = null;
-        let nextReminderStartAt: Date | null = null;
+        const completingCurrentDefinition = occurrence.reminderVersion === reminder.version;
+        const oneOff = completionFinalizedAt
+          ? reminder.schedule.frequency === "once" && reminder.status === "archived"
+          : reminder.schedule.frequency === "once" && completingCurrentDefinition;
+        let nextDueAt: Date | null = completionFinalizedAt ? runtime.nextDueAt : null;
+        let nextReminderStartAt: Date | null = completionFinalizedAt
+          ? runtime.nextReminderStartAt
+          : null;
         let nextRuntimeState: "ready" | "paused" = "paused";
 
-        if (!oneOff && reminder.status === "active") {
+        if (!completionFinalizedAt && !oneOff && reminder.status === "active") {
+          // Completing during the lead-time window must advance past the slot
+          // being completed, not materialize that same due date again.
+          const nextScheduleReference = new Date(
+            Math.max(now.getTime(), occurrence.dueAt.getTime()),
+          );
           const nextDeadline = getNextScheduledDeadline(
             reminder.schedule,
             reminder.timezone,
-            now,
+            nextScheduleReference,
             {
               defaultAllDayReminderTime: String(
                 getField(workspaceRow, "default_all_day_reminder_time"),
@@ -554,7 +688,7 @@ export class OccurrenceActionsRepository {
           nextRuntimeState = "ready";
         }
 
-        await transaction.executeQuery(
+        if (!completionFinalizedAt) await transaction.executeQuery(
           `
             DECLARE $workspace_id AS Utf8;
             DECLARE $occurrence_id AS Utf8;
@@ -566,7 +700,10 @@ export class OccurrenceActionsRepository {
             DECLARE $now AS Timestamp;
 
             UPDATE reminder_occurrences SET
-              undo_until = NULL,
+              state_revision = state_revision + 1,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
+              completion_finalized_at = $now,
               updated_at = $now
             WHERE workspace_id = $workspace_id
               AND occurrence_id = $occurrence_id
@@ -581,7 +718,7 @@ export class OccurrenceActionsRepository {
               updated_at = $now
             WHERE workspace_id = $workspace_id
               AND reminder_id = $reminder_id
-              AND state = 'blocked'
+              AND state IN ('blocked', 'paused')
               AND current_occurrence_id = $occurrence_id;
           `,
           {
@@ -596,7 +733,7 @@ export class OccurrenceActionsRepository {
           },
         );
 
-        if (oneOff && reminder.status !== "archived") {
+        if (!completionFinalizedAt && oneOff && reminder.status !== "archived") {
           await transaction.executeQuery(
             `
               DECLARE $workspace_id AS Utf8;
@@ -627,8 +764,47 @@ export class OccurrenceActionsRepository {
           archivedReminder: oneOff,
           nextDueAt,
           nextReminderStartAt,
+          occurrence: {
+            ...occurrence,
+            stateRevision: completionFinalizedAt
+              ? occurrence.stateRevision
+              : occurrence.stateRevision + 1,
+            undoUntil: null,
+            updatedAt: now,
+          },
         };
       }),
     );
+  }
+
+  async markCompletionMessageFinalized(
+    workspaceId: string,
+    occurrenceId: string,
+    now: Date = new Date(),
+  ): Promise<void> {
+    await this.runSession(async (session) => {
+      await session.executeQuery(
+        `
+          DECLARE $workspace_id AS Utf8;
+          DECLARE $occurrence_id AS Utf8;
+          DECLARE $now AS Timestamp;
+          UPDATE reminder_occurrences SET
+            undo_until = NULL,
+            message_sync_required = false,
+            message_sync_retire_only = false,
+            updated_at = $now
+          WHERE workspace_id = $workspace_id
+            AND occurrence_id = $occurrence_id
+            AND status = 'completed'
+            AND completion_finalized_at IS NOT NULL
+            AND undo_until <= $now;
+        `,
+        {
+          $workspace_id: TypedValues.utf8(workspaceId),
+          $occurrence_id: TypedValues.utf8(occurrenceId),
+          $now: timestampValue(now),
+        },
+      );
+    });
   }
 }

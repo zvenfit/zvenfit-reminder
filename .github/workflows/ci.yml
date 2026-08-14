@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -16,6 +19,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run Mini App E2E
+        run: npm run test:e2e
 
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -32,20 +39,18 @@ jobs:
         env:
           YC_SA_JSON: ${{ secrets.YC_SA_JSON }}
           YC_FOLDER_ID: ${{ secrets.YC_FOLDER_ID }}
-          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
+          YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ secrets.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
           YC_BUCKET: ${{ secrets.YC_BUCKET }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          ALLOWED_CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
-          UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
         run: |
           : "${YC_SA_JSON:?Missing production secret YC_SA_JSON}"
           : "${YC_FOLDER_ID:?Missing production secret YC_FOLDER_ID}"
-          : "${YC_SERVICE_ACCOUNT_ID:?Missing production secret YC_SERVICE_ACCOUNT_ID}"
+          : "${YC_RUNTIME_SERVICE_ACCOUNT_ID:?Missing production secret YC_RUNTIME_SERVICE_ACCOUNT_ID}"
           : "${YC_BUCKET:?Missing production secret YC_BUCKET}"
           : "${BOT_TOKEN:?Missing production secret BOT_TOKEN}"
           : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
@@ -53,12 +58,11 @@ jobs:
           : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
           : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
           : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
-          if [[ "$UNIVERSAL_REMINDERS_ENABLED" != "1" ]]; then
-            echo "Production variable UNIVERSAL_REMINDERS_ENABLED must be 1 for the universal Mini App rollout" >&2
-            exit 1
-          fi
       - run: npm ci
-      - run: npm run build
+      - name: Build production artifacts
+        env:
+          VITE_API_BASE_URL: ${{ secrets.WEBHOOK_URL }}
+        run: npm run build
       - name: Install YC CLI
         run: |
           curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash
@@ -99,30 +103,16 @@ jobs:
           npm run build
           cd dist
           zip -r ../../../reminder-cron.zip .
-      - name: Upload function packages
-        env:
-          YC_BUCKET: ${{ secrets.YC_BUCKET }}
-        run: |
-          yc storage s3 cp bot-webhook.zip "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/bot-webhook.zip"
-          yc storage s3 cp reminder-cron.zip "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/reminder-cron.zip"
       - name: Deploy bot-webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          ALLOWED_CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
-          ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
-          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
-          YC_BUCKET: ${{ secrets.YC_BUCKET }}
-          UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
+          YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ secrets.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
         run: |
-          admin_user_ids_args=()
-          if [[ -n "$ADMIN_USER_IDS" ]]; then
-            admin_user_ids_args+=(--environment "ADMIN_USER_IDS=$ADMIN_USER_IDS")
-          fi
           bot_info_response="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getMe")"
           bot_info_json="$(printf '%s' "$bot_info_response" | jq -ce '
             if .ok == true and
@@ -138,30 +128,24 @@ jobs:
             --entrypoint index.handler \
             --memory 256m \
             --execution-timeout 30s \
-            --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
-            --package-bucket-name "$YC_BUCKET" \
-            --package-object-name "deployments/${GITHUB_SHA}/bot-webhook.zip" \
+            --service-account-id "$YC_RUNTIME_SERVICE_ACCOUNT_ID" \
+            --source-path bot-webhook.zip \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-            --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
             --environment YDB_ENDPOINT="$YDB_ENDPOINT" \
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment MINI_APP_URL="$MINI_APP_URL" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
-            --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED" \
-            --environment BOT_INFO_JSON="$bot_info_json" \
-            "${admin_user_ids_args[@]}"
+            --environment NODE_ENV=production \
+            --environment BOT_INFO_JSON="$bot_info_json"
       - name: Deploy reminder-cron
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          ALLOWED_CHAT_ID: ${{ secrets.ALLOWED_CHAT_ID }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
-          YC_SERVICE_ACCOUNT_ID: ${{ secrets.YC_SERVICE_ACCOUNT_ID }}
-          YC_BUCKET: ${{ secrets.YC_BUCKET }}
-          UNIVERSAL_REMINDERS_ENABLED: ${{ vars.UNIVERSAL_REMINDERS_ENABLED || '0' }}
+          YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ secrets.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
         run: |
           yc serverless function version create \
             --function-name zvenfit-reminder-cron \
@@ -169,28 +153,18 @@ jobs:
             --entrypoint index.handler \
             --memory 256m \
             --execution-timeout 60s \
-            --service-account-id "$YC_SERVICE_ACCOUNT_ID" \
-            --package-bucket-name "$YC_BUCKET" \
-            --package-object-name "deployments/${GITHUB_SHA}/reminder-cron.zip" \
+            --service-account-id "$YC_RUNTIME_SERVICE_ACCOUNT_ID" \
+            --source-path reminder-cron.zip \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
-            --environment ALLOWED_CHAT_ID="$ALLOWED_CHAT_ID" \
             --environment YDB_ENDPOINT="$YDB_ENDPOINT" \
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
-            --environment UNIVERSAL_REMINDERS_ENABLED="$UNIVERSAL_REMINDERS_ENABLED"
-      - name: Remove function packages
-        if: always()
-        continue-on-error: true
-        env:
-          YC_BUCKET: ${{ secrets.YC_BUCKET }}
-        run: |
-          yc storage s3 rm "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/bot-webhook.zip"
-          yc storage s3 rm "s3://${YC_BUCKET}/deployments/${GITHUB_SHA}/reminder-cron.zip"
+            --environment NODE_ENV=production
       - name: Upload Mini App
         env:
           YC_BUCKET: ${{ secrets.YC_BUCKET }}
-        run: yc storage s3 cp --recursive mini-app/dist/ "s3://${YC_BUCKET}/" --acl public-read
+        run: yc storage s3 cp --recursive mini-app/dist/ "s3://${YC_BUCKET}/"
       - name: Set Telegram webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}

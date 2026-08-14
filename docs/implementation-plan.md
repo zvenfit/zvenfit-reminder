@@ -1,9 +1,11 @@
-# Redesign implementation plan
+# Redesign implementation record and remaining roadmap
 
-This plan moves the current payment-reminder prototype toward
+This document records the move from the payment-reminder prototype to
 [product-spec.md](product-spec.md) and
-[target-architecture.md](target-architecture.md). It is intentionally staged so
-each checkpoint remains testable and deployable.
+[target-architecture.md](target-architecture.md). The core domain, group-scoped
+runtime, clean schema, current-action screen, creation flow, group settings,
+roles, and cutover code are complete. The fuller Plan/History experience,
+calendar feeds, and the explicitly listed hardening work remain.
 
 ## Phase 0: target specification
 
@@ -40,20 +42,19 @@ Tests:
 Exit criterion: shared scheduling and validation have exhaustive deterministic
 tests independent of YDB and Telegram.
 
-## Phase 2: greenfield YDB schema
+## Phase 2: greenfield YDB schema — completed
 
 - Add ordered migration scripts plus `schema_migrations`.
-- Create the target tables and indexes without dropping the legacy tables.
+- Create the target tables and indexes as one clean initial migration.
 - Implement workspace-scoped repositories and transaction helpers.
 - Implement occurrence materialization and notification reservation.
 - Use the per-reminder runtime row to enforce one incomplete occurrence without
   relying on a scan for absence.
 - Add repository integration tests against local YDB.
 
-The old tables remain untouched during development. Because current production
-data is disposable, no row-level conversion is required. Keeping the tables
-temporarily still gives a reversible cutover and avoids destructive deployment
-steps.
+No row-level conversion is required because the pre-release data is disposable.
+The normal deploy remains non-destructive; an explicit guarded reset command is
+documented in [database-reset.md](database-reset.md).
 
 Exit criterion: the new repositories pass concurrency and authorization tests
 and no service method accepts a bare unscoped entity ID.
@@ -103,7 +104,7 @@ Tests:
 Exit criterion: concurrency tests demonstrate no duplicate scheduled attempt and
 the chain continues after one failed or unknown delivery.
 
-## Phase 5: Quiet Pulse Mini App
+## Phase 5: Quiet Pulse Mini App — partially complete
 
 - Introduce app-level routing and query/cache state instead of a single component.
 - Build Tasks, Plan, History, reminder detail, creation/editing, and Settings.
@@ -126,6 +127,11 @@ Tests:
 Exit criterion: the complete product can be operated from the Mini App without
 using fallback bot commands.
 
+Current status: the attention screen, creation, current-and-future series editing,
+pause/resume/archive, assignment, completion, snooze, undo, reassignment, role
+management, group switching, and rhythm settings are implemented. Dedicated
+Plan, History, a full reminder detail screen, and calendar settings remain.
+
 ## Phase 6: calendar feeds
 
 - Create, list, revoke, and rotate per-user feed tokens.
@@ -140,19 +146,15 @@ observe updated events after their normal refresh delay.
 Native Google OAuth synchronization remains a separate later project and is not
 required for this release.
 
-## Phase 7: cutover
+## Phase 7: cutover — implemented in code, production reset pending
 
-1. Deploy new tables, functions, and Mini App while the legacy data path remains
-   available but disabled behind configuration.
-2. Run local and non-production smoke tests.
-3. Pause the legacy timer.
-4. Switch the functions to the new repositories and schema.
-5. Recreate desired reminders manually in the new product.
-6. Run production smoke tests for group send, private send, snooze, completion,
-   escalation, and recurrence.
-7. Keep legacy tables for a short rollback window.
-8. Remove legacy repositories, APIs, UI, and tables in a later explicit cleanup.
+1. Reset the disposable production database with the guarded reset command.
+2. Deploy the functions and Mini App from `main`.
+3. Run production smoke tests for group send, private send, snooze, completion,
+   escalation, recurrence, settings, and ownership transfer.
+4. Recreate any desired reminders manually.
 
+Legacy repositories, APIs, feature flags, and schema files have been removed.
 No destructive DDL runs automatically during a normal application deploy.
 
 ## Verification gates

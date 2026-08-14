@@ -7,6 +7,7 @@ import {
 
 export interface ObservedTelegramUser {
   id: number;
+  isBot?: boolean;
   username?: string;
   firstName?: string;
   lastName?: string;
@@ -33,6 +34,9 @@ export async function observeTelegramIdentity(
   chat: { id: number; type: "private" | "group" },
   providedDependencies?: TelegramObservationDependencies,
 ): Promise<void> {
+  if (user.isBot) {
+    return;
+  }
   const dependencies = providedDependencies ?? createDependencies(config);
   const displayName = [user.firstName, user.lastName].filter(Boolean).join(" ") || "User";
   await dependencies.users.observe({

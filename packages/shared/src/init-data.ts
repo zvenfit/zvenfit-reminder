@@ -48,7 +48,12 @@ export function validateInitData(initData: string, botToken: string, maxAgeSecon
 
   const authDate = Number(raw.auth_date ?? 0);
   const now = Math.floor(Date.now() / 1000);
-  if (!authDate || now - authDate > maxAgeSeconds) {
+  if (
+    !Number.isSafeInteger(authDate) ||
+    authDate <= 0 ||
+    authDate > now + 60 ||
+    now - authDate > maxAgeSeconds
+  ) {
     throw new Error("initData expired");
   }
 
@@ -58,7 +63,7 @@ export function validateInitData(initData: string, botToken: string, maxAgeSecon
   }
 
   const user = JSON.parse(userRaw) as InitDataUser;
-  if (!user.id) {
+  if (!Number.isSafeInteger(user.id) || user.id <= 0) {
     throw new Error("Invalid user in initData");
   }
 

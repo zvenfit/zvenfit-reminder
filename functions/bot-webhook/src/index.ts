@@ -1,108 +1,39 @@
 import {
-  InstancesRepository,
-  MembersRepository,
+  DeliveryInProgressError,
   OccurrenceNotActionableError,
   RemindersRepository,
-  RulesRepository,
   UndoWindowExpiredError,
   WorkspaceMembersRepository,
   WorkspaceChatAlreadyRegisteredError,
   WorkspacesRepository,
-  buildOccurrenceMessage,
   escapeHtml,
-  formatAmount,
-  formatDueDate,
   loadConfig,
-  parseInstanceCallbackData,
   parseOccurrenceCallbackData,
-  occurrenceCallbackData,
   validateInitData,
   type ParsedInitData,
-  type Rule,
 } from "@zvenfit-reminder/shared";
-import { Bot, InlineKeyboard, type BotConfig, type Context } from "grammy";
+import { Bot, type BotConfig, type Context } from "grammy";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
-import {
-  createRuleSchema,
-  getHeader,
-  getPath,
-  jsonResponse,
-  updateRuleSchema,
-} from "./api.js";
+import { getHeader, getPath, jsonResponse } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
 import { importSharedGroupMembers } from "./member-import.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
 import { buildStartResponse } from "./start-response.js";
 import { managedWorkspaces, workspaceForMemberImport } from "./bot-workspaces.js";
 import {
-  UniversalOccurrenceActionForbiddenError,
-  UniversalOccurrenceActionNotFoundError,
-  executeUniversalOccurrenceAction,
-  type UniversalOccurrenceActionResult,
-} from "./universal-occurrence-actions.js";
-import { handleUniversalApi } from "./universal-api.js";
+  OccurrenceActionForbiddenError,
+  OccurrenceActionNotFoundError,
+  executeOccurrenceAction,
+  type OccurrenceActionResult,
+} from "./occurrence-actions.js";
+import { renderOccurrenceAction } from "./occurrence-message.js";
+import { handleWorkspaceApi } from "./workspace-api.js";
 import { observeTelegramIdentity } from "./telegram-observation.js";
 
 let botInstance: Bot | null = null;
 
-function occurrenceKeyboard(occurrenceId: string): InlineKeyboard {
-  return new InlineKeyboard()
-    .text("✅ Выполнил", occurrenceCallbackData("done", occurrenceId))
-    .text("⏰ +1 час", occurrenceCallbackData("snooze", occurrenceId));
-}
-
-function formatOccurrenceInstant(instant: Date, timezone: string): string {
-  return new Intl.DateTimeFormat("ru-RU", {
-    day: "numeric",
-    month: "long",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: timezone,
-  }).format(instant);
-}
-
-function renderOccurrenceAction(
-  result: UniversalOccurrenceActionResult,
-  actor: { id: number; first_name: string; last_name?: string },
-): { text: string; keyboard: InlineKeyboard; callbackNotice: string } {
-  const { occurrence, action } = result;
-  const actorName = escapeHtml(
-    [actor.first_name, actor.last_name].filter(Boolean).join(" ") || "Участник",
-  );
-  const actorMention = `<a href="tg://user?id=${actor.id}">${actorName}</a>`;
-  const base = buildOccurrenceMessage(occurrence);
-  if (action === "done") {
-    const undoUntil = occurrence.undoUntil
-      ? formatOccurrenceInstant(occurrence.undoUntil, occurrence.timezone)
-      : null;
-    return {
-      text: `${base}\n\n✅ Выполнено: ${actorMention}${undoUntil ? `\nОтменить можно до ${escapeHtml(undoUntil)}` : ""}`,
-      keyboard: new InlineKeyboard().text(
-        "↩️ Отменить выполнение",
-        occurrenceCallbackData("undo", occurrence.occurrenceId),
-      ),
-      callbackNotice: "Готово",
-    };
-  }
-  if (action === "snooze") {
-    const nextAt = occurrence.nextNotificationAt
-      ? formatOccurrenceInstant(occurrence.nextNotificationAt, occurrence.timezone)
-      : "позже";
-    return {
-      text: `${base}\n\n⏰ Отложено: ${escapeHtml(nextAt)}\nИзменил: ${actorMention}`,
-      keyboard: occurrenceKeyboard(occurrence.occurrenceId),
-      callbackNotice: "Напомню позже",
-    };
-  }
-  return {
-    text: `${base}\n\n↩️ Выполнение отменено: ${actorMention}`,
-    keyboard: occurrenceKeyboard(occurrence.occurrenceId),
-    callbackNotice: "Снова активно",
-  };
-}
-
-function resolveInitData(initData: string | undefined, botToken: string): ParsedInitData {
-  if (process.env.SKIP_INIT_DATA_VALIDATION === "1" && process.env.NODE_ENV !== "production") {
+export function resolveInitData(initData: string | undefined, botToken: string): ParsedInitData {
+  if (process.env.SKIP_INIT_DATA_VALIDATION === "1" && process.env.NODE_ENV === "development") {
     const devUserId = Number(process.env.DEV_USER_ID ?? "0");
     if (!devUserId) {
       throw new Error("DEV_USER_ID required when SKIP_INIT_DATA_VALIDATION=1");
@@ -128,9 +59,6 @@ export function getBot(): Bot {
   }
 
   const config = loadConfig();
-  const rulesRepo = new RulesRepository(config.ydbEndpoint, config.ydbDatabase);
-  const instancesRepo = new InstancesRepository(config.ydbEndpoint, config.ydbDatabase);
-  const membersRepo = new MembersRepository(config.ydbEndpoint, config.ydbDatabase);
   const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
   const workspaceMembersRepo = new WorkspaceMembersRepository(
     config.ydbEndpoint,
@@ -144,83 +72,62 @@ export function getBot(): Bot {
     config.botToken,
     cachedBotInfo ? { botInfo: cachedBotInfo } : undefined,
   );
-  const observeSyncedGroupUser = (chatId: number) => config.universalRemindersEnabled
-    ? async (user: SyncedTelegramUser) =>
-        observeTelegramIdentity(
-          config,
-          {
-            id: user.id,
-            username: user.username,
-            firstName: user.first_name,
-            lastName: user.last_name,
-            languageCode: user.language_code,
-          },
-          { id: chatId, type: "group" },
-        )
-    : undefined;
+  const observeSyncedGroupUser = (chatId: number) => async (user: SyncedTelegramUser) =>
+    observeTelegramIdentity(
+      config,
+      {
+        id: user.id,
+        username: user.username,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        languageCode: user.language_code,
+      },
+      { id: chatId, type: "group" },
+    );
 
-  // Universal mode authorizes each group through its workspace. Legacy mode
-  // keeps the historical single-chat boundary.
   bot.use(async (ctx, next) => {
     const chatId = ctx.chat?.id;
     const userId = ctx.from?.id;
     const isGroupChat = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
-    const isAllowedChat = config.universalRemindersEnabled
-      ? isGroupChat && chatId != null &&
-        (await workspacesRepo.getByTelegramChatId(chatId))?.status === "active"
-      : chatId === config.allowedChatId;
-    const isPrivateAdmin = ctx.chat?.type === "private" && userId != null && config.adminUserIds.includes(userId);
-    const isAllowedPrivate = !config.universalRemindersEnabled &&
-      ctx.chat?.type === "private" && config.adminUserIds.length === 0;
+    const isConfiguredGroup = isGroupChat && chatId != null &&
+      (await workspacesRepo.getByTelegramChatId(chatId))?.status === "active";
     const callbackData = ctx.callbackQuery && "data" in ctx.callbackQuery
       ? ctx.callbackQuery.data
       : null;
-    const isUniversalPrivateCallback =
-      config.universalRemindersEnabled &&
+    const isPrivateCallback =
       ctx.chat?.type === "private" &&
       userId != null &&
       callbackData != null &&
       parseOccurrenceCallbackData(callbackData) != null;
-    const isUniversalPrivateStart =
-      config.universalRemindersEnabled &&
+    const isPrivateStart =
       ctx.chat?.type === "private" &&
       userId != null &&
       ctx.message?.text?.startsWith("/start") === true;
-    const isUniversalPrivateUsersShared =
-      config.universalRemindersEnabled &&
+    const isPrivateUsersShared =
       ctx.chat?.type === "private" &&
       userId != null &&
       ctx.message?.users_shared != null;
-    const isUniversalGroupSetup =
-      config.universalRemindersEnabled &&
+    const isGroupSetup =
       isGroupChat &&
       userId != null &&
       ctx.message?.text?.startsWith("/setup") === true;
 
     if (
-      !isAllowedChat &&
-      !isPrivateAdmin &&
-      !isAllowedPrivate &&
-      !isUniversalPrivateCallback &&
-      !isUniversalPrivateStart &&
-      !isUniversalPrivateUsersShared &&
-      !isUniversalGroupSetup
+      !isConfiguredGroup &&
+      !isPrivateCallback &&
+      !isPrivateStart &&
+      !isPrivateUsersShared &&
+      !isGroupSetup
     ) {
       return;
     }
 
-    if (isAllowedChat && chatId != null && userId) {
-      const displayName = [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ") || "User";
-      // Кэшируем участников группы для Mini App
-      await membersRepo.upsert(chatId, userId, ctx.from?.username ?? null, displayName);
-    }
-
-    if (config.universalRemindersEnabled && ctx.from && ctx.chat &&
-      (ctx.chat.type === "private" || isAllowedChat)) {
+    if (ctx.from && ctx.chat && (ctx.chat.type === "private" || isConfiguredGroup || isGroupSetup)) {
       await observeTelegramIdentity(
         config,
         {
           id: ctx.from.id,
+          isBot: ctx.from.is_bot,
           username: ctx.from.username,
           firstName: ctx.from.first_name,
           lastName: ctx.from.last_name,
@@ -237,8 +144,7 @@ export function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => {
-    const actorWorkspaces = config.universalRemindersEnabled &&
-      ctx.chat.type === "private" && ctx.from
+    const actorWorkspaces = ctx.chat.type === "private" && ctx.from
       ? await workspacesRepo.listForUser(ctx.from.id)
       : [];
     const manageable = managedWorkspaces(actorWorkspaces);
@@ -255,7 +161,6 @@ export function getBot(): Bot {
 
   bot.on("message:users_shared", async (ctx) => {
     if (
-      !config.universalRemindersEnabled ||
       ctx.chat.type !== "private" ||
       !ctx.from
     ) {
@@ -279,15 +184,6 @@ export function getBot(): Bot {
         getChatMember: (chatId, userId) => bot.api.getChatMember(chatId, userId),
         saveMember: async (membership) => {
           const user = membership.user;
-          const displayName = [user.first_name, user.last_name]
-            .filter(Boolean)
-            .join(" ") || user.username || "User";
-          await membersRepo.upsert(
-            workspace.telegramChatId,
-            user.id,
-            user.username ?? null,
-            displayName,
-          );
           await observeTelegramIdentity(
             config,
             {
@@ -322,123 +218,107 @@ export function getBot(): Bot {
   });
 
   bot.command("list", async (ctx) => {
-    if (config.universalRemindersEnabled) {
-      const workspace = ctx.chat.type !== "private"
-        ? await workspacesRepo.getByTelegramChatId(ctx.chat.id)
-        : null;
-      if (!workspace || !ctx.from) {
-        await ctx.reply("Откройте панель в личном чате или выполните команду в настроенной группе.");
-        return;
-      }
-      const remindersRepo = new RemindersRepository(
-        config.ydbEndpoint,
-        config.ydbDatabase,
-      );
-      const reminders = await remindersRepo.listForActor(workspace.workspaceId, ctx.from.id);
-      await ctx.reply(
-        reminders.length === 0
-          ? "Активных напоминаний нет."
-          : `Активные напоминания:\n${reminders.map((reminder) => `• ${reminder.title}`).join("\n")}`,
-      );
+    const workspace = ctx.chat.type !== "private"
+      ? await workspacesRepo.getByTelegramChatId(ctx.chat.id)
+      : null;
+    if (!workspace || !ctx.from) {
+      await ctx.reply("Откройте панель в личном чате или выполните команду в настроенной группе.");
       return;
     }
-    const rules = await rulesRepo.list(config.allowedChatId, "active");
-    if (rules.length === 0) {
-      await ctx.reply("Активных правил нет.");
-      return;
-    }
-
-    const lines = rules.map((rule: Rule) => {
-      const amount = formatAmount(rule.amount);
-      const schedule =
-        rule.ruleType === "recurring"
-          ? `каждое ${rule.dayOfMonth}-е в ${rule.timeLocal}`
-          : rule.dueAt
-            ? formatDueDate(rule.dueAt, rule.timezone)
-            : "разово";
-      return `• ${rule.title}${amount ? ` (${amount})` : ""} — ${schedule}`;
-    });
-
-    await ctx.reply(`Активные правила:\n${lines.join("\n")}`);
+    const remindersRepo = new RemindersRepository(config.ydbEndpoint, config.ydbDatabase);
+    const reminders = (await remindersRepo.listForActor(workspace.workspaceId, ctx.from.id))
+      .filter((reminder) => reminder.visibility === "group");
+    await ctx.reply(
+      reminders.length === 0
+        ? "Активных напоминаний нет."
+        : `Активные напоминания:\n${reminders.map((reminder) => `• ${reminder.title}`).join("\n")}`,
+    );
   });
 
-  if (config.universalRemindersEnabled) {
-    bot.command("setup", async (ctx) => {
-      if (ctx.chat.type === "private" || !ctx.from) {
-        await ctx.reply("Настройка доступна только в группе.");
-        return;
-      }
-      let telegramAdmin = false;
-      try {
-        const membership = await ctx.getChatMember(ctx.from.id);
-        telegramAdmin =
-          membership.status === "creator" || membership.status === "administrator";
-      } catch {
-        telegramAdmin = false;
-      }
-      if (!telegramAdmin) {
-        await ctx.reply("Создать workspace может только администратор группы.");
-        return;
-      }
+  bot.command("setup", async (ctx) => {
+    if (ctx.chat.type === "private" || !ctx.from) {
+      await ctx.reply("Настройка доступна только в группе.");
+      return;
+    }
+    let telegramAdmin = false;
+    try {
+      const membership = await ctx.getChatMember(ctx.from.id);
+      telegramAdmin =
+        membership.status === "creator" || membership.status === "administrator";
+    } catch {
+      telegramAdmin = false;
+    }
+    if (!telegramAdmin) {
+      await ctx.reply("Создать workspace может только администратор группы.");
+      return;
+    }
 
-      const existing = await workspacesRepo.getByTelegramChatId(ctx.chat.id);
-      if (existing) {
+    const existing = await workspacesRepo.getByTelegramChatId(ctx.chat.id);
+    if (existing) {
+      const currentOwner = await workspaceMembersRepo.getByUserId(
+        existing.workspaceId,
+        existing.ownerUserId,
+      );
+      if (currentOwner?.status !== "active") {
+        try {
+          await workspacesRepo.claimVacantOwnership(existing.workspaceId, ctx.from.id);
+          await ctx.reply("✅ Управление группой восстановлено. Теперь вы владелец настроек напоминаний.");
+          return;
+        } catch {
+          await ctx.reply("Workspace уже настроен, но владельца не удалось восстановить.");
+          return;
+        }
+      }
+      await ctx.reply("Workspace уже настроен.");
+      return;
+    }
+    try {
+      await workspacesRepo.create({
+        telegramChatId: ctx.chat.id,
+        displayName: ctx.chat.title || "Группа",
+        ownerUserId: ctx.from.id,
+        timezone: config.defaultTimezone,
+      });
+      await observeTelegramIdentity(
+        config,
+        {
+          id: ctx.from.id,
+          username: ctx.from.username,
+          firstName: ctx.from.first_name,
+          lastName: ctx.from.last_name,
+          languageCode: ctx.from.language_code,
+        },
+        { id: ctx.chat.id, type: "group" },
+      );
+      let synced = 1;
+      try {
+        const createdWorkspace = (await workspacesRepo.getByTelegramChatId(ctx.chat.id))!;
+        const knownMembers = await workspaceMembersRepo.listProfiles(createdWorkspace.workspaceId);
+        synced = await syncGroupMembers(
+          bot.api,
+          ctx.chat.id,
+          knownMembers.map((member) => member.userId),
+          observeSyncedGroupUser(ctx.chat.id),
+          ctx.from.id,
+          (userId) => workspaceMembersRepo.remove(createdWorkspace.workspaceId, userId)
+            .then(() => undefined),
+        );
+      } catch {
+        // Workspace is already valid; /sync can retry member discovery later.
+      }
+      await ctx.reply(
+        `✅ Workspace создан. Участников синхронизировано: ${synced}. Можно переходить к новым напоминаниям.`,
+      );
+    } catch (error) {
+      if (error instanceof WorkspaceChatAlreadyRegisteredError) {
         await ctx.reply("Workspace уже настроен.");
         return;
       }
-      try {
-        await workspacesRepo.create({
-          telegramChatId: ctx.chat.id,
-          displayName: ctx.chat.title || "Группа",
-          ownerUserId: ctx.from.id,
-          timezone: config.defaultTimezone,
-        });
-        let synced = 1;
-        try {
-          synced = await syncGroupMembers(
-            bot.api,
-            ctx.chat.id,
-            membersRepo,
-            ctx.from.id,
-            observeSyncedGroupUser(ctx.chat.id),
-          );
-        } catch {
-          // Workspace is already valid; /sync can retry member discovery later.
-        }
-        await ctx.reply(
-          `✅ Workspace создан. Участников синхронизировано: ${synced}. Можно переходить к новым напоминаниям.`,
-        );
-      } catch (error) {
-        if (error instanceof WorkspaceChatAlreadyRegisteredError) {
-          await ctx.reply("Workspace уже настроен.");
-          return;
-        }
-        throw error;
-      }
-    });
-  }
+      throw error;
+    }
+  });
 
   bot.command("sync", async (ctx) => {
-    if (!config.universalRemindersEnabled) {
-      if (ctx.chat.id !== config.allowedChatId) {
-        await ctx.reply("Команда доступна только в настроенной группе.");
-        return;
-      }
-      try {
-        const synced = await syncGroupMembers(
-          bot.api,
-          config.allowedChatId,
-          membersRepo,
-          ctx.from?.id,
-        );
-        const members = await membersRepo.list(config.allowedChatId);
-        await ctx.reply(`Участники обновлены: ${members.length} в списке (${synced} из Telegram).`);
-      } catch (error) {
-        await ctx.reply(error instanceof Error ? error.message : "Не удалось синхронизировать участников.");
-      }
-      return;
-    }
-
     const workspace = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup"
       ? await workspacesRepo.getByTelegramChatId(ctx.chat.id)
       : null;
@@ -446,16 +326,26 @@ export function getBot(): Bot {
       await ctx.reply("Сначала настройте эту группу командой /setup.");
       return;
     }
+    const actor = ctx.from
+      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id)
+      : null;
+    if (!actor || (actor.role !== "owner" && actor.role !== "organizer")) {
+      await ctx.reply("Обновлять участников может только владелец или организатор группы.");
+      return;
+    }
 
     try {
+      const knownMembers = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
       const synced = await syncGroupMembers(
         bot.api,
         workspace.telegramChatId,
-        membersRepo,
-        ctx.from?.id,
+        knownMembers.map((member) => member.userId),
         observeSyncedGroupUser(workspace.telegramChatId),
+        ctx.from?.id,
+        (userId) => workspaceMembersRepo.remove(workspace.workspaceId, userId)
+          .then(() => undefined),
       );
-      const members = await membersRepo.list(workspace.telegramChatId);
+      const members = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
       await ctx.reply(`Участники обновлены: ${members.length} в списке (${synced} из Telegram).`);
     } catch (error) {
       await ctx.reply(error instanceof Error ? error.message : "Не удалось синхронизировать участников.");
@@ -463,25 +353,6 @@ export function getBot(): Bot {
   });
 
   bot.on("chat_member", async (ctx) => {
-    if (!config.universalRemindersEnabled) {
-      if (ctx.chatMember.chat.id !== config.allowedChatId) {
-        return;
-      }
-      const status = ctx.chatMember.new_chat_member.status;
-      const user = ctx.chatMember.new_chat_member.user;
-      if (user.is_bot || status === "left" || status === "kicked") {
-        return;
-      }
-      const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "User";
-      await membersRepo.upsert(
-        config.allowedChatId,
-        user.id,
-        user.username ?? null,
-        displayName,
-      );
-      return;
-    }
-
     const workspace = await workspacesRepo.getByTelegramChatId(ctx.chatMember.chat.id);
     if (!workspace || workspace.status !== "active") {
       return;
@@ -512,90 +383,53 @@ export function getBot(): Bot {
       return;
     }
 
-    const displayName = [user.first_name, user.last_name].filter(Boolean).join(" ") || "User";
-    await membersRepo.upsert(workspace.telegramChatId, user.id, user.username ?? null, displayName);
-    await observeSyncedGroupUser(workspace.telegramChatId)?.(user);
+    await observeSyncedGroupUser(workspace.telegramChatId)(user);
   });
 
   bot.command("done", async (ctx) => {
-    if (config.universalRemindersEnabled) {
-      await ctx.reply("Используйте кнопку «Выполнил» под напоминанием.");
-      return;
-    }
-    const instanceId = ctx.match?.trim();
-    if (!instanceId || !ctx.from) {
-      await ctx.reply("Использование: /done <instance_id>");
-      return;
-    }
-
-    const instance = await instancesRepo.complete(instanceId, ctx.from.id);
-    if (!instance) {
-      await ctx.reply("Задача не найдена.");
-      return;
-    }
-
-    const rule = await rulesRepo.getById(instance.ruleId);
-    if (rule?.ruleType === "oneoff") {
-      await rulesRepo.archive(rule.id);
-    }
-
-    await ctx.reply("✅ Отмечено как выполнено.");
+    await ctx.reply("Используйте кнопку «Выполнил» под напоминанием.");
   });
 
   bot.command("skip", async (ctx) => {
-    if (config.universalRemindersEnabled) {
-      await ctx.reply("В новых напоминаниях используйте «Напомнить позже».");
-      return;
-    }
-    const instanceId = ctx.match?.trim();
-    if (!instanceId) {
-      await ctx.reply("Использование: /skip <instance_id>");
-      return;
-    }
-
-    const instance = await instancesRepo.skip(instanceId);
-    if (!instance) {
-      await ctx.reply("Задача не найдена.");
-      return;
-    }
-
-    const rule = await rulesRepo.getById(instance.ruleId);
-    if (rule?.ruleType === "oneoff") {
-      await rulesRepo.archive(rule.id);
-    }
-
-    await ctx.reply("⏭ Пропущено.");
+    await ctx.reply("Используйте «Напомнить позже» под напоминанием.");
   });
 
   bot.on("callback_query:data", async (ctx) => {
-    const universalCallback = config.universalRemindersEnabled
-      ? parseOccurrenceCallbackData(ctx.callbackQuery.data)
-      : null;
-    if (universalCallback) {
+    const occurrenceCallback = parseOccurrenceCallbackData(ctx.callbackQuery.data);
+    if (occurrenceCallback) {
       if (!ctx.from || !ctx.chat) {
         await ctx.answerCallbackQuery();
         return;
       }
 
-      let result: UniversalOccurrenceActionResult;
+      let result: OccurrenceActionResult;
       try {
-        result = await executeUniversalOccurrenceAction(config, {
+        result = await executeOccurrenceAction(config, {
           source: "telegram",
-          action: universalCallback.action,
-          occurrenceId: universalCallback.occurrenceId,
+          action: occurrenceCallback.action,
+          occurrenceId: occurrenceCallback.occurrenceId,
           actorUserId: ctx.from.id,
+          actorDisplayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" "),
           chatId: ctx.chat.id,
           chatType: ctx.chat.type === "private" ? "private" : "group",
+          messageId: ctx.callbackQuery.message?.message_id,
         });
       } catch (error) {
-        if (error instanceof UniversalOccurrenceActionForbiddenError) {
+        if (error instanceof DeliveryInProgressError) {
+          await ctx.answerCallbackQuery({
+            text: "Уведомление отправляется — повторите через секунду",
+            show_alert: true,
+          });
+          return;
+        }
+        if (error instanceof OccurrenceActionForbiddenError) {
           await ctx.answerCallbackQuery({
             text: "У вас нет доступа к этому действию",
             show_alert: true,
           });
           return;
         }
-        if (error instanceof UniversalOccurrenceActionNotFoundError) {
+        if (error instanceof OccurrenceActionNotFoundError) {
           await ctx.answerCallbackQuery({
             text: "Напоминание больше недоступно",
             show_alert: true,
@@ -620,52 +454,12 @@ export function getBot(): Bot {
         return;
       }
 
-      const rendered = renderOccurrenceAction(result, ctx.from);
-      try {
-        await ctx.editMessageText(rendered.text, {
-          parse_mode: "HTML",
-          reply_markup: rendered.keyboard,
-        });
-        await ctx.answerCallbackQuery({ text: rendered.callbackNotice });
-      } catch {
-        await ctx.answerCallbackQuery({
-          text: "Действие сохранено, но сообщение не обновилось",
-          show_alert: true,
-        });
-      }
+      const rendered = renderOccurrenceAction(result, {
+        id: ctx.from.id,
+        displayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" "),
+      });
+      await ctx.answerCallbackQuery({ text: rendered.callbackNotice });
       return;
-    }
-
-    const parsed = parseInstanceCallbackData(ctx.callbackQuery.data);
-    if (config.universalRemindersEnabled) {
-      await ctx.answerCallbackQuery();
-      return;
-    }
-    if (!parsed || !ctx.from) {
-      await ctx.answerCallbackQuery();
-      return;
-    }
-
-    if (parsed.action === "done") {
-      await instancesRepo.complete(parsed.instanceId, ctx.from.id);
-      const instance = await instancesRepo.getById(parsed.instanceId);
-      if (instance) {
-        const rule = await rulesRepo.getById(instance.ruleId);
-        if (rule?.ruleType === "oneoff") {
-          await rulesRepo.archive(rule.id);
-        }
-      }
-      await ctx.editMessageText(`${ctx.callbackQuery.message?.text ?? ""}\n\n✅ Выполнено`);
-    } else {
-      await instancesRepo.skip(parsed.instanceId);
-      const instance = await instancesRepo.getById(parsed.instanceId);
-      if (instance) {
-        const rule = await rulesRepo.getById(instance.ruleId);
-        if (rule?.ruleType === "oneoff") {
-          await rulesRepo.archive(rule.id);
-        }
-      }
-      await ctx.editMessageText(`${ctx.callbackQuery.message?.text ?? ""}\n\n⏭ Пропущено`);
     }
 
     await ctx.answerCallbackQuery();
@@ -693,95 +487,58 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
     return jsonResponse(401, { error: error instanceof Error ? error.message : "Unauthorized" });
   }
 
-  const rulesRepo = new RulesRepository(config.ydbEndpoint, config.ydbDatabase);
-  const instancesRepo = new InstancesRepository(config.ydbEndpoint, config.ydbDatabase);
-  const membersRepo = new MembersRepository(config.ydbEndpoint, config.ydbDatabase);
-
-  if (config.universalRemindersEnabled) {
-    if (method === "POST" && path === "/api/members/sync") {
-      const workspaceId = getHeader(event, "X-Workspace-Id")?.trim();
-      const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
-      const workspaceMembersRepo = new WorkspaceMembersRepository(
-        config.ydbEndpoint,
-        config.ydbDatabase,
+  if (method === "POST" && path === "/api/members/sync") {
+    const workspaceId = getHeader(event, "X-Workspace-Id")?.trim();
+    const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
+    const workspaceMembersRepo = new WorkspaceMembersRepository(
+      config.ydbEndpoint,
+      config.ydbDatabase,
+    );
+    const workspace = workspaceId ? await workspacesRepo.getById(workspaceId) : null;
+    const actor = workspace
+      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, parsedInit.user.id)
+      : null;
+    if (!workspaceId) {
+      return jsonResponse(400, { error: "Choose a workspace", code: "workspace_required" });
+    }
+    if (
+      !workspace ||
+      workspace.status !== "active" ||
+      !actor ||
+      actor.status !== "active" ||
+      (actor.role !== "owner" && actor.role !== "organizer")
+    ) {
+      return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
+    }
+    try {
+      const knownMembers = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
+      const synced = await syncGroupMembers(
+        getBot().api,
+        workspace.telegramChatId,
+        knownMembers.map((member) => member.userId),
+        async (user) => observeTelegramIdentity(
+          config,
+          {
+            id: user.id,
+            username: user.username,
+            firstName: user.first_name,
+            lastName: user.last_name,
+            languageCode: user.language_code,
+          },
+          { id: workspace.telegramChatId, type: "group" },
+        ),
+        parsedInit.user.id,
+        (userId) => workspaceMembersRepo.remove(workspace.workspaceId, userId)
+          .then(() => undefined),
       );
-      const workspace = workspaceId ? await workspacesRepo.getById(workspaceId) : null;
-      const actor = workspace
-        ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, parsedInit.user.id)
-        : null;
-      if (!workspaceId) {
-        return jsonResponse(400, { error: "Choose a workspace", code: "workspace_required" });
-      }
-      if (!workspace || workspace.status !== "active" || !actor || actor.status !== "active") {
+      const refreshedActor = await workspaceMembersRepo.getByUserId(
+        workspace.workspaceId,
+        parsedInit.user.id,
+      );
+      if (!refreshedActor || refreshedActor.status !== "active") {
         return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
       }
-      try {
-        const synced = await syncGroupMembers(
-          getBot().api,
-          workspace.telegramChatId,
-          membersRepo,
-          parsedInit.user.id,
-          async (user) => observeTelegramIdentity(
-            config,
-            {
-              id: user.id,
-              username: user.username,
-              firstName: user.first_name,
-              lastName: user.last_name,
-              languageCode: user.language_code,
-            },
-            { id: workspace.telegramChatId, type: "group" },
-          ),
-        );
-        const members = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
-        return jsonResponse(200, { members, synced });
-      } catch (error) {
-        return jsonResponse(502, {
-          error: error instanceof Error ? error.message : "Failed to sync members",
-        });
-      }
-    }
-    const universalResponse = await handleUniversalApi(event, config, parsedInit);
-    if (universalResponse) {
-      return universalResponse;
-    }
-    return jsonResponse(404, { error: "Not found" });
-  }
-
-  if (method === "GET" && path === "/api/rules") {
-    const rules = await rulesRepo.list(config.allowedChatId);
-    return jsonResponse(200, { rules });
-  }
-
-  if (method === "GET" && path === "/api/members") {
-    const members = await membersRepo.list(config.allowedChatId);
-    return jsonResponse(200, { members });
-  }
-
-  if (method === "POST" && path === "/api/members/sync") {
-    try {
-      const bot = getBot();
-      const synced = await syncGroupMembers(
-        bot.api,
-        config.allowedChatId,
-        membersRepo,
-        parsedInit.user.id,
-        config.universalRemindersEnabled
-          ? async (user) =>
-              observeTelegramIdentity(
-                config,
-                {
-                  id: user.id,
-                  username: user.username,
-                  firstName: user.first_name,
-                  lastName: user.last_name,
-                  languageCode: user.language_code,
-                },
-                { id: config.allowedChatId, type: "group" },
-              )
-          : undefined,
-      );
-      const members = await membersRepo.list(config.allowedChatId);
+      const members = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
       return jsonResponse(200, { members, synced });
     } catch (error) {
       return jsonResponse(502, {
@@ -789,54 +546,10 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
       });
     }
   }
-
-  if (method === "POST" && path === "/api/rules") {
-    const body = JSON.parse(event.body ?? "{}");
-    const parsed = createRuleSchema.parse(body);
-    const rule = await rulesRepo.create(
-      {
-        ...parsed,
-        chatId: config.allowedChatId,
-      },
-      config.defaultTimezone,
-    );
-    return jsonResponse(201, { rule });
+  const workspaceResponse = await handleWorkspaceApi(event, config, parsedInit);
+  if (workspaceResponse) {
+    return workspaceResponse;
   }
-
-  const ruleMatch = path.match(/^\/api\/rules\/([^/]+)$/);
-  if (ruleMatch) {
-    const ruleId = decodeURIComponent(ruleMatch[1]);
-
-    if (method === "PUT") {
-      const body = JSON.parse(event.body ?? "{}");
-      const parsed = updateRuleSchema.parse(body);
-      const rule = await rulesRepo.update(ruleId, parsed);
-      if (!rule) {
-        return jsonResponse(404, { error: "Rule not found" });
-      }
-      return jsonResponse(200, { rule });
-    }
-
-    if (method === "DELETE") {
-      await rulesRepo.archive(ruleId);
-      return jsonResponse(200, { ok: true });
-    }
-  }
-
-  const completeMatch = path.match(/^\/api\/instances\/([^/]+)\/complete$/);
-  if (method === "POST" && completeMatch) {
-    const instanceId = decodeURIComponent(completeMatch[1]);
-    const instance = await instancesRepo.complete(instanceId, parsedInit.user.id);
-    if (!instance) {
-      return jsonResponse(404, { error: "Instance not found" });
-    }
-    const rule = await rulesRepo.getById(instance.ruleId);
-    if (rule?.ruleType === "oneoff") {
-      await rulesRepo.archive(rule.id);
-    }
-    return jsonResponse(200, { instance });
-  }
-
   return jsonResponse(404, { error: "Not found" });
 }
 

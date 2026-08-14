@@ -7,6 +7,11 @@ LEDGER_SCHEMA="$PROJECT_ROOT/infra/ydb/schema-migrations.sql"
 YDB_ENDPOINT="${YDB_ENDPOINT:-grpc://localhost:2136}"
 YDB_DATABASE="${YDB_DATABASE:-/local}"
 YDB_CONTAINER="${YDB_CONTAINER:-}"
+SA_KEY_FILE="${SA_KEY_FILE:-${YDB_SERVICE_ACCOUNT_KEY_FILE_CREDENTIALS:-}}"
+YDB_AUTH_ARGS=()
+if [[ -n "$SA_KEY_FILE" ]]; then
+  YDB_AUTH_ARGS+=(--sa-key-file "$SA_KEY_FILE")
+fi
 
 if [[ -z "$YDB_CONTAINER" ]] && command -v docker >/dev/null 2>&1; then
   YDB_CONTAINER="$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" ps -q ydb 2>/dev/null || true)"
@@ -23,7 +28,7 @@ run_ydb() {
     return
   fi
 
-  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "$@"
+  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "${YDB_AUTH_ARGS[@]}" "$@"
 }
 
 apply_file() {
@@ -36,7 +41,7 @@ apply_file() {
     return
   fi
 
-  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" sql -f "$source_file"
+  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "${YDB_AUTH_ARGS[@]}" sql -f "$source_file"
 }
 
 checksum_file() {

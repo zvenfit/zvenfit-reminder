@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SCHEMA_FILE="$ROOT/infra/ydb/schema.sql"
 YDB_ENDPOINT="${YDB_ENDPOINT:-grpc://localhost:2136}"
 YDB_DATABASE="${YDB_DATABASE:-/local}"
 
@@ -13,16 +12,6 @@ run_ydb() {
   fi
 
   ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "$@"
-}
-
-apply_schema() {
-  if [[ -n "${YDB_CONTAINER:-}" ]]; then
-    docker cp "$SCHEMA_FILE" "$YDB_CONTAINER:/tmp/schema.sql"
-    docker exec "$YDB_CONTAINER" /ydb -e grpc://localhost:2136 -d "$YDB_DATABASE" sql -f /tmp/schema.sql
-    return
-  fi
-
-  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" sql -f "$SCHEMA_FILE"
 }
 
 YDB_CONTAINER=""
@@ -57,10 +46,9 @@ if [[ "$ready" -eq 0 ]]; then
   exit 1
 fi
 
-apply_schema
 YDB_CONTAINER="$YDB_CONTAINER" \
 YDB_ENDPOINT="$YDB_ENDPOINT" \
 YDB_DATABASE="$YDB_DATABASE" \
   "$ROOT/scripts/apply-ydb-migrations.sh"
-echo "Schema applied to $YDB_DATABASE"
+echo "Migrations applied to $YDB_DATABASE"
 run_ydb scheme ls

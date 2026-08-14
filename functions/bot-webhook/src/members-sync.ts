@@ -1,13 +1,4 @@
-import type { MembersRepository } from "@zvenfit-reminder/shared";
 import type { Api, RawApi } from "grammy";
-
-function memberDisplayName(user: {
-  first_name: string;
-  last_name?: string;
-  username?: string;
-}): string {
-  return [user.first_name, user.last_name].filter(Boolean).join(" ") || user.username || "User";
-}
 
 export interface SyncedTelegramUser {
   id: number;
@@ -18,27 +9,37 @@ export interface SyncedTelegramUser {
   language_code?: string;
 }
 
+export interface SyncedTelegramMembership {
+  status: string;
+  is_member?: boolean;
+  user: SyncedTelegramUser;
+}
+
+export function isOutsideGroup(member: SyncedTelegramMembership): boolean {
+  return member.status === "left" ||
+    member.status === "kicked" ||
+    (member.status === "restricted" && member.is_member === false);
+}
+
 async function upsertTelegramUser(
-  membersRepo: MembersRepository,
-  chatId: number,
   user: SyncedTelegramUser,
-  onObservedUser?: (user: SyncedTelegramUser) => Promise<void>,
+  onObservedUser: (user: SyncedTelegramUser) => Promise<void>,
 ): Promise<boolean> {
   if (user.is_bot) {
     return false;
   }
 
-  await membersRepo.upsert(chatId, user.id, user.username ?? null, memberDisplayName(user));
-  await onObservedUser?.(user);
+  await onObservedUser(user);
   return true;
 }
 
 export async function syncGroupMembers(
   api: Api<RawApi>,
   chatId: number,
-  membersRepo: MembersRepository,
+  knownUserIds: number[],
+  onObservedUser: (user: SyncedTelegramUser) => Promise<void>,
   currentUserId?: number,
-  onObservedUser?: (user: SyncedTelegramUser) => Promise<void>,
+  onRemovedUser?: (userId: number) => Promise<void>,
 ): Promise<number> {
   const seen = new Set<number>();
   let synced = 0;
@@ -49,24 +50,24 @@ export async function syncGroupMembers(
       continue;
     }
     seen.add(member.user.id);
-    if (await upsertTelegramUser(membersRepo, chatId, member.user, onObservedUser)) {
+    if (await upsertTelegramUser(member.user, onObservedUser)) {
       synced += 1;
     }
   }
 
-  const cached = await membersRepo.list(chatId);
-  for (const cachedMember of cached) {
-    if (seen.has(cachedMember.userId)) {
+  for (const knownUserId of knownUserIds) {
+    if (seen.has(knownUserId)) {
       continue;
     }
 
     try {
-      const member = await api.getChatMember(chatId, cachedMember.userId);
-      if (member.status === "left" || member.status === "kicked") {
+      const member = await api.getChatMember(chatId, knownUserId);
+      if (isOutsideGroup(member)) {
+        await onRemovedUser?.(knownUserId);
         continue;
       }
-      seen.add(cachedMember.userId);
-      if (await upsertTelegramUser(membersRepo, chatId, member.user, onObservedUser)) {
+      seen.add(knownUserId);
+      if (await upsertTelegramUser(member.user, onObservedUser)) {
         synced += 1;
       }
     } catch {
@@ -77,10 +78,12 @@ export async function syncGroupMembers(
   if (currentUserId != null && !seen.has(currentUserId)) {
     try {
       const member = await api.getChatMember(chatId, currentUserId);
-      if (member.status !== "left" && member.status !== "kicked") {
-        if (await upsertTelegramUser(membersRepo, chatId, member.user, onObservedUser)) {
+      if (!isOutsideGroup(member)) {
+        if (await upsertTelegramUser(member.user, onObservedUser)) {
           synced += 1;
         }
+      } else {
+        await onRemovedUser?.(currentUserId);
       }
     } catch {
       // Current user may be unavailable for lookup.

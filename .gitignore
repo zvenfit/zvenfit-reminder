@@ -6,6 +6,8 @@ sa-key.json
 *.log
 .DS_Store
 coverage/
+playwright-report/
+test-results/
 *.tsbuildinfo
 .idea/
 .vscode/

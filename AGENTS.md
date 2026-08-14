@@ -58,8 +58,8 @@
   Days beyond the end of a month resolve to that month's last day.
 - One-off `dueAt` values cross the API as ISO timestamps and are stored as YDB
   `Timestamp` values.
-- `ALLOWED_CHAT_ID` is the single tenant boundary. Keep reads and writes scoped
-  to it when adding endpoints or repository methods.
+- `workspaceId` is the tenant boundary. Resolve it from a registered Telegram
+  group or authenticated active membership and scope every read and write to it.
 - Validate every API payload and Telegram callback before persistence.
 - Keep the cloud resource prefix `zvenfit-reminder-` consistent across CI,
   infrastructure scripts, and documentation.

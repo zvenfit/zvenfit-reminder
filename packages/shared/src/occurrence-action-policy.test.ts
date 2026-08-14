@@ -29,6 +29,7 @@ const reminder = {
   workspaceId: "workspace-a",
   reminderId: "reminder-a",
   creatorUserId: 10,
+  status: "active",
 } as ReminderDefinition;
 
 function occurrence(
@@ -81,5 +82,20 @@ describe("canActOnOccurrence", () => {
     expect(
       allowed("complete", { ...actor(20), workspaceId: "workspace-b" }),
     ).toBe(false);
+  });
+
+  it("rejects stale buttons after a series is paused or archived", () => {
+    expect(canActOnOccurrence({
+      action: "complete",
+      actor: actor(20),
+      reminder: { ...reminder, status: "paused" },
+      occurrence: occurrence(),
+    })).toBe(false);
+    expect(canActOnOccurrence({
+      action: "snooze",
+      actor: actor(20),
+      reminder: { ...reminder, status: "archived" },
+      occurrence: occurrence(),
+    })).toBe(false);
   });
 });

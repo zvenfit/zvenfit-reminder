@@ -32,4 +32,22 @@ describe("validateInitData", () => {
   it("rejects invalid hash", () => {
     expect(() => validateInitData("user=%7B%7D&auth_date=1&hash=deadbeef", "token")).toThrow();
   });
+
+  it("rejects correctly signed initData from the future", () => {
+    const botToken = "123456:ABC";
+    const authDate = Math.floor(Date.now() / 1000) + 120;
+    const initData = buildInitData(botToken, { id: 42, first_name: "Test" }, authDate);
+    expect(() => validateInitData(initData, botToken)).toThrow("expired");
+  });
+
+  it("rejects a correctly signed unsafe Telegram user ID", () => {
+    const botToken = "123456:ABC";
+    const authDate = Math.floor(Date.now() / 1000);
+    const initData = buildInitData(
+      botToken,
+      { id: Number.MAX_SAFE_INTEGER + 1, first_name: "Test" },
+      authDate,
+    );
+    expect(() => validateInitData(initData, botToken)).toThrow("Invalid user");
+  });
 });

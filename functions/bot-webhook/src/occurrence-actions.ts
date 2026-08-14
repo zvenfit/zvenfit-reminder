@@ -1,0 +1,261 @@
+import {
+  OccurrenceActionsRepository,
+  OccurrencesRepository,
+  RemindersRepository,
+  WorkspaceMembersRepository,
+  WorkspacesRepository,
+  canActOnOccurrence,
+  type AppConfig,
+  type ReminderOccurrence,
+} from "@zvenfit-reminder/shared";
+import type { InlineKeyboard } from "grammy";
+import { renderOccurrenceAction } from "./occurrence-message.js";
+
+export type OccurrenceAction = "done" | "snooze" | "undo";
+
+interface OccurrenceActionInputBase {
+  action: OccurrenceAction;
+  occurrenceId: string;
+  actorUserId: number;
+  snoozeMinutes?: number;
+  now?: Date;
+  actorDisplayName?: string;
+}
+
+export type OccurrenceActionInput = OccurrenceActionInputBase &
+  (
+    | {
+        source: "telegram";
+        chatId: number;
+        chatType: "private" | "group";
+        messageId?: number;
+      }
+    | { source: "mini-app"; workspaceId: string; actorDisplayName: string }
+  );
+
+export interface OccurrenceActionResult {
+  action: OccurrenceAction;
+  occurrence: ReminderOccurrence;
+}
+
+export class OccurrenceActionNotFoundError extends Error {
+  constructor() {
+    super("Reminder occurrence was not found");
+    this.name = "OccurrenceActionNotFoundError";
+  }
+}
+
+export class OccurrenceActionForbiddenError extends Error {
+  constructor() {
+    super("Actor cannot perform this reminder action");
+    this.name = "OccurrenceActionForbiddenError";
+  }
+}
+
+export interface OccurrenceActionDependencies {
+  workspaces: Pick<WorkspacesRepository, "getById" | "getByTelegramChatId">;
+  members: Pick<WorkspaceMembersRepository, "getByUserId">;
+  reminders: Pick<RemindersRepository, "getById">;
+  occurrences: Pick<
+    OccurrencesRepository,
+    "getById" | "findByIdForActor" | "beginMessageSync" | "finishMessageSync"
+  >;
+  actions: Pick<
+    OccurrenceActionsRepository,
+    "complete" | "snooze" | "undoCompletion"
+  >;
+  telegram?: {
+    edit(
+      botToken: string,
+      chatId: number,
+      messageId: number,
+      text: string,
+      keyboard: InlineKeyboard,
+    ): Promise<void>;
+  };
+}
+
+const telegramEditor: NonNullable<OccurrenceActionDependencies["telegram"]> = {
+  async edit(botToken, chatId, messageId, text, keyboard) {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Telegram editMessageText failed with HTTP ${response.status}`);
+    }
+  },
+};
+
+function createDependencies(config: AppConfig): OccurrenceActionDependencies {
+  return {
+    workspaces: new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase),
+    members: new WorkspaceMembersRepository(config.ydbEndpoint, config.ydbDatabase),
+    reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
+    occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
+    actions: new OccurrenceActionsRepository(config.ydbEndpoint, config.ydbDatabase),
+    telegram: telegramEditor,
+  };
+}
+
+function callbackLocationAllowed(
+  visibility: ReminderOccurrence["visibility"],
+  input: OccurrenceActionInput,
+  workspaceChatId: number,
+): boolean {
+  if (input.source === "mini-app") {
+    return true;
+  }
+  if (visibility === "group") {
+    return input.chatType === "group" && input.chatId === workspaceChatId;
+  }
+  return input.chatType === "private" && input.chatId === input.actorUserId;
+}
+
+export async function executeOccurrenceAction(
+  config: AppConfig,
+  input: OccurrenceActionInput,
+  providedDependencies?: OccurrenceActionDependencies,
+): Promise<OccurrenceActionResult> {
+  const dependencies = providedDependencies ?? createDependencies(config);
+  const now = input.now ?? new Date();
+  const snoozeMinutes = input.snoozeMinutes ?? 60;
+  if (!Number.isInteger(snoozeMinutes) || snoozeMinutes < 15 || snoozeMinutes > 30 * 24 * 60) {
+    throw new Error("Snooze duration must be between 15 minutes and 30 days");
+  }
+  const privateOccurrence = input.source === "telegram" && input.chatType === "private"
+    ? await dependencies.occurrences.findByIdForActor(input.occurrenceId, input.actorUserId)
+    : null;
+  const workspace = input.source === "mini-app"
+    ? await dependencies.workspaces.getById(input.workspaceId)
+    : input.chatType === "group"
+      ? await dependencies.workspaces.getByTelegramChatId(input.chatId)
+      : privateOccurrence
+        ? await dependencies.workspaces.getById(privateOccurrence.workspaceId)
+        : null;
+  if (!workspace || workspace.status !== "active") {
+    throw new OccurrenceActionNotFoundError();
+  }
+
+  const occurrence = privateOccurrence ?? await dependencies.occurrences.getById(
+    workspace.workspaceId, input.occurrenceId,
+  );
+  if (!occurrence) {
+    throw new OccurrenceActionNotFoundError();
+  }
+  if (!callbackLocationAllowed(occurrence.visibility, input, workspace.telegramChatId)) {
+    throw new OccurrenceActionForbiddenError();
+  }
+
+  const [actor, reminder] = await Promise.all([
+    dependencies.members.getByUserId(workspace.workspaceId, input.actorUserId),
+    dependencies.reminders.getById(workspace.workspaceId, occurrence.reminderId),
+  ]);
+  if (
+    !actor ||
+    !reminder ||
+    !canActOnOccurrence({
+      action: input.action === "done" ? "complete" : input.action,
+      actor,
+      reminder,
+      occurrence,
+    })
+  ) {
+    throw new OccurrenceActionForbiddenError();
+  }
+
+  const updated =
+    input.action === "done"
+      ? await dependencies.actions.complete(
+          workspace.workspaceId,
+          occurrence.occurrenceId,
+          input.actorUserId,
+          now,
+        )
+      : input.action === "snooze"
+        ? await dependencies.actions.snooze(
+            workspace.workspaceId,
+            occurrence.occurrenceId,
+            input.actorUserId,
+            new Date(now.getTime() + snoozeMinutes * 60 * 1_000),
+            now,
+          )
+        : await dependencies.actions.undoCompletion(
+            workspace.workspaceId,
+            occurrence.occurrenceId,
+            input.actorUserId,
+            now,
+          );
+  if (!updated) {
+    throw new OccurrenceActionNotFoundError();
+  }
+  const result = { action: input.action, occurrence: updated };
+  const claim = await dependencies.occurrences.beginMessageSync(
+    workspace.workspaceId,
+    occurrence.occurrenceId,
+    updated.stateRevision,
+    now,
+  );
+  if (claim) {
+    let synchronized = false;
+    try {
+      const current = claim.occurrence;
+      const expectedMessageChatId = current.visibility === "group"
+        ? workspace.telegramChatId
+        : current.assignment.mode === "person"
+          ? current.assignment.responsibleUserId
+          : null;
+      const actionStillCurrent =
+        (input.action === "done" &&
+          current.status === "completed" &&
+          current.completedBy === input.actorUserId) ||
+        (input.action === "snooze" && current.snoozedBy === input.actorUserId) ||
+        (input.action === "undo" &&
+          current.status !== "completed" &&
+          current.completedBy == null);
+      if (
+        !claim.retireOnly &&
+        actionStillCurrent &&
+        current.latestMessageChatId != null &&
+        current.latestMessageId != null &&
+        expectedMessageChatId != null &&
+        current.latestMessageChatId === expectedMessageChatId &&
+        dependencies.telegram
+      ) {
+        const rendered = renderOccurrenceAction(
+          { action: input.action, occurrence: current },
+          {
+            id: input.actorUserId,
+            displayName: input.actorDisplayName ?? "Участник",
+          },
+        );
+        await dependencies.telegram.edit(
+          config.botToken,
+          current.latestMessageChatId,
+          current.latestMessageId,
+          rendered.text,
+          rendered.keyboard,
+        );
+        synchronized = true;
+      }
+    } catch {
+      synchronized = false;
+    } finally {
+      await dependencies.occurrences.finishMessageSync(
+        workspace.workspaceId,
+        occurrence.occurrenceId,
+        claim.stateRevision,
+        claim.syncKey,
+        synchronized,
+      ).catch(() => undefined);
+    }
+  }
+  return result;
+}

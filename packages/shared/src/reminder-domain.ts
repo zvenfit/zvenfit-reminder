@@ -37,7 +37,14 @@ export type OccurrenceNotificationState = z.infer<
   typeof occurrenceNotificationStateSchema
 >;
 
-export const deliveryStatusSchema = z.enum(["reserved", "sent", "failed", "unknown"]);
+export const deliveryStatusSchema = z.enum([
+  "reserved",
+  "sending",
+  "sent",
+  "failed",
+  "unknown",
+  "cancelled",
+]);
 export type DeliveryStatus = z.infer<typeof deliveryStatusSchema>;
 
 export const deliveryTypeSchema = z.enum(["initial", "repeat", "escalation", "state_update"]);
@@ -347,6 +354,7 @@ export interface ReminderOccurrence {
   occurrenceId: string;
   reminderId: string;
   reminderVersion: number;
+  stateRevision: number;
   dueAt: Date;
   dueLocalDate: string;
   allDay: boolean;
@@ -372,6 +380,7 @@ export interface ReminderOccurrence {
   latestMessageChatId: number | null;
   latestMessageId: number | null;
   completedBy: number | null;
+  completedByDisplayName: string | null;
   completedAt: Date | null;
   undoUntil: Date | null;
   cancelledBy: number | null;

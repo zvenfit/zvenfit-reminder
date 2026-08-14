@@ -1,7 +1,7 @@
 # Current architecture and engineering notes
 
-This document describes the universal reminder runtime checked into the
-repository. Product behavior and design decisions are detailed in
+This document describes the reminder runtime checked into the repository.
+Product behavior and design decisions are detailed in
 [product-spec.md](product-spec.md) and [ux-design.md](ux-design.md); calendar
 subscriptions remain a later phase from [target-architecture.md](target-architecture.md).
 
@@ -37,12 +37,12 @@ dependencies into their deployment directories.
 
 ### Bot and member cache
 
-In universal mode, the bot resolves every Telegram group through
-`telegram_chat_workspaces`; unregistered groups can only use `/setup`. Universal
-callbacks, `/start`, and native user-picker results are also accepted in private
+The bot resolves every Telegram group through `telegram_chat_workspaces`;
+unregistered groups can only use `/setup`.
+Callbacks, `/start`, and native user-picker results are also accepted in private
 chats and then authorized through workspace membership and role. Every observed
-sender in a registered group is upserted into `group_members` and that
-workspace's member model.
+sender in a registered group is upserted into `users` and that workspace's
+`workspace_members` model.
 Telegram does not provide an API for listing every group member. Owners and
 organizers can therefore select up to ten users at a time in the private bot
 chat; the backend verifies every selected ID with `getChatMember` against the
@@ -55,9 +55,9 @@ stops pending deliveries until an owner or organizer reassigns them.
 
 Requests carry `X-Telegram-Init-Data`. The backend verifies Telegram's HMAC and
 a 24-hour maximum age. `GET /api/workspaces` lists active memberships; all other
-universal endpoints require `X-Workspace-Id` and repeat membership and role
+endpoints require `X-Workspace-Id` and repeat membership and role
 authorization for that workspace. A development-only bypass requires both
-`SKIP_INIT_DATA_VALIDATION=1` and a non-production `NODE_ENV`.
+`SKIP_INIT_DATA_VALIDATION=1` and exactly `NODE_ENV=development`.
 
 ### Reminder dispatch
 
@@ -70,11 +70,28 @@ Local recurrence intent is calculated in the reminder's IANA timezone. Monthly
 days beyond the end of a month resolve to that month's final day. A runtime slot
 and a `(workspace_id, reminder_id, due_at)` occurrence slot prevent concurrent
 timers from materializing the same obligation twice. Delivery keys are
-deterministic and reserved transactionally before Telegram is called.
+deterministic. Their reservation transaction acquires the occurrence lease
+before advancing the notification cadence. A second transaction immediately
+before the external call compares a monotonic occurrence revision, revalidates
+the destination, and refreshes the short lease until the result is recorded.
+Reassign, edit, pause, complete, snooze, undo, and member removal return a
+transient conflict while that lease is active.
 
-Completion stops notification delivery and leaves a short undo window. Snooze
-moves the next notification forward. A recurring reminder does not materialize
-its next occurrence while the current one is incomplete.
+State changes that affect an existing Telegram message enter a revision-fenced
+refresh queue. A unique short lease serializes the external edit with reminder
+mutations, so an older worker cannot overwrite a newer state. When visibility
+or a private recipient changes, the old message is only retired with generic
+text; current private content is sent separately to the new destination.
+Immediate edits initiated by Telegram callbacks or the Mini App claim the same
+revision-fenced queue instead of writing to Telegram outside this ordering.
+
+Completion stops notification delivery and leaves a short undo window. Its
+finalizer advances the runtime first, then keeps the expired item in a retry
+queue until Telegram has removed the Undo button; only then is the queue marker
+cleared. The completion snapshot retains the actor's Telegram identity and the
+completion time for every later render. Snooze moves the next notification
+forward. A recurring reminder does not materialize its next occurrence while
+the current one is incomplete.
 
 ## Data model
 
@@ -89,8 +106,8 @@ its next occurrence while the current one is incomplete.
 - `notification_deliveries`: deterministic delivery reservations and results.
 - `audit_events`: workspace-scoped history.
 
-The legacy bootstrap schema is in `infra/ydb/schema.sql`. Ordered, forward-safe
-migrations live in `infra/ydb/migrations`; `scripts/apply-ydb-migrations.sh`
+The complete greenfield schema is the first migration in
+`infra/ydb/migrations`; `scripts/apply-ydb-migrations.sh`
 records their versions and checksums in `schema_migrations`. Production deploys
 apply outstanding migrations after tests and before updating functions. An
 already recorded migration with a changed checksum aborts the deploy.
@@ -103,8 +120,7 @@ already recorded migration with a changed checksum aborts the deploy.
   uploads the Mini App, and resets the Telegram webhook.
 - The deploy job validates all required `production` secrets before changing
   cloud resources. Both functions receive the configured runtime service
-  account, and the universal UI is deployed only when the matching runtime flag
-  is explicitly enabled.
+  account.
 - Infrastructure resources use the `zvenfit-reminder-` prefix. Existing
   installations created with the former `payments-reminder-` prefix are not
   renamed in place by these scripts; provision or migrate them deliberately
@@ -112,25 +128,23 @@ already recorded migration with a changed checksum aborts the deploy.
 
 ## Known risks and gaps
 
-1. `ALLOWED_CHAT_ID` remains only for the disabled legacy dispatcher. Universal
-   authorization derives the workspace from the group chat or the authenticated
-   Mini App membership and scopes every repository operation by workspace.
-2. Telegram cannot enumerate all group members. Automatic join and activity
+1. Telegram cannot enumerate all group members. Automatic join and activity
    observation cover normal use, while the native picker imports at most ten
    selected users per request after `getChatMember` verification.
-3. If the workspace owner leaves, their membership becomes inactive and their
-   assignments pause, but ownership is retained for safe restoration on return.
-   Explicit ownership transfer is not implemented yet.
-4. A Telegram send whose result cannot be classified is stored as `unknown`.
+2. A workspace owner can transfer ownership to an active member. If the owner
+   leaves first, another Telegram administrator can recover ownership with
+   `/setup`; the repository allows recovery only while the old owner is inactive.
+3. A Telegram send whose result cannot be classified is stored as `unknown`.
    The dispatcher prefers a missed repeat over duplicate spam; operational
    reconciliation for unknown deliveries is still manual.
-5. Repository and service behavior is unit-tested, but there are no YDB
-   integration tests or automated Mini App component tests.
-6. There is no configured linter or formatter.
-7. The bootstrap service account receives broad folder roles including
-   `editor`, and CI installs the Yandex Cloud CLI through an unpinned
-   `curl | bash` script. Production hardening should split runtime/deploy
-   identities, reduce roles, and pin the installation path.
+4. Repository and service behavior is unit-tested, and Mini App user journeys
+   are covered by Playwright against an isolated HTTP mock. There are no YDB
+   integration tests yet.
+5. There is no configured linter or formatter.
+6. Runtime, invocation, and deployment use separate service accounts with
+   resource-scoped bindings. CI still installs the Yandex Cloud CLI through an
+   unpinned `curl | bash` script; pinning and checksum verification remain an
+   infrastructure hardening task.
 
 ## Verification baseline
 

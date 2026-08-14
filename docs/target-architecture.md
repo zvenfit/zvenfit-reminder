@@ -150,10 +150,11 @@ Important fields:
 - status: `scheduled`, `pending`, `overdue`, `completed`, or `cancelled`;
 - notification state: `waiting` or `stopped`;
 - assignment snapshot;
-- content, timezone, and notification-policy snapshot;
+- content, watcher, timezone, and notification-policy snapshot;
 - next notification timestamp and sequence;
 - snooze actor and expiry;
 - latest live Telegram chat/message IDs;
+- monotonic state revision and a short-lived delivery lease;
 - completion actor and timestamp;
 - undo deadline;
 - cancellation actor, reason, and timestamp;
@@ -180,7 +181,9 @@ instant, and sequence. Fields include:
 - occurrence and reminder IDs;
 - type: initial, repeat, escalation, or state update;
 - scheduled and claimed timestamps;
-- status: reserved, sent, failed, or unknown;
+- occurrence state revision captured by the reservation;
+- status: reserved, sending, sent, failed, unknown, or cancelled before send when the
+  occurrence, series, or private target changed after reservation;
 - Telegram chat/message ID;
 - sanitized error code and timestamps.
 
@@ -233,6 +236,10 @@ atomically clears the slot and calculates the first schedule date after `now`,
 so a long-overdue monthly task completed on 27 September next appears on 25
 October, not retroactively on 25 September. Undo simply reactivates the same
 occurrence; no newly materialized occurrence needs to be cancelled.
+The expired undo timestamp also acts as a retryable Telegram-cleanup queue: a
+separate finalization marker prevents repeated schedule calculations, and the
+timestamp is cleared only after the message edit is confirmed. Telegram's
+“not modified” and “not found” responses are treated as idempotent success.
 
 The Plan and ICS views may calculate future dates without persisting future
 occurrences. Persistence happens only for the current actionable occurrence.
@@ -249,9 +256,17 @@ dispatcher performs this transaction before a Telegram call:
    hours, and increment the sequence.
 5. Commit.
 
-Only then does it call Telegram. On success it stores the message ID, removes or
-compacts the previous live message, and marks the delivery `sent`. A definite
-failure is `failed`; an ambiguous timeout is `unknown` and is not retried.
+Immediately before calling Telegram, a second Serializable transaction verifies
+that the reservation revision and current occurrence revision still match,
+revalidates the current chat target, marks the delivery `sending`, and acquires
+an occurrence-scoped delivery lease. Every action that can change the target or
+state increments the revision and must not proceed while that lease is active.
+This closes the reserve-to-send race for private content and stale group
+mentions. On success the dispatcher stores the message ID, releases the lease,
+removes or compacts the previous live message, and marks the delivery `sent`. A
+definite failure is `failed`; an ambiguous timeout is `unknown` and is not
+retried. A lease left by a crashed 60-second function expires after two minutes;
+the next operation fences it as `unknown` before proceeding.
 
 Advancing the next notification before the external call means a worker crash
 can skip at most one ping but cannot stop the reminder chain or duplicate the

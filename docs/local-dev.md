@@ -4,7 +4,7 @@
 
 ```bash
 cp .env.example .env
-# Заполни BOT_TOKEN, YDB_*, YC_SA_JSON; ALLOWED_CHAT_ID нужен legacy-режиму
+# Заполни BOT_TOKEN, YDB_* и YC_SA_JSON
 
 chmod +x scripts/prepare-sa-key.sh
 ./scripts/prepare-sa-key.sh
@@ -40,6 +40,7 @@ npm run dev:cron -- --once  # один прогон
 | Режим | Команда | Описание |
 |-------|---------|----------|
 | Unit tests | `npm run test` | Без YC и Telegram |
+| Mini App E2E | `npm run test:e2e` | Playwright + изолированный mock API |
 | Backend dev | `npm run dev:bot` | HTTP :3000 + long polling |
 | Cron dev | `npm run dev:cron` | Локальный reminder-cron |
 | Mini App | `cd mini-app && npm run dev` | Vite :5173, proxy `/api` → :3000 |
@@ -91,26 +92,24 @@ DEV_USER_ID=123456789
 
 ```bash
 INIT_DATA=$(npm run dev:init-data --silent)
-curl -H "X-Telegram-Init-Data: $INIT_DATA" http://localhost:3000/api/rules
+curl -H "X-Telegram-Init-Data: $INIT_DATA" http://localhost:3000/api/workspaces
 ```
 
-## Universal reminders (локальный cutover)
+## Группы и напоминания
 
-Новый runtime по умолчанию выключен. Для изолированной проверки после применения
-всех YDB-миграций:
+После применения YDB-миграций:
 
-1. Установи `UNIVERSAL_REMINDERS_ENABLED=1` только в локальном `.env`.
-2. Запусти polling-бота и выполни `/setup` в нужной группе от имени её
+1. Запусти polling-бота и выполни `/setup` в нужной группе от имени её
    администратора. Команда создаст workspace с quiet hours `22:00–08:00`.
    Команду можно выполнить в нескольких группах: каждая создаёт отдельный workspace.
-3. Открой личный чат с ботом, выполни `/start`, нажми «Добавить участников» и
+2. Открой личный чат с ботом, выполни `/start`, нажми «Добавить участников» и
    выбери до 10 пользователей. При нескольких workspace кнопка подписана именем
    группы. Telegram покажет общий список, а backend добавит только подтверждённых
    участников выбранной группы. Вводить `/start` каждому
    участнику в группе не нужно.
-4. `/sync` остаётся запасной командой для повторной проверки уже известных боту
+3. `/sync` остаётся запасной командой для повторной проверки уже известных боту
    пользователей; будущие вступления и активность также учитываются автоматически.
-5. Для личных напоминаний ответственный должен один раз отправить боту `/start`
+4. Для личных напоминаний ответственный должен один раз отправить боту `/start`
    в личном чате.
 
 Первые новые endpoints:
@@ -118,24 +117,47 @@ curl -H "X-Telegram-Init-Data: $INIT_DATA" http://localhost:3000/api/rules
 ```text
 GET  /api/reminders
 POST /api/reminders
+PATCH /api/reminders/:id
 GET  /api/dashboard
 GET  /api/members
 POST /api/occurrences/:id/complete
 POST /api/occurrences/:id/snooze
 POST /api/occurrences/:id/undo-completion
 POST /api/reminders/:id/reassign
+POST /api/reminders/:id/pause
+POST /api/reminders/:id/resume
+POST /api/reminders/:id/archive
 PATCH /api/members/:userId/role
+PATCH /api/workspace/settings
+POST  /api/workspace/transfer-ownership
 ```
 
 Они требуют валидный `X-Telegram-Init-Data` и активное членство в workspace.
 `GET /api/workspaces` возвращает доступные пользователю группы. Остальные
-universal endpoints требуют `X-Workspace-Id`; backend повторно проверяет активное
-членство перед каждой операцией.
-В universal-режиме legacy `/api/rules` отключён.
+endpoints требуют `X-Workspace-Id`; backend повторно проверяет активное членство
+перед каждой операцией.
 
 Для визуальной проверки нового Mini App без запущенного backend открой
 `http://localhost:5173/?mock=1`. Mock-режим доступен только в Vite development
 и показывает просроченное, текущее и повторяющиеся напоминания.
+
+## Mini App E2E
+
+Первый запуск устанавливает Chromium, следующие используют уже загруженный
+браузер:
+
+```bash
+npm run test:e2e:install
+npm run test:e2e
+```
+
+Playwright сам запускает Vite и подменяет API на границе HTTP. Для этих тестов
+не нужны Telegram, облако, `.env` или YDB. Набор прогоняется в мобильном и
+десктопном размерах и проверяет переключение групп, права участника, создание,
+выполнение, отмену выполнения, отсрочку, переназначение и выдачу роли.
+
+Для проверки настоящих YDB-запросов используется локальный контейнер из
+следующего раздела. Этот интеграционный слой пока не включён в CI.
 
 ## YDB Local (offline)
 
@@ -160,8 +182,8 @@ YDB_ANONYMOUS_CREDENTIALS=1
 npm run dev:stack
 ```
 
-Скрипт сначала поднимает совместимую legacy-схему, а затем применяет по порядку
-файлы из `infra/ydb/migrations`. Выполненные версии и SHA-256 записываются в
+Скрипт применяет по порядку файлы из `infra/ydb/migrations`. Выполненные версии
+и SHA-256 записываются в
 `schema_migrations`; изменение уже применённого файла останавливает запуск.
 
 Для отдельного применения миграций к настроенной базе:
@@ -182,4 +204,3 @@ YDB_DATABASE=/local \
 | `SKIP_INIT_DATA_VALIDATION` | `0` | `1` — bypass initData в dev |
 | `DEV_USER_ID` | — | User id для bypass / генератора |
 | `VITE_DEV_INIT_DATA` | — | initData для Mini App в браузере |
-| `UNIVERSAL_REMINDERS_ENABLED` | `0` | Внутренний dev-флаг нового runtime; до миграций, bootstrap workspace и явного cutover оставлять `0` |

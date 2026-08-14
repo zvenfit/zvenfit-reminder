@@ -34,10 +34,46 @@ const createWorkspaceSchema = z
 
 export type CreateWorkspaceInput = z.input<typeof createWorkspaceSchema>;
 
+export const workspaceSettingsSchema = z
+  .object({
+    timezone: ianaTimezoneSchema,
+    quietHoursStart: localTimeSchema,
+    quietHoursEnd: localTimeSchema,
+    defaultAllDayReminderTime: localTimeSchema,
+  })
+  .strict()
+  .refine((settings) => settings.quietHoursStart !== settings.quietHoursEnd, {
+    message: "Quiet hours start and end must be different",
+    path: ["quietHoursEnd"],
+  });
+
+export type WorkspaceSettingsInput = z.input<typeof workspaceSettingsSchema>;
+
 export class WorkspaceChatAlreadyRegisteredError extends Error {
   constructor(readonly telegramChatId: number) {
     super(`Telegram chat ${telegramChatId} already belongs to a workspace`);
     this.name = "WorkspaceChatAlreadyRegisteredError";
+  }
+}
+
+export class WorkspaceSettingsForbiddenError extends Error {
+  constructor() {
+    super("Only an owner or organizer can change workspace settings");
+    this.name = "WorkspaceSettingsForbiddenError";
+  }
+}
+
+export class WorkspaceOwnershipTransferForbiddenError extends Error {
+  constructor() {
+    super("Only the active workspace owner can transfer ownership to an active member");
+    this.name = "WorkspaceOwnershipTransferForbiddenError";
+  }
+}
+
+export class WorkspaceOwnershipClaimForbiddenError extends Error {
+  constructor() {
+    super("Workspace ownership can only be claimed when the current owner is inactive");
+    this.name = "WorkspaceOwnershipClaimForbiddenError";
   }
 }
 
@@ -226,5 +262,237 @@ export class WorkspacesRepository {
     );
 
     return workspace;
+  }
+
+  async updateSettings(
+    workspaceId: string,
+    input: WorkspaceSettingsInput,
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<Workspace> {
+    const settings = workspaceSettingsSchema.parse(input);
+    return this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            SELECT * FROM workspaces
+            WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT role, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const actorRow = mapResultRows(resultSets[1])[0];
+        if (
+          !workspaceRow ||
+          getField(workspaceRow, "status") !== "active" ||
+          !actorRow ||
+          getField(actorRow, "status") !== "active" ||
+          !["owner", "organizer"].includes(String(getField(actorRow, "role")))
+        ) {
+          throw new WorkspaceSettingsForbiddenError();
+        }
+        const workspace = {
+          ...rowToWorkspace(workspaceRow),
+          ...settings,
+          updatedAt: now,
+        };
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $timezone AS Utf8;
+            DECLARE $quiet_hours_start AS Utf8;
+            DECLARE $quiet_hours_end AS Utf8;
+            DECLARE $default_all_day_reminder_time AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            UPDATE workspaces SET
+              timezone = $timezone,
+              quiet_hours_start = $quiet_hours_start,
+              quiet_hours_end = $quiet_hours_end,
+              default_all_day_reminder_time = $default_all_day_reminder_time,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id;
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $workspace_id, $now, $event_id, 'workspace',
+              'workspace.settings_changed', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $timezone: TypedValues.utf8(settings.timezone),
+            $quiet_hours_start: TypedValues.utf8(settings.quietHoursStart),
+            $quiet_hours_end: TypedValues.utf8(settings.quietHoursEnd),
+            $default_all_day_reminder_time: TypedValues.utf8(
+              settings.defaultAllDayReminderTime,
+            ),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(JSON.stringify(settings)),
+          },
+        );
+        return workspace;
+      }),
+    );
+  }
+
+  async transferOwnership(
+    workspaceId: string,
+    targetUserId: number,
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<Workspace> {
+    return this.changeOwner(workspaceId, targetUserId, actorUserId, false, now);
+  }
+
+  async claimVacantOwnership(
+    workspaceId: string,
+    targetUserId: number,
+    now: Date = new Date(),
+  ): Promise<Workspace> {
+    return this.changeOwner(workspaceId, targetUserId, targetUserId, true, now);
+  }
+
+  private async changeOwner(
+    workspaceId: string,
+    targetUserId: number,
+    actorUserId: number,
+    requireVacant: boolean,
+    now: Date,
+  ): Promise<Workspace> {
+    if (targetUserId === actorUserId && !requireVacant) {
+      throw new WorkspaceOwnershipTransferForbiddenError();
+    }
+    return this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $target_user_id AS Int64;
+            SELECT * FROM workspaces
+            WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT * FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT * FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $target_user_id
+            LIMIT 1;
+
+            SELECT owner.status AS status
+            FROM workspaces AS workspace
+            INNER JOIN workspace_members AS owner
+              ON owner.workspace_id = workspace.workspace_id
+              AND owner.user_id = workspace.owner_user_id
+            WHERE workspace.workspace_id = $workspace_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $target_user_id: TypedValues.int64(targetUserId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const actorRow = mapResultRows(resultSets[1])[0];
+        const targetRow = mapResultRows(resultSets[2])[0];
+        const ownerRow = mapResultRows(resultSets[3])[0];
+        const oldOwnerUserId = workspaceRow
+          ? Number(getField(workspaceRow, "owner_user_id"))
+          : null;
+        const commonAllowed =
+          workspaceRow &&
+          getField(workspaceRow, "status") === "active" &&
+          targetRow &&
+          getField(targetRow, "status") === "active";
+        const allowed = requireVacant
+          ? commonAllowed && ownerRow && getField(ownerRow, "status") !== "active"
+          : commonAllowed &&
+            actorRow &&
+            getField(actorRow, "status") === "active" &&
+            getField(actorRow, "role") === "owner" &&
+            oldOwnerUserId === actorUserId;
+        if (!allowed || oldOwnerUserId == null) {
+          throw requireVacant
+            ? new WorkspaceOwnershipClaimForbiddenError()
+            : new WorkspaceOwnershipTransferForbiddenError();
+        }
+        const workspace = {
+          ...rowToWorkspace(workspaceRow),
+          ownerUserId: targetUserId,
+          updatedAt: now,
+        };
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $old_owner_user_id AS Int64;
+            DECLARE $target_user_id AS Int64;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $old_owner_role AS Utf8;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            UPDATE workspaces SET owner_user_id = $target_user_id, updated_at = $now
+            WHERE workspace_id = $workspace_id;
+
+            UPDATE workspace_members SET
+              role = $old_owner_role,
+              role_granted_by = NULL,
+              role_granted_at = NULL,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id AND user_id = $old_owner_user_id;
+
+            UPDATE workspace_members SET
+              role = 'owner',
+              role_granted_by = $actor_user_id,
+              role_granted_at = $now,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id AND user_id = $target_user_id;
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $workspace_id, $now, $event_id, 'workspace',
+              'workspace.ownership_transferred', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $old_owner_user_id: TypedValues.int64(oldOwnerUserId),
+            $target_user_id: TypedValues.int64(targetUserId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $old_owner_role: TypedValues.utf8(requireVacant ? "member" : "organizer"),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $payload: TypedValues.jsonDocument(JSON.stringify({
+              fromUserId: oldOwnerUserId,
+              toUserId: targetUserId,
+              recovered: requireVacant,
+            })),
+          },
+        );
+        return workspace;
+      }),
+    );
   }
 }
