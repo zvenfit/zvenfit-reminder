@@ -13,5 +13,8 @@ test-results/
 .vscode/
 *.zip
 functions/**/dist/
+edge/**/dist/
+edge/**/.wrangler/
+edge/**/.dev.vars*
 packages/**/dist/
 mini-app/dist/

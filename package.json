@@ -4,6 +4,7 @@
   "workspaces": [
     "packages/*",
     "functions/*",
+    "edge/*",
     "mini-app"
   ],
   "scripts": {
@@ -18,6 +19,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "dev:bot": "npm run dev --workspace=@zvenfit-reminder/bot-webhook",
     "dev:cron": "npm run dev --workspace=@zvenfit-reminder/reminder-cron",
+    "dev:proxy": "npm run dev --workspace=@zvenfit-reminder/telegram-webhook-proxy",
     "dev:init-data": "node --env-file=.env --import tsx scripts/generate-init-data.ts",
     "dev:stack": "docker compose up -d && ./scripts/ydb-local-init.sh"
   },

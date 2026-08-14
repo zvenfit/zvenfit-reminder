@@ -44,6 +44,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
@@ -55,6 +56,7 @@ jobs:
           : "${BOT_TOKEN:?Missing production secret BOT_TOKEN}"
           : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
           : "${WEBHOOK_URL:?Missing production secret WEBHOOK_URL}"
+          : "${TELEGRAM_WEBHOOK_URL:?Missing production secret TELEGRAM_WEBHOOK_URL}"
           : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
           : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
           : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
@@ -172,35 +174,29 @@ jobs:
       - name: Set Telegram webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
 
-          function_info="$(yc serverless function get \
-            --name zvenfit-reminder-bot \
-            --format json)"
-          telegram_webhook_url="$(printf '%s' "$function_info" | jq -er '.http_invoke_url')"
-          if [[ ! "$telegram_webhook_url" =~ ^https://functions\.yandexcloud\.net/[a-z0-9]+$ ]]; then
-            echo "Unexpected Telegram webhook URL" >&2
-            exit 1
-          fi
-
-          webhook_ip="$(TELEGRAM_WEBHOOK_URL="$telegram_webhook_url" node --input-type=module -e '
-            import { resolve4 } from "node:dns/promises";
-            const hostname = new URL(process.env.TELEGRAM_WEBHOOK_URL).hostname;
-            const addresses = await resolve4(hostname);
-            if (addresses.length === 0) {
-              throw new Error(`No IPv4 address found for ${hostname}`);
+          telegram_webhook_url="$(TELEGRAM_WEBHOOK_URL="$TELEGRAM_WEBHOOK_URL" node --input-type=module -e '
+            const url = new URL(process.env.TELEGRAM_WEBHOOK_URL);
+            if (
+              url.protocol !== "https:" ||
+              !url.hostname.endsWith(".workers.dev") ||
+              (url.pathname !== "/" && url.pathname !== "") ||
+              url.search !== "" ||
+              url.hash !== ""
+            ) {
+              throw new Error("TELEGRAM_WEBHOOK_URL must be a root workers.dev URL");
             }
-            process.stdout.write(addresses[0]);
+            process.stdout.write(url.toString());
           ')"
           before_info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
           previous_error_date="$(printf '%s' "$before_info" | jq -er '.result.last_error_date // 0')"
 
-          # Pin the current A record so Telegram does not use a stale DNS result.
           response="$(curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
             --data-urlencode "url=${telegram_webhook_url}" \
-            --data-urlencode "ip_address=${webhook_ip}" \
             --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
             --data-urlencode 'allowed_updates=["message","callback_query","chat_member"]')"
           printf '%s' "$response" | jq -e '.ok == true and .result == true' >/dev/null
@@ -226,11 +222,9 @@ jobs:
             info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
             if printf '%s' "$info" | jq -e \
               --arg expected_url "$telegram_webhook_url" \
-              --arg expected_ip "$webhook_ip" \
               --argjson previous_error_date "$previous_error_date" '
                 .ok == true and
                 .result.url == $expected_url and
-                .result.ip_address == $expected_ip and
                 (.result.allowed_updates | sort) == (["message", "callback_query", "chat_member"] | sort) and
                 .result.pending_update_count == 0 and
                 ((.result.last_error_date // 0) <= $previous_error_date)

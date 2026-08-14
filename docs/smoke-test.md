@@ -9,8 +9,15 @@ curl "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"
 ```
 
 Ожидаем `url` = `${TELEGRAM_WEBHOOK_URL}` и отсутствие свежего
-`last_error_message`. Для production это прямой URL bot-функции без суффикса
-`/webhook`.
+`last_error_message`. Для production это корневой URL Cloudflare Worker.
+
+```bash
+curl "${TELEGRAM_WEBHOOK_URL}health"
+```
+
+Ожидаем `{ "ok": true }`. Этот запрос проверяет edge; окончательная проверка
+маршрута выполняется командой `/setup`, которая должна попасть через Worker в
+bot-функцию.
 
 ## 2. Команды бота
 

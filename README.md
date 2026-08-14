@@ -75,7 +75,7 @@ SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
 | `BOT_TOKEN` | Токен Telegram-бота |
 | `WEBHOOK_SECRET` | Случайный секрет для webhook |
 | `WEBHOOK_URL` | Базовый URL API Gateway для Mini App API |
-| `TELEGRAM_WEBHOOK_URL` | Прямой URL bot-функции без завершающего `/webhook` |
+| `TELEGRAM_WEBHOOK_URL` | Корневой URL Cloudflare Worker-прокси `https://<name>.<account>.workers.dev/` |
 | `MINI_APP_URL` | Публичный URL на `index.html` Mini App |
 | `DEFAULT_TIMEZONE` | Опционально, по умолчанию `Europe/Moscow` |
 
@@ -87,10 +87,14 @@ Production-пайплайн перед обновлением функций п�
 доступ к обновлению этих функций, миграциям этой базы и публикации в bucket.
 Статический JSON-ключ нужен только deploy-аккаунту.
 
-Telegram webhook использует прямой публичный invoke URL bot-функции, потому что
-Telegram не может стабильно подключаться к домену Yandex API Gateway. Root POST
-всё равно принимается только с `X-Telegram-Bot-Api-Secret-Token`; Mini App API
-остаётся за API Gateway и проверяет Telegram init data.
+Telegram webhook использует Cloudflare Worker из
+[`edge/telegram-webhook-proxy`](edge/telegram-webhook-proxy), потому что Telegram
+не может стабильно подключаться к публичным endpoint Yandex Cloud. Worker
+принимает только JSON POST с `X-Telegram-Bot-Api-Secret-Token`, ограничивает
+размер update и пересылает его в bot-функцию. Bot token в Cloudflare не хранится;
+секретный заголовок повторно проверяется функцией. Mini App API остаётся за API
+Gateway и проверяет Telegram init data. Инструкция развёртывания —
+[`docs/cloudflare-webhook-proxy.md`](docs/cloudflare-webhook-proxy.md).
 Исходящие запросы обеих функций к Telegram принудительно используют IPv4:
 serverless-egress Yandex Cloud доступен по IPv4, а DNS Telegram может первым
 вернуть IPv6-адрес.

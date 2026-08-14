@@ -1,0 +1,18 @@
+{
+  "name": "@zvenfit-reminder/telegram-webhook-proxy",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "dev": "wrangler dev",
+    "types": "wrangler types --env-interface WorkerEnv --include-runtime false worker-configuration.d.ts",
+    "typecheck": "wrangler types --env-interface WorkerEnv --include-runtime false --check worker-configuration.d.ts && tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.123.0"
+  }
+}
