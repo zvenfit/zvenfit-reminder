@@ -302,6 +302,217 @@ summary:focus-visible {
   font-size: 10px;
 }
 
+.timezone-field {
+  margin-bottom: 12px;
+}
+
+.timezone-input-wrap {
+  position: relative;
+  display: block;
+}
+
+.timezone-input-wrap__mark {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 15px;
+  display: grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--signal) 12%, transparent);
+  color: var(--signal);
+  font-size: 15px;
+  font-weight: 900;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.timezone-input-wrap input:not([type="checkbox"]) {
+  padding-left: 48px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.timezone-preview {
+  position: relative;
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  min-height: 108px;
+  overflow: hidden;
+  padding: 10px 14px 10px 10px;
+  border: 1px solid color-mix(in srgb, var(--signal) 23%, var(--line));
+  border-radius: 19px;
+  background:
+    radial-gradient(circle at 84% 0, color-mix(in srgb, var(--signal) 12%, transparent), transparent 38%),
+    var(--canvas);
+}
+
+.timezone-preview::after {
+  position: absolute;
+  right: -24px;
+  bottom: -40px;
+  width: 104px;
+  height: 104px;
+  border: 1px solid color-mix(in srgb, var(--signal) 12%, transparent);
+  border-radius: 50%;
+  content: "";
+  pointer-events: none;
+}
+
+.timezone-preview__clock {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-height: 86px;
+  padding: 14px 10px;
+  align-content: center;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #18223b, #334772);
+  box-shadow: 0 14px 30px rgba(24, 34, 59, 0.17);
+  color: #fff;
+  text-align: center;
+}
+
+.timezone-preview__clock small {
+  color: #b8c4dc;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.timezone-preview__clock b {
+  margin-top: 3px;
+  font-family: ui-rounded, "SF Pro Rounded", sans-serif;
+  font-size: 25px;
+  letter-spacing: -0.055em;
+}
+
+.timezone-preview__place {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  min-width: 0;
+}
+
+.timezone-preview__place b {
+  overflow: hidden;
+  font-family: ui-rounded, "SF Pro Rounded", sans-serif;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timezone-preview__place small {
+  margin-top: 2px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.timezone-preview__place code {
+  overflow: hidden;
+  margin-top: 9px;
+  color: var(--ink-faint);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timezone-preview__default {
+  position: relative;
+  z-index: 1;
+  align-self: start;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success) 12%, var(--paper));
+  color: var(--success);
+  font-size: 8px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.timezone-preview--invalid {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--line));
+}
+
+.timezone-preview--invalid .timezone-preview__clock {
+  background: linear-gradient(145deg, #384052, #4a5265);
+}
+
+.timezone-device {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  width: 100%;
+  min-height: 55px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: var(--paper);
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+}
+
+.timezone-device:hover {
+  border-color: color-mix(in srgb, var(--signal) 38%, var(--line));
+  transform: translateY(-1px);
+}
+
+.timezone-device[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--success) 36%, var(--line));
+  background: color-mix(in srgb, var(--success) 5%, var(--paper));
+}
+
+.timezone-device__icon {
+  display: grid;
+  width: 35px;
+  height: 35px;
+  place-items: center;
+  border-radius: 11px;
+  background: var(--paper-muted);
+  color: var(--signal);
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.timezone-device > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+}
+
+.timezone-device b {
+  font-size: 11px;
+}
+
+.timezone-device small {
+  color: var(--ink-faint);
+  font-size: 9px;
+}
+
+.timezone-device strong {
+  color: var(--signal);
+  font-size: 9px;
+}
+
+.timezone-device[aria-pressed="true"] strong {
+  color: var(--success);
+}
+
+.timezone-help {
+  margin: 10px 2px 0;
+  color: var(--ink-faint);
+  font-size: 10px;
+}
+
 .settings-save {
   width: 100%;
   min-height: 54px;
@@ -1509,6 +1720,29 @@ button:disabled {
 
   .rhythm-map__heading > span:last-child {
     text-align: left;
+  }
+
+  .timezone-preview {
+    grid-template-columns: 78px minmax(0, 1fr);
+    gap: 12px;
+  }
+
+  .timezone-preview__clock {
+    min-height: 78px;
+  }
+
+  .timezone-preview__clock b {
+    font-size: 21px;
+  }
+
+  .timezone-preview__default {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+  }
+
+  .timezone-preview__place {
+    padding-right: 4px;
   }
 
   .ownership-controls {

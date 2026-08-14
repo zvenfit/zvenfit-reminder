@@ -26,6 +26,12 @@ import {
   type WorkspaceMember,
   type Workspace,
 } from "./api";
+import {
+  buildTimezoneOptions,
+  describeTimezone,
+  detectDeviceTimezone,
+  DEFAULT_TIMEZONE,
+} from "./timezones";
 import "./styles.css";
 
 type View = "home" | "create" | "settings";
@@ -62,21 +68,6 @@ interface SettingsFormState {
   quietHoursEnd: string;
   defaultAllDayReminderTime: string;
 }
-
-const TIMEZONES = [
-  "Europe/Kaliningrad",
-  "Europe/Moscow",
-  "Europe/Samara",
-  "Asia/Yekaterinburg",
-  "Asia/Omsk",
-  "Asia/Novosibirsk",
-  "Asia/Krasnoyarsk",
-  "Asia/Irkutsk",
-  "Asia/Yakutsk",
-  "Asia/Vladivostok",
-  "Asia/Magadan",
-  "Asia/Kamchatka",
-];
 
 function localDateInputValue(date = new Date()): string {
   const year = date.getFullYear();
@@ -295,7 +286,7 @@ function App() {
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [form, setForm] = useState<ReminderFormState>(() => emptyForm());
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>({
-    timezone: "Europe/Moscow",
+    timezone: DEFAULT_TIMEZONE,
     quietHoursStart: "22:00",
     quietHoursEnd: "08:00",
     defaultAllDayReminderTime: "09:00",
@@ -318,6 +309,14 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
+  const timezoneReference = useMemo(() => new Date(), []);
+  const timezoneOptions = useMemo(
+    () => view === "settings" ? buildTimezoneOptions(timezoneReference) : [],
+    [timezoneReference, view],
+  );
+  const deviceTimezone = useMemo(() => detectDeviceTimezone(), []);
+  const selectedTimezone = describeTimezone(settingsForm.timezone, timezoneReference);
+  const deviceTimezonePresentation = describeTimezone(deviceTimezone, timezoneReference);
 
   useEffect(() => {
     if (!undoableOccurrence?.undoUntil) return;
@@ -855,19 +854,60 @@ function App() {
           <section className="form-panel settings-panel">
             <p className="eyebrow">Часовой пояс</p>
             <h2>Местное время группы</h2>
-            <label className="field">
-              <span>Часовой пояс</span>
-              <input
-                list="timezone-options"
-                required
-                value={settingsForm.timezone}
-                onChange={(event) => setSettingsForm({ ...settingsForm, timezone: event.target.value })}
-              />
+            <label className="field timezone-field">
+              <span>Город или часовой пояс</span>
+              <span className="timezone-input-wrap">
+                <span className="timezone-input-wrap__mark" aria-hidden="true">⌖</span>
+                <input
+                  list="timezone-options"
+                  required
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder="Например, Москва или Europe/Berlin"
+                  value={settingsForm.timezone}
+                  aria-describedby="timezone-help"
+                  onChange={(event) => setSettingsForm({ ...settingsForm, timezone: event.target.value })}
+                />
+              </span>
               <datalist id="timezone-options">
-                {TIMEZONES.map((timezone) => <option key={timezone} value={timezone} />)}
+                {timezoneOptions.map((timezone) => (
+                  <option key={timezone.id} value={timezone.id} label={timezone.optionLabel} />
+                ))}
               </datalist>
-              <small>Используется для новых напоминаний. Уже созданные сохраняют свой график.</small>
             </label>
+
+            <div className={`timezone-preview${selectedTimezone ? "" : " timezone-preview--invalid"}`} aria-live="polite">
+              <span className="timezone-preview__clock">
+                <small>Сейчас</small>
+                <b>{selectedTimezone?.localTime ?? "—:—"}</b>
+              </span>
+              <span className="timezone-preview__place">
+                <b>{selectedTimezone?.city ?? "Выберите город"}</b>
+                <small>{selectedTimezone ? `${selectedTimezone.region} · ${selectedTimezone.offset}` : "Нужна корректная IANA-зона"}</small>
+                <code>{settingsForm.timezone || DEFAULT_TIMEZONE}</code>
+              </span>
+              {settingsForm.timezone === DEFAULT_TIMEZONE ? <span className="timezone-preview__default">По умолчанию</span> : null}
+            </div>
+
+            {deviceTimezonePresentation ? (
+              <button
+                className="timezone-device"
+                type="button"
+                aria-pressed={settingsForm.timezone === deviceTimezone}
+                onClick={() => setSettingsForm({ ...settingsForm, timezone: deviceTimezone })}
+              >
+                <span className="timezone-device__icon" aria-hidden="true">◎</span>
+                <span>
+                  <b>Время устройства</b>
+                  <small>{deviceTimezonePresentation.city} · {deviceTimezonePresentation.offset}</small>
+                </span>
+                <strong>{settingsForm.timezone === deviceTimezone ? "Выбрано" : "Использовать"}</strong>
+              </button>
+            ) : null}
+
+            <p className="timezone-help" id="timezone-help">
+              Новые напоминания возьмут это местное время. Уже созданные сохранят свой график.
+            </p>
           </section>
 
           <section className="form-panel settings-panel">

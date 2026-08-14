@@ -509,11 +509,21 @@ test("updates group rhythm and confirms ownership transfer", async ({ page }) =>
 
   await page.getByRole("button", { name: /Ритм группы/ }).click();
   await expect(page.getByRole("heading", { name: "Когда можно звенеть" })).toBeVisible();
+  const timezonePreview = page.locator(".timezone-preview");
+  await expect(timezonePreview).toContainText("Москва");
+  await expect(timezonePreview).toContainText("UTC+3");
+  await page.getByLabel("Город или часовой пояс").fill("Asia/Yekaterinburg");
+  await expect(timezonePreview).toContainText("Екатеринбург");
+  await expect(timezonePreview).toContainText("UTC+5");
   await page.getByLabel("Начало тишины").fill("23:00");
   await page.getByLabel("Конец тишины").fill("07:30");
   await page.getByRole("button", { name: "Сохранить настройки" }).click();
   await expect(page.getByText("Ритм группы обновлён")).toBeVisible();
-  expect(state.workspaces[0]).toMatchObject({ quietHoursStart: "23:00", quietHoursEnd: "07:30" });
+  expect(state.workspaces[0]).toMatchObject({
+    timezone: "Asia/Yekaterinburg",
+    quietHoursStart: "23:00",
+    quietHoursEnd: "07:30",
+  });
 
   await page.getByLabel("Новый владелец").selectOption("20");
   await page.getByRole("button", { name: "Передать управление" }).click();
