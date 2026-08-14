@@ -7,7 +7,7 @@ runtime, clean schema, current-action screen, creation flow, group settings,
 roles, and cutover code are complete. The fuller Plan/History experience,
 calendar feeds, and the explicitly listed hardening work remain.
 
-## Phase 0: target specification
+## Phase 0: target specification — completed
 
 - Keep the current implementation documented as a prototype.
 - Approve product behavior, UX direction, target data model, and cutover plan.
@@ -16,7 +16,7 @@ calendar feeds, and the explicitly listed hardening work remain.
 Exit criterion: the product and architecture documents contain no unresolved
 behavioral decisions required for implementation.
 
-## Phase 1: shared domain and scheduling
+## Phase 1: shared domain and scheduling — completed
 
 - Replace payment-specific shared types with workspace, reminder, occurrence,
   delivery, role, and audit types.
@@ -50,7 +50,6 @@ tests independent of YDB and Telegram.
 - Implement occurrence materialization and notification reservation.
 - Use the per-reminder runtime row to enforce one incomplete occurrence without
   relying on a scan for absence.
-- Add repository integration tests against local YDB.
 
 No row-level conversion is required because the pre-release data is disposable.
 The normal deploy remains non-destructive; an explicit guarded reset command is
@@ -59,7 +58,12 @@ documented in [database-reset.md](database-reset.md).
 Exit criterion: the new repositories pass concurrency and authorization tests
 and no service method accepts a bare unscoped entity ID.
 
-## Phase 3: API and authorization
+Автоматизированный integration suite с реальной локальной YDB остаётся
+отдельным quality gate и отражён как известный пробел в
+[testing.md](testing.md). Транзакционная и tenant-логика сейчас покрыта
+репозиторными тестами с управляемым YDB adapter.
+
+## Phase 3: API and authorization — completed
 
 - Add workspace membership and role management.
 - Replace rule CRUD with reminder, dashboard, plan, history, and occurrence
@@ -81,7 +85,7 @@ Tests:
 
 Exit criterion: handler and service tests cover every role and state transition.
 
-## Phase 4: dispatcher and Telegram UX
+## Phase 4: dispatcher and Telegram UX — completed
 
 - Replace the current cron rule scan with due-occurrence materialization and
   reserved delivery processing.
@@ -146,16 +150,22 @@ observe updated events after their normal refresh delay.
 Native Google OAuth synchronization remains a separate later project and is not
 required for this release.
 
-## Phase 7: cutover — implemented in code, production reset pending
+## Phase 7: production cutover — completed
 
-1. Reset the disposable production database with the guarded reset command.
-2. Deploy the functions and Mini App from `main`.
-3. Run production smoke tests for group send, private send, snooze, completion,
-   escalation, recurrence, settings, and ownership transfer.
-4. Recreate any desired reminders manually.
+1. The disposable legacy database was replaced by the ordered greenfield
+   schema.
+2. Both functions and the Mini App were deployed from `main`.
+3. API Gateway and Cloud Timer were switched to a resource-scoped invoker
+   account; both functions run under the dedicated runtime account.
+4. GitHub Actions uses the dedicated deploy account, and the legacy broad
+   service account and its key were removed after a successful deployment.
+5. The automated production webhook and public Mini App smoke tests passed.
 
 Legacy repositories, APIs, feature flags, and schema files have been removed.
 No destructive DDL runs automatically during a normal application deploy.
+The remaining manual release check is the full user journey in a Telegram test
+group described in [smoke-test.md](smoke-test.md); it is intentionally not
+simulated with production user identities in CI.
 
 ## Verification gates
 

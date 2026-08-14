@@ -50,11 +50,15 @@ chmod +x infra/setup.sh
 ./scripts/apply-ydb-migrations.sh
 ```
 
-Создать Cloud Timer для `zvenfit-reminder-cron`:
+Создать Cloud Timer для `zvenfit-reminder-cron` или обновить уже существующий.
+`SA_ID` должен принадлежать отдельному `zvenfit-reminder-invoker-sa`:
 
 ```bash
 SA_ID=... YC_FOLDER_ID=... ./infra/create-timer.sh
 ```
+
+Скрипт идемпотентен: при повторном запуске он сохраняет тот же trigger и
+обновляет расписание, функцию и invoker service account.
 
 Настроить API Gateway по `infra/api-gateway.yaml` и привязать к функции бота.
 
