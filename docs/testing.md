@@ -54,7 +54,9 @@ YDB никогда не используются в Playwright-тестах.
 - разворачивает обе функции под runtime service account;
 - публикует Mini App;
 - устанавливает webhook и отправляет подписанный синтетический update через
-  прямой URL bot-функции;
+  Cloudflare Worker;
+- вызывает защищённый `/health/telegram` внутри новой версии bot-функции и
+  проверяет реальный исходящий `getMe` к Telegram API;
 - проверяет через `getWebhookInfo`, что URL и `allowed_updates` сохранены.
 
 Этот автоматический smoke подтверждает инфраструктурный маршрут, но не заменяет

@@ -144,6 +144,20 @@ jobs:
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
             --environment NODE_ENV=production \
             --environment BOT_INFO_JSON="$bot_info_json"
+      - name: Verify Telegram API from function runtime
+        env:
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          health_event="$(jq -nc --arg secret "$WEBHOOK_SECRET" '{
+            httpMethod: "POST",
+            path: "/health/telegram",
+            headers: {"X-Telegram-Bot-Api-Secret-Token": $secret}
+          }')"
+          health_response="$(yc serverless function invoke zvenfit-reminder-bot --data "$health_event")"
+          printf '%s' "$health_response" | jq -e '
+            .statusCode == 200 and
+            ((.body | fromjson).ok == true)
+          ' >/dev/null
       - name: Deploy reminder-cron
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}

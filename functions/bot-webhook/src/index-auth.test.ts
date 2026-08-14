@@ -2,6 +2,7 @@ import { getDefaultResultOrder } from "node:dns";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildWebhookFailureResponse,
+  isTelegramHealthRequest,
   isWebhookRequest,
   resolveInitData,
 } from "./index.js";
@@ -43,6 +44,14 @@ describe("isWebhookRequest", () => {
     expect(isWebhookRequest("/", "GET")).toBe(false);
     expect(isWebhookRequest("/api/workspaces", "POST")).toBe(false);
     expect(isWebhookRequest("/other", "POST")).toBe(false);
+  });
+});
+
+describe("isTelegramHealthRequest", () => {
+  it("accepts only the protected runtime health endpoint", () => {
+    expect(isTelegramHealthRequest("/health/telegram", "POST")).toBe(true);
+    expect(isTelegramHealthRequest("/health/telegram", "GET")).toBe(false);
+    expect(isTelegramHealthRequest("/health", "POST")).toBe(false);
   });
 });
 

@@ -65,6 +65,10 @@ export function isWebhookRequest(path: string, method: string): boolean {
   return method === "POST" && (path === "/webhook" || path === "/");
 }
 
+export function isTelegramHealthRequest(path: string, method: string): boolean {
+  return method === "POST" && path === "/health/telegram";
+}
+
 export function buildWebhookFailureResponse(update: unknown): ApiGatewayResponse {
   if (!update || typeof update !== "object") {
     return { statusCode: 200, body: "" };
@@ -599,6 +603,24 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
 export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   const path = getPath(event);
   const method = event.httpMethod ?? "GET";
+
+  if (isTelegramHealthRequest(path, method)) {
+    const config = loadConfig();
+    const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
+    if (secret !== config.webhookSecret) {
+      return { statusCode: 403, body: "Forbidden" };
+    }
+
+    try {
+      await getBot().api.getMe();
+      return jsonResponse(200, { ok: true });
+    } catch (error) {
+      console.error("Telegram API health check failed", {
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+      return jsonResponse(502, { ok: false });
+    }
+  }
 
   if (path.startsWith("/api")) {
     return handleApi(event);
