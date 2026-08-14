@@ -33,6 +33,10 @@ The Telegram webhook uses the bot function's public invoke URL because Telegram
 connections to the Yandex API Gateway domain time out in production. The root
 POST route still requires Telegram's configured secret header before parsing an
 update. Mini App API traffic remains behind API Gateway and verified init data.
+Telegram API calls are time-bounded. If an update cannot be processed, the
+webhook returns a Bot API method in its HTTP response so Telegram itself can
+show a generic retry message or callback alert without another outbound request.
+The response never exposes exception details or configuration values.
 
 The Mini App is built as static files and uploaded to Yandex Object Storage.
 Both functions bundle application code with esbuild and install the YDB runtime

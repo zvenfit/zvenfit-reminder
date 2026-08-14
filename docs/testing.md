@@ -28,6 +28,9 @@
 - предупреждение, если личный чат с ботом ещё не открыт;
 - работоспособность встроенного preview-режима и сохранение созданного элемента.
 
+Webhook unit tests additionally verify the secret-protected direct function
+route and Telegram-native fallback replies for message and callback failures.
+
 Артефакты падения — скриншот и Playwright trace — сохраняются в
 `test-results/` и не коммитятся.
 

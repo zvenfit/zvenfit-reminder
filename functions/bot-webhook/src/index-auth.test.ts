@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { isWebhookRequest, resolveInitData } from "./index.js";
+import {
+  buildWebhookFailureResponse,
+  isWebhookRequest,
+  resolveInitData,
+} from "./index.js";
 
 describe("resolveInitData", () => {
   afterEach(() => {
@@ -34,5 +38,34 @@ describe("isWebhookRequest", () => {
     expect(isWebhookRequest("/", "GET")).toBe(false);
     expect(isWebhookRequest("/api/workspaces", "POST")).toBe(false);
     expect(isWebhookRequest("/other", "POST")).toBe(false);
+  });
+});
+
+describe("buildWebhookFailureResponse", () => {
+  it("asks Telegram to display a message error without another API request", () => {
+    const response = buildWebhookFailureResponse({ message: { chat: { id: -42 } } });
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body ?? "{}")).toMatchObject({
+      method: "sendMessage",
+      chat_id: -42,
+    });
+  });
+
+  it("shows callback failures as an alert", () => {
+    const response = buildWebhookFailureResponse({ callback_query: { id: "callback-1" } });
+
+    expect(JSON.parse(response.body ?? "{}")).toMatchObject({
+      method: "answerCallbackQuery",
+      callback_query_id: "callback-1",
+      show_alert: true,
+    });
+  });
+
+  it("acknowledges updates without a user-visible reply target", () => {
+    expect(buildWebhookFailureResponse({ update_id: 1 })).toEqual({
+      statusCode: 200,
+      body: "",
+    });
   });
 });

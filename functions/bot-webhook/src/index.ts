@@ -31,6 +31,9 @@ import { handleWorkspaceApi } from "./workspace-api.js";
 import { observeTelegramIdentity } from "./telegram-observation.js";
 
 let botInstance: Bot | null = null;
+const TELEGRAM_API_TIMEOUT_SECONDS = 5;
+const WEBHOOK_FAILURE_TEXT =
+  "⚠️ Бот временно не может связаться с Telegram API. Попробуйте ещё раз через минуту.";
 
 export function resolveInitData(initData: string | undefined, botToken: string): ParsedInitData {
   if (process.env.SKIP_INIT_DATA_VALIDATION === "1" && process.env.NODE_ENV === "development") {
@@ -57,6 +60,37 @@ export function isWebhookRequest(path: string, method: string): boolean {
   return method === "POST" && (path === "/webhook" || path === "/");
 }
 
+export function buildWebhookFailureResponse(update: unknown): ApiGatewayResponse {
+  if (!update || typeof update !== "object") {
+    return { statusCode: 200, body: "" };
+  }
+
+  const value = update as {
+    message?: { chat?: { id?: unknown } };
+    callback_query?: { id?: unknown };
+  };
+  const callbackQueryId = value.callback_query?.id;
+  if (typeof callbackQueryId === "string") {
+    return jsonResponse(200, {
+      method: "answerCallbackQuery",
+      callback_query_id: callbackQueryId,
+      text: WEBHOOK_FAILURE_TEXT,
+      show_alert: true,
+    });
+  }
+
+  const chatId = value.message?.chat?.id;
+  if (typeof chatId === "number" || typeof chatId === "string") {
+    return jsonResponse(200, {
+      method: "sendMessage",
+      chat_id: chatId,
+      text: WEBHOOK_FAILURE_TEXT,
+    });
+  }
+
+  return { statusCode: 200, body: "" };
+}
+
 export function getBot(): Bot {
   if (botInstance) {
     return botInstance;
@@ -72,10 +106,10 @@ export function getBot(): Bot {
   const cachedBotInfo = process.env.BOT_INFO_JSON
     ? JSON.parse(process.env.BOT_INFO_JSON) as NonNullable<BotConfig<Context>["botInfo"]>
     : undefined;
-  const bot = new Bot(
-    config.botToken,
-    cachedBotInfo ? { botInfo: cachedBotInfo } : undefined,
-  );
+  const bot = new Bot(config.botToken, {
+    ...(cachedBotInfo ? { botInfo: cachedBotInfo } : {}),
+    client: { timeoutSeconds: TELEGRAM_API_TIMEOUT_SECONDS },
+  });
   const observeSyncedGroupUser = (chatId: number) => async (user: SyncedTelegramUser) =>
     observeTelegramIdentity(
       config,
@@ -575,8 +609,16 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
     const bot = getBot();
     await ensureBotInitialized(bot);
     const update = JSON.parse(event.body ?? "{}");
-    await bot.handleUpdate(update);
-    return { statusCode: 200, body: "" };
+    try {
+      await bot.handleUpdate(update);
+      return { statusCode: 200, body: "" };
+    } catch (error) {
+      console.error("Telegram update processing failed", {
+        updateId: typeof update?.update_id === "number" ? update.update_id : null,
+        error: error instanceof Error ? error.message : "Unknown error",
+      });
+      return buildWebhookFailureResponse(update);
+    }
   }
 
   return jsonResponse(404, { error: "Not found" });
