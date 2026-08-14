@@ -30,6 +30,7 @@ import {
 import { renderOccurrenceAction } from "./occurrence-message.js";
 import { handleWorkspaceApi } from "./workspace-api.js";
 import { observeTelegramIdentity } from "./telegram-observation.js";
+import { telegramClientOptions } from "./telegram-network.js";
 
 let botInstance: Bot | null = null;
 const TELEGRAM_API_TIMEOUT_SECONDS = 5;
@@ -112,7 +113,7 @@ export function getBot(): Bot {
     : undefined;
   const bot = new Bot(config.botToken, {
     ...(cachedBotInfo ? { botInfo: cachedBotInfo } : {}),
-    client: { timeoutSeconds: TELEGRAM_API_TIMEOUT_SECONDS },
+    client: telegramClientOptions(TELEGRAM_API_TIMEOUT_SECONDS),
   });
   const observeSyncedGroupUser = (chatId: number) => async (user: SyncedTelegramUser) =>
     observeTelegramIdentity(
