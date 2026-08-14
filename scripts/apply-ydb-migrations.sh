@@ -28,7 +28,12 @@ run_ydb() {
     return
   fi
 
-  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "${YDB_AUTH_ARGS[@]}" "$@"
+  if [[ ${#YDB_AUTH_ARGS[@]} -gt 0 ]]; then
+    ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "${YDB_AUTH_ARGS[@]}" "$@"
+    return
+  fi
+
+  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "$@"
 }
 
 apply_file() {
@@ -41,7 +46,12 @@ apply_file() {
     return
   fi
 
-  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "${YDB_AUTH_ARGS[@]}" sql -f "$source_file"
+  if [[ ${#YDB_AUTH_ARGS[@]} -gt 0 ]]; then
+    ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" "${YDB_AUTH_ARGS[@]}" sql -f "$source_file"
+    return
+  fi
+
+  ydb -e "$YDB_ENDPOINT" -d "$YDB_DATABASE" sql -f "$source_file"
 }
 
 checksum_file() {
