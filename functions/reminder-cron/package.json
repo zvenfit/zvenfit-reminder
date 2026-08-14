@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "npm run build --workspace=@zvenfit-reminder/shared && esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --external:ydb-sdk --external:@yandex-cloud/nodejs-sdk --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" && node scripts/prepare-deploy.mjs && cd dist && npm install --omit=dev --no-package-lock",
+    "build": "npm run build --workspace=@zvenfit-reminder/shared && esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js --external:ydb-sdk --external:@yandex-cloud/nodejs-sdk --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" && node scripts/prepare-deploy.mjs && cd dist && npm ci --omit=dev --ignore-scripts && cd ../../.. && node scripts/prune-function-deploy.mjs functions/reminder-cron/dist",
     "dev": "npm run build --workspace=@zvenfit-reminder/shared && node --env-file=../../.env --import tsx src/run-once.ts",
     "typecheck": "npm run build --workspace=@zvenfit-reminder/shared && tsc --noEmit",
     "test": "vitest run"

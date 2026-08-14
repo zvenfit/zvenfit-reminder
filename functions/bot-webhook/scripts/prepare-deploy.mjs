@@ -1,21 +1,9 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 const distDir = join(process.cwd(), "dist");
+const runtimePackageDir = join(process.cwd(), "../../infra/function-runtime");
 mkdirSync(distDir, { recursive: true });
-
-writeFileSync(
-  join(distDir, "package.json"),
-  JSON.stringify(
-    {
-      name: "@zvenfit-reminder/bot-webhook-deploy",
-      type: "module",
-      dependencies: {
-        "ydb-sdk": "^5.11.1",
-        "@yandex-cloud/nodejs-sdk": "^2.9.3",
-      },
-    },
-    null,
-    2,
-  ),
-);
+rmSync(join(distDir, "node_modules"), { recursive: true, force: true });
+copyFileSync(join(runtimePackageDir, "package.json"), join(distDir, "package.json"));
+copyFileSync(join(runtimePackageDir, "package-lock.json"), join(distDir, "package-lock.json"));

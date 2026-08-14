@@ -96,13 +96,15 @@ jobs:
           cd functions/bot-webhook
           npm run build
           cd dist
-          zip -r ../../../bot-webhook.zip .
+          zip -9 -r ../../../bot-webhook.zip .
       - name: Package reminder-cron
         run: |
           cd functions/reminder-cron
           npm run build
           cd dist
-          zip -r ../../../reminder-cron.zip .
+          zip -9 -r ../../../reminder-cron.zip .
+      - name: Verify function archive sizes
+        run: node scripts/verify-function-archives.mjs bot-webhook.zip reminder-cron.zip
       - name: Deploy bot-webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}

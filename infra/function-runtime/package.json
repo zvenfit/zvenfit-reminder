@@ -1,0 +1,10 @@
+{
+  "name": "@zvenfit-reminder/function-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@yandex-cloud/nodejs-sdk": "2.9.3",
+    "ydb-sdk": "5.11.1"
+  }
+}

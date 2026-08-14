@@ -118,6 +118,8 @@ already recorded migration with a changed checksum aborts the deploy.
   install, typecheck, test, build.
 - A push to `main` applies outstanding YDB migrations, deploys both functions,
   uploads the Mini App, and resets the Telegram webhook.
+- Function deploy directories are pruned to the runtime-only YDB dependency
+  surface, and CI rejects archives above 3.4 MB before direct upload.
 - The deploy job validates all required `production` secrets before changing
   cloud resources. Both functions receive the configured runtime service
   account.
