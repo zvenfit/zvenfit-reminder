@@ -44,7 +44,6 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
@@ -56,7 +55,6 @@ jobs:
           : "${BOT_TOKEN:?Missing production secret BOT_TOKEN}"
           : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
           : "${WEBHOOK_URL:?Missing production secret WEBHOOK_URL}"
-          : "${TELEGRAM_WEBHOOK_URL:?Missing production secret TELEGRAM_WEBHOOK_URL}"
           : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
           : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
           : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
@@ -116,14 +114,16 @@ jobs:
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
           YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ secrets.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
+          EXPECTED_BOT_USERNAME: zvenfit_reminder_bot
         run: |
           bot_info_response="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getMe")"
-          bot_info_json="$(printf '%s' "$bot_info_response" | jq -ce '
+          bot_info_json="$(printf '%s' "$bot_info_response" | jq -ce \
+            --arg expected "$EXPECTED_BOT_USERNAME" '
             if .ok == true and
               (.result.id | type) == "number" and
-              (.result.username | type) == "string"
+              .result.username == $expected
             then .result
-            else error("Telegram getMe failed")
+            else error("Telegram getMe returned an unexpected bot")
             end
           ')"
           yc serverless function version create \
@@ -172,11 +172,35 @@ jobs:
       - name: Set Telegram webhook
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
+          set -euo pipefail
+
+          function_info="$(yc serverless function get \
+            --name zvenfit-reminder-bot \
+            --format json)"
+          telegram_webhook_url="$(printf '%s' "$function_info" | jq -er '.http_invoke_url')"
+          if [[ ! "$telegram_webhook_url" =~ ^https://functions\.yandexcloud\.net/[a-z0-9]+$ ]]; then
+            echo "Unexpected Telegram webhook URL" >&2
+            exit 1
+          fi
+
+          webhook_ip="$(TELEGRAM_WEBHOOK_URL="$telegram_webhook_url" node --input-type=module -e '
+            import { resolve4 } from "node:dns/promises";
+            const hostname = new URL(process.env.TELEGRAM_WEBHOOK_URL).hostname;
+            const addresses = await resolve4(hostname);
+            if (addresses.length === 0) {
+              throw new Error(`No IPv4 address found for ${hostname}`);
+            }
+            process.stdout.write(addresses[0]);
+          ')"
+          before_info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
+          previous_error_date="$(printf '%s' "$before_info" | jq -er '.result.last_error_date // 0')"
+
+          # Pin the current A record so Telegram does not use a stale DNS result.
           response="$(curl -sS -X POST "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-            --data-urlencode "url=${TELEGRAM_WEBHOOK_URL}" \
+            --data-urlencode "url=${telegram_webhook_url}" \
+            --data-urlencode "ip_address=${webhook_ip}" \
             --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
             --data-urlencode 'allowed_updates=["message","callback_query","chat_member"]')"
           printf '%s' "$response" | jq -e '.ok == true and .result == true' >/dev/null
@@ -191,25 +215,55 @@ jobs:
               text: "health"
             }
           }')"
-          curl -fsS -X POST "${TELEGRAM_WEBHOOK_URL}" \
+          curl -fsS -X POST "${telegram_webhook_url}" \
             --header "Content-Type: application/json" \
             --header "X-Telegram-Bot-Api-Secret-Token: ${WEBHOOK_SECRET}" \
             --data "$smoke_payload" \
             >/dev/null
 
-          info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
-          printf '%s' "$info" | jq -e --arg expected "${TELEGRAM_WEBHOOK_URL}" '
-            .ok == true and
-            .result.url == $expected and
-            (.result.allowed_updates | sort) == (["message", "callback_query", "chat_member"] | sort)
-          ' >/dev/null
+          webhook_ready=false
+          for attempt in {1..12}; do
+            info="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo")"
+            if printf '%s' "$info" | jq -e \
+              --arg expected_url "$telegram_webhook_url" \
+              --arg expected_ip "$webhook_ip" \
+              --argjson previous_error_date "$previous_error_date" '
+                .ok == true and
+                .result.url == $expected_url and
+                .result.ip_address == $expected_ip and
+                (.result.allowed_updates | sort) == (["message", "callback_query", "chat_member"] | sort) and
+                .result.pending_update_count == 0 and
+                ((.result.last_error_date // 0) <= $previous_error_date)
+              ' >/dev/null; then
+              webhook_ready=true
+              break
+            fi
+
+            if printf '%s' "$info" | jq -e \
+              --argjson previous_error_date "$previous_error_date" '
+                .ok == true and
+                ((.result.last_error_date // 0) > $previous_error_date)
+              ' >/dev/null; then
+              break
+            fi
+
+            if [[ "$attempt" -lt 12 ]]; then
+              sleep 5
+            fi
+          done
+
           printf '%s' "$info" | jq '{
             ok,
             webhook: {
               url: .result.url,
+              ip_address: .result.ip_address,
               pending_update_count: .result.pending_update_count,
               last_error_date: .result.last_error_date,
               last_error_message: .result.last_error_message,
               allowed_updates: .result.allowed_updates
             }
           }'
+          if [[ "$webhook_ready" != "true" ]]; then
+            echo "Telegram webhook did not become healthy" >&2
+            exit 1
+          fi
