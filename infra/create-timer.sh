@@ -10,17 +10,22 @@ set -euo pipefail
 TRIGGER_NAME="zvenfit-reminder-every-5m"
 CRON_FN="zvenfit-reminder-cron"
 
-yc serverless trigger create timer \
+if ! yc serverless trigger create timer \
   --name "$TRIGGER_NAME" \
   --folder-id "$YC_FOLDER_ID" \
   --cron-expression '*/5 * * * ? *' \
   --invoke-function-name "$CRON_FN" \
   --invoke-function-service-account-id "$SA_ID" \
-  2>/dev/null || \
-yc serverless trigger update timer "$TRIGGER_NAME" \
-  --folder-id "$YC_FOLDER_ID" \
-  --cron-expression '*/5 * * * ? *' \
-  --invoke-function-name "$CRON_FN" \
-  --invoke-function-service-account-id "$SA_ID"
+  2>/dev/null; then
+  TRIGGER_ID=$(yc serverless trigger get \
+    --name "$TRIGGER_NAME" \
+    --folder-id "$YC_FOLDER_ID" \
+    --format json | jq -r .id)
+  yc serverless trigger update timer \
+    --id "$TRIGGER_ID" \
+    --new-cron-expression '*/5 * * * ? *' \
+    --new-invoke-function-name "$CRON_FN" \
+    --new-invoke-function-service-account-id "$SA_ID"
+fi
 
 echo "Timer trigger настроен: $TRIGGER_NAME"
