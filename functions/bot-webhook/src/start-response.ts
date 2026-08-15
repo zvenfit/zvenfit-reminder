@@ -8,7 +8,12 @@ export interface ManagedWorkspaceOption {
 
 interface StartResponse {
   message: string;
-  keyboard?: InlineKeyboard | Keyboard;
+  keyboard?: InlineKeyboard;
+  removeReplyKeyboard?: boolean;
+  memberPicker?: {
+    message: string;
+    keyboard: Keyboard;
+  };
 }
 
 export function buildStartResponse(
@@ -18,16 +23,16 @@ export function buildStartResponse(
   managedWorkspaces: ManagedWorkspaceOption[] = [],
 ): StartResponse {
   if (chatType === "private") {
-    const keyboard = new Keyboard();
-    if (miniAppUrl) {
-      keyboard.webApp("Открыть панель", miniAppUrl);
-    }
+    const keyboard = miniAppUrl
+      ? new InlineKeyboard().webApp("Открыть панель", miniAppUrl)
+      : undefined;
+    const memberPickerKeyboard = new Keyboard();
     for (const [index, workspace] of managedWorkspaces.entries()) {
-      if (miniAppUrl || index > 0) {
-        keyboard.row();
+      if (index > 0) {
+        memberPickerKeyboard.row();
       }
       const suffix = managedWorkspaces.length > 1 ? ` · ${workspace.displayName}` : "";
-      keyboard.requestUsers(
+      memberPickerKeyboard.requestUsers(
         `Добавить участников${suffix}`.slice(0, 64),
         memberImportRequestId(workspace.workspaceId),
         {
@@ -41,9 +46,14 @@ export function buildStartResponse(
     return {
       message: managedWorkspaces.length > 0
         ? "Готово: личные уведомления подключены. Открой панель или добавь участников нужной группы."
-        : "Готово: личные уведомления подключены. Напоминания можно создавать в Mini App.",
-      keyboard: keyboard.keyboard.length > 0
-        ? keyboard.resized().persistent()
+        : "Готово: личные уведомления подключены. Открой панель напоминаний.",
+      keyboard,
+      removeReplyKeyboard: true,
+      memberPicker: memberPickerKeyboard.keyboard.some((row) => row.length > 0)
+        ? {
+            message: "Добавление участников",
+            keyboard: memberPickerKeyboard.resized().persistent(),
+          }
         : undefined,
     };
   }

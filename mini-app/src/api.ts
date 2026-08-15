@@ -207,7 +207,7 @@ const mockOccurrences: ReminderOccurrence[] = [
   },
 ];
 
-function getInitData(): string {
+export function getInitData(): string {
   const devInitData = import.meta.env.VITE_DEV_INIT_DATA;
   if (devInitData) {
     return devInitData;
@@ -449,6 +449,7 @@ declare global {
         initDataUnsafe?: { user?: { id?: number } };
         ready: () => void;
         expand: () => void;
+        close?: () => void;
         themeParams: Record<string, string>;
         showAlert: (message: string) => void;
       };

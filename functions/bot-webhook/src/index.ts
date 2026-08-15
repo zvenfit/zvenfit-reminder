@@ -222,8 +222,18 @@ export function getBot(): Bot {
       manageable.map(({ workspaceId, displayName }) => ({ workspaceId, displayName })),
     );
     await ctx.reply(response.message, {
-      reply_markup: response.keyboard,
+      reply_markup: response.removeReplyKeyboard
+        ? { remove_keyboard: true }
+        : response.keyboard,
     });
+    if (response.removeReplyKeyboard && response.keyboard) {
+      await ctx.reply("Панель напоминаний", { reply_markup: response.keyboard });
+    }
+    if (response.memberPicker) {
+      await ctx.reply(response.memberPicker.message, {
+        reply_markup: response.memberPicker.keyboard,
+      });
+    }
   });
 
   bot.on("message:users_shared", async (ctx) => {

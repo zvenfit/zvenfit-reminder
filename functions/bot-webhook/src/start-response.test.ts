@@ -9,12 +9,11 @@ describe("buildStartResponse", () => {
       "reminder_bot",
     );
 
-    expect("keyboard" in (response.keyboard ?? {})).toBe(true);
-    expect(response.keyboard && "keyboard" in response.keyboard
-      ? response.keyboard.keyboard
-      : null).toEqual([
+    expect(response.removeReplyKeyboard).toBe(true);
+    expect(response.keyboard?.inline_keyboard).toEqual([
       [{ text: "Открыть панель", web_app: { url: "https://mini-app.example/index.html" } }],
     ]);
+    expect(response.memberPicker).toBeUndefined();
   });
 
   it("offers native member selection to workspace managers", () => {
@@ -25,10 +24,10 @@ describe("buildStartResponse", () => {
       [{ workspaceId: "workspace-a", displayName: "Дом" }],
     );
 
-    expect(response.keyboard && "keyboard" in response.keyboard
-      ? response.keyboard.keyboard
-      : null).toEqual([
+    expect(response.keyboard?.inline_keyboard).toEqual([
       [{ text: "Открыть панель", web_app: { url: "https://mini-app.example/index.html" } }],
+    ]);
+    expect(response.memberPicker?.keyboard.keyboard).toEqual([
       [{
         text: "Добавить участников",
         request_users: {
@@ -49,9 +48,8 @@ describe("buildStartResponse", () => {
       "reminder_bot",
     );
 
-    expect(response.keyboard && "inline_keyboard" in response.keyboard
-      ? response.keyboard.inline_keyboard
-      : null).toEqual([
+    expect(response.removeReplyKeyboard).toBeUndefined();
+    expect(response.keyboard?.inline_keyboard).toEqual([
       [{ text: "Открыть бота", url: "https://t.me/reminder_bot?start=panel" }],
     ]);
   });

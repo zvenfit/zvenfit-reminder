@@ -5,6 +5,7 @@ import {
   completeOccurrence,
   createReminder,
   changeReminderLifecycle,
+  getInitData,
   listWorkspaces,
   listMembers,
   listReminders,
@@ -273,10 +274,15 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.code === "workspace_required") {
     return "Выберите группу.";
   }
+  if (error instanceof ApiError && error.status === 401) {
+    return "Сессия Telegram устарела. Закройте панель и откройте её снова кнопкой в чате с ботом.";
+  }
   return error instanceof Error ? error.message : "Что-то пошло не так";
 }
 
 function App() {
+  const previewMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
+  const [telegramAuthMissing] = useState(() => !previewMode && !getInitData());
   const [view, setView] = useState<View>("home");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
@@ -329,7 +335,6 @@ function App() {
     return () => window.clearTimeout(timeout);
   }, [undoableOccurrence]);
 
-  const previewMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
   const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
     (previewMode ? members[0]?.userId : undefined);
   const memberMap = useMemo(
@@ -416,6 +421,10 @@ function App() {
   useEffect(() => {
     window.Telegram?.WebApp?.ready();
     window.Telegram?.WebApp?.expand();
+    if (telegramAuthMissing) {
+      setLoading(false);
+      return;
+    }
     void (async () => {
       setLoading(true);
       setError(null);
@@ -438,7 +447,7 @@ function App() {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [telegramAuthMissing]);
 
   async function changeWorkspace(nextWorkspaceId: string) {
     activeWorkspaceIdRef.current = nextWorkspaceId;
@@ -806,6 +815,28 @@ function App() {
 
   const selectedWorkspace = workspaces.find((workspace) =>
     workspace.workspaceId === workspaceId);
+
+  if (telegramAuthMissing) {
+    return (
+      <main className="app app--launch-error">
+        <header className="home-header">
+          <div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>
+        </header>
+        <section className="launch-error" role="alert">
+          <span className="launch-error__mark" aria-hidden="true">↗</span>
+          <p className="eyebrow">Нужен запуск из Telegram</p>
+          <h1>Откройте панель из чата с ботом</h1>
+          <p>
+            Закройте это окно, отправьте боту <b>/start</b> и нажмите кнопку
+            «Открыть панель» под новым сообщением.
+          </p>
+          <button type="button" onClick={() => window.Telegram?.WebApp?.close?.()}>
+            Закрыть панель
+          </button>
+        </section>
+      </main>
+    );
+  }
 
   if (view === "settings" && selectedWorkspace) {
     const targetMember = members.find((member) => String(member.userId) === ownershipTarget);
@@ -1304,7 +1335,7 @@ function App() {
   return (
     <main className="app app--home">
       <header className="home-header">
-        <div className="brand-mark" aria-label="Звенит"><span /><b>звенит</b></div>
+        <div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>
         <span className="utility-label">{dateCaption}</span>
       </header>
 
@@ -1338,8 +1369,7 @@ function App() {
       ) : null}
 
       <section className="home-intro">
-        <p className="eyebrow">Линия внимания</p>
-        <h1>Что требует<br />действия</h1>
+        <h1>Требует внимания</h1>
         <div className="scope-switch" role="tablist" aria-label="Область напоминаний">
           <button className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab">Мои</button>
           <button className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab">Вся группа</button>

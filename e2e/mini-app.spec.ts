@@ -67,7 +67,13 @@ interface ApiState {
   members: Record<string, ApiMember[]>;
   reminders: Record<string, ApiReminder[]>;
   occurrences: Record<string, ApiOccurrence[]>;
-  requests: Array<{ method: string; path: string; workspaceId: string | null; body: unknown }>;
+  requests: Array<{
+    method: string;
+    path: string;
+    workspaceId: string | null;
+    initData: string | null;
+    body: unknown;
+  }>;
   undoErrorCode?: "undo_expired" | "not_actionable";
 }
 
@@ -213,7 +219,13 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
     const selected = workspaceId(request);
     const postData = request.postData();
     const body = postData ? JSON.parse(postData) as Record<string, unknown> : null;
-    state.requests.push({ method, path, workspaceId: selected, body });
+    state.requests.push({
+      method,
+      path,
+      workspaceId: selected,
+      initData: request.headers()["x-telegram-init-data"] ?? null,
+      body,
+    });
 
     const fulfill = (json: unknown, status = 200) => route.fulfill({ status, json });
     if (method === "GET" && path === "/api/workspaces") {
@@ -314,7 +326,7 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
 }
 
 async function installTelegram(page: Page): Promise<void> {
-  await page.route("https://telegram.org/js/telegram-web-app.js", (route) =>
+  await page.route("https://telegram.org/js/telegram-web-app.js*", (route) =>
     route.fulfill({ contentType: "application/javascript", body: "" }));
   await page.addInitScript(() => {
     Object.defineProperty(window, "Telegram", {
@@ -343,12 +355,39 @@ test("isolates data when switching between groups", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
 
+  await expect(page.getByLabel("ZvenFit")).toBeVisible();
+  const heading = page.getByRole("heading", { name: "Требует внимания" });
+  await expect(heading).toBeVisible();
+  expect(await heading.evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize)))
+    .toBeLessThanOrEqual(40);
+  await expect(page.getByText("Линия внимания")).toHaveCount(0);
+  expect(state.requests[0]?.initData).toBe("e2e-init-data");
+  const createButton = page.getByRole("button", { name: "Новое напоминание" });
+  await expect(createButton).toBeEnabled();
+  expect(await createButton.evaluate((element) => getComputedStyle(element).cursor)).toBe("pointer");
   await expect(page.getByText("Передать показания")).toBeVisible();
   await page.getByRole("combobox", { name: "Выбранная группа" }).selectOption("home");
   await expect(page.getByText("Полить цветы")).toBeVisible();
   await expect(page.getByText("Передать показания")).toHaveCount(0);
   expect(state.requests.filter((item) => item.path !== "/api/workspaces").at(-1)?.workspaceId)
     .toBe("home");
+});
+
+test("shows a Telegram launch recovery screen without calling the API", async ({ page }) => {
+  let apiRequests = 0;
+  await page.route("https://telegram.org/js/telegram-web-app.js*", (route) =>
+    route.fulfill({ contentType: "application/javascript", body: "" }));
+  await page.route("**/api/**", (route) => {
+    apiRequests += 1;
+    return route.fulfill({ status: 500, json: { error: "API must not be called" } });
+  });
+
+  await page.goto("/");
+
+  await expect(page.getByRole("alert")).toContainText("Откройте панель из чата с ботом");
+  await expect(page.getByText("Missing X-Telegram-Init-Data")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
+  expect(apiRequests).toBe(0);
 });
 
 test("lets a member create only a personal reminder for themselves", async ({ page }) => {

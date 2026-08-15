@@ -134,7 +134,7 @@ summary:focus-visible {
 }
 
 .home-intro {
-  padding: 32px 0 30px;
+  padding: 26px 0 22px;
 }
 
 .workspace-switcher {
@@ -632,10 +632,17 @@ summary:focus-visible {
   letter-spacing: -0.065em;
 }
 
+.home-intro h1 {
+  max-width: none;
+  font-size: clamp(30px, 7vw, 40px);
+  line-height: 1.04;
+  letter-spacing: -0.045em;
+}
+
 .scope-switch {
   display: inline-flex;
   gap: 4px;
-  margin-top: 28px;
+  margin-top: 18px;
   padding: 4px;
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -1101,6 +1108,12 @@ summary:focus-visible {
   box-shadow: 0 15px 32px rgba(49, 75, 189, 0.28);
   color: #fff;
   font-weight: 800;
+  transition: box-shadow 160ms ease, transform 160ms ease;
+}
+
+.floating-create:not(:disabled):hover {
+  box-shadow: 0 18px 36px rgba(49, 75, 189, 0.34);
+  transform: translateY(-2px);
 }
 
 .floating-create span {
@@ -1647,8 +1660,65 @@ textarea:focus {
 
 .primary-action:disabled,
 button:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.62;
+}
+
+.app--launch-error {
+  display: grid;
+  align-content: start;
+}
+
+.launch-error {
+  display: grid;
+  max-width: 560px;
+  margin: clamp(52px, 13vh, 110px) auto 0;
+  padding: 28px;
+  border: 1px solid color-mix(in srgb, var(--signal) 22%, var(--line));
+  border-radius: 24px;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.launch-error__mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 24px;
+  place-items: center;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--signal) 12%, var(--paper));
+  color: var(--signal);
+  font-size: 25px;
+  font-weight: 800;
+}
+
+.launch-error h1 {
+  max-width: 440px;
+  margin: 0;
+  font-family: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", sans-serif;
+  font-size: clamp(32px, 8vw, 48px);
+  line-height: 1;
+  letter-spacing: -0.055em;
+}
+
+.launch-error > p:not(.eyebrow) {
+  max-width: 470px;
+  margin: 18px 0 0;
+  color: var(--ink-soft);
+  font-size: 15px;
+}
+
+.launch-error button {
+  width: fit-content;
+  min-height: 46px;
+  margin-top: 26px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--signal);
+  color: #fff;
+  font-weight: 800;
 }
 
 @keyframes breathe {
