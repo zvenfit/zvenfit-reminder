@@ -1,8 +1,10 @@
 import { getDefaultResultOrder } from "node:dns";
+import { HttpError } from "grammy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildWebhookFailureResponse,
-  isTelegramHealthRequest,
+  isRuntimeHealthRequest,
+  isTelegramTransportFailure,
   isWebhookRequest,
   resolveInitData,
 } from "./index.js";
@@ -47,11 +49,23 @@ describe("isWebhookRequest", () => {
   });
 });
 
-describe("isTelegramHealthRequest", () => {
-  it("accepts only the protected runtime health endpoint", () => {
-    expect(isTelegramHealthRequest("/health/telegram", "POST")).toBe(true);
-    expect(isTelegramHealthRequest("/health/telegram", "GET")).toBe(false);
-    expect(isTelegramHealthRequest("/health", "POST")).toBe(false);
+describe("isRuntimeHealthRequest", () => {
+  it("accepts the protected runtime health endpoint and its legacy alias", () => {
+    expect(isRuntimeHealthRequest("/health/runtime", "POST")).toBe(true);
+    expect(isRuntimeHealthRequest("/health/telegram", "POST")).toBe(true);
+    expect(isRuntimeHealthRequest("/health/runtime", "GET")).toBe(false);
+    expect(isRuntimeHealthRequest("/health", "POST")).toBe(false);
+  });
+});
+
+describe("isTelegramTransportFailure", () => {
+  it("recognizes a nested grammY transport failure", () => {
+    const transportError = new HttpError("sendMessage failed", new Error("network"));
+    expect(isTelegramTransportFailure({ error: transportError })).toBe(true);
+  });
+
+  it("does not label database errors as Telegram failures", () => {
+    expect(isTelegramTransportFailure({ error: new Error("YDB query failed") })).toBe(false);
   });
 });
 
@@ -63,6 +77,7 @@ describe("buildWebhookFailureResponse", () => {
     expect(JSON.parse(response.body ?? "{}")).toMatchObject({
       method: "sendMessage",
       chat_id: -42,
+      text: "⚠️ Не удалось обработать запрос. Попробуйте ещё раз через минуту.",
     });
   });
 

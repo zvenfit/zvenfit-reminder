@@ -13,7 +13,7 @@ import {
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
 import { setDefaultResultOrder } from "node:dns";
-import { Bot, GrammyError, type BotConfig, type Context } from "grammy";
+import { Bot, GrammyError, HttpError, type BotConfig, type Context } from "grammy";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
@@ -34,8 +34,10 @@ import { telegramClientOptions } from "./telegram-network.js";
 
 let botInstance: Bot | null = null;
 const TELEGRAM_API_TIMEOUT_SECONDS = 5;
-const WEBHOOK_FAILURE_TEXT =
+const TELEGRAM_API_FAILURE_TEXT =
   "⚠️ Бот временно не может связаться с Telegram API. Попробуйте ещё раз через минуту.";
+const INTERNAL_FAILURE_TEXT =
+  "⚠️ Не удалось обработать запрос. Попробуйте ещё раз через минуту.";
 
 // Yandex Cloud Functions has public IPv4 egress, while Telegram may resolve to IPv6 first.
 setDefaultResultOrder("ipv4first");
@@ -65,11 +67,29 @@ export function isWebhookRequest(path: string, method: string): boolean {
   return method === "POST" && (path === "/webhook" || path === "/");
 }
 
-export function isTelegramHealthRequest(path: string, method: string): boolean {
-  return method === "POST" && path === "/health/telegram";
+export function isRuntimeHealthRequest(path: string, method: string): boolean {
+  return method === "POST" && (path === "/health/runtime" || path === "/health/telegram");
 }
 
-export function buildWebhookFailureResponse(update: unknown): ApiGatewayResponse {
+export function isTelegramTransportFailure(error: unknown): boolean {
+  let current = error;
+  const visited = new Set<object>();
+
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (current instanceof HttpError) return true;
+    if (!current || typeof current !== "object" || visited.has(current)) return false;
+    visited.add(current);
+    if (!("error" in current)) return false;
+    current = current.error;
+  }
+
+  return false;
+}
+
+export function buildWebhookFailureResponse(
+  update: unknown,
+  text = INTERNAL_FAILURE_TEXT,
+): ApiGatewayResponse {
   if (!update || typeof update !== "object") {
     return { statusCode: 200, body: "" };
   }
@@ -83,7 +103,7 @@ export function buildWebhookFailureResponse(update: unknown): ApiGatewayResponse
     return jsonResponse(200, {
       method: "answerCallbackQuery",
       callback_query_id: callbackQueryId,
-      text: WEBHOOK_FAILURE_TEXT,
+      text,
       show_alert: true,
     });
   }
@@ -93,7 +113,7 @@ export function buildWebhookFailureResponse(update: unknown): ApiGatewayResponse
     return jsonResponse(200, {
       method: "sendMessage",
       chat_id: chatId,
-      text: WEBHOOK_FAILURE_TEXT,
+      text,
     });
   }
 
@@ -604,7 +624,7 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
   const path = getPath(event);
   const method = event.httpMethod ?? "GET";
 
-  if (isTelegramHealthRequest(path, method)) {
+  if (isRuntimeHealthRequest(path, method)) {
     const config = loadConfig();
     const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
     if (secret !== config.webhookSecret) {
@@ -612,6 +632,8 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
     }
 
     try {
+      const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
+      await workspacesRepo.listForUser(0);
       const bot = getBot();
       await bot.api.getMe();
       try {
@@ -625,7 +647,7 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
       }
       return jsonResponse(200, { ok: true });
     } catch (error) {
-      console.error("Telegram API health check failed", {
+      console.error("Runtime dependency health check failed", {
         error: error instanceof Error ? error.message : "Unknown error",
       });
       return jsonResponse(502, { ok: false });
@@ -654,7 +676,10 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
         updateId: typeof update?.update_id === "number" ? update.update_id : null,
         error: error instanceof Error ? error.message : "Unknown error",
       });
-      return buildWebhookFailureResponse(update);
+      return buildWebhookFailureResponse(
+        update,
+        isTelegramTransportFailure(error) ? TELEGRAM_API_FAILURE_TEXT : INTERNAL_FAILURE_TEXT,
+      );
     }
   }
 

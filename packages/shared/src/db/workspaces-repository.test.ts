@@ -120,6 +120,8 @@ describe("WorkspacesRepository", () => {
     expect(query).toContain("member.user_id = $user_id");
     expect(query).toContain("member.status = 'active'");
     expect(query).toContain("workspace.status = 'active'");
+    expect(query).toContain("ORDER BY display_name, workspace_id");
+    expect(query).not.toContain("ORDER BY workspace.display_name");
     expect(decodeYdbValue(parameters?.$user_id)).toBe(20);
   });
 

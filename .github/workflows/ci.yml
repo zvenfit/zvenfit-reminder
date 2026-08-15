@@ -157,13 +157,13 @@ jobs:
             --environment TELEGRAM_PROXY_SECRET="$TELEGRAM_PROXY_SECRET" \
             --environment NODE_ENV=production \
             --environment BOT_INFO_JSON="$bot_info_json"
-      - name: Verify Telegram API from function runtime
+      - name: Verify runtime dependencies from function runtime
         env:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
         run: |
           health_event="$(jq -nc --arg secret "$WEBHOOK_SECRET" '{
             httpMethod: "POST",
-            path: "/health/telegram",
+            path: "/health/runtime",
             headers: {"X-Telegram-Bot-Api-Secret-Token": $secret}
           }')"
           health_response="$(yc serverless function invoke zvenfit-reminder-bot --data "$health_event")"

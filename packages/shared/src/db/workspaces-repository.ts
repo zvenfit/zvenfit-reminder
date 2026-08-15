@@ -167,7 +167,7 @@ export class WorkspacesRepository {
           WHERE member.user_id = $user_id
             AND member.status = 'active'
             AND workspace.status = 'active'
-          ORDER BY workspace.display_name, workspace.workspace_id;
+          ORDER BY display_name, workspace_id;
         `,
         { $user_id: TypedValues.int64(userId) },
       );
