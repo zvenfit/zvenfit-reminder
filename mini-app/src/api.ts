@@ -276,6 +276,11 @@ export function syncMembers(): Promise<unknown> {
   return api("/api/members/sync", { method: "POST", body: "{}" });
 }
 
+export function prepareMemberPicker(): Promise<{ requestId: string }> {
+  if (MOCK_MODE) return Promise.resolve({ requestId: "mock-member-picker" });
+  return api("/api/members/prepare-picker", { method: "POST", body: "{}" });
+}
+
 export function updateWorkspaceSettings(
   settings: WorkspaceSettings,
 ): Promise<{ workspace: Workspace }> {
@@ -457,6 +462,7 @@ declare global {
         ready: () => void;
         expand: () => void;
         close?: () => void;
+        requestChat?: (requestId: string, callback?: (success: boolean) => void) => void;
         themeParams: Record<string, string>;
         showAlert: (message: string) => void;
       };

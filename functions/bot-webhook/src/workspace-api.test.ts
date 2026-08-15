@@ -102,6 +102,9 @@ function dependencies(member: WorkspaceMember | null = actor()) {
         occurrence: { occurrenceId: "occurrence-a", status: "completed" },
       }),
     },
+    memberPicker: {
+      prepare: vi.fn().mockResolvedValue("prepared-users-request"),
+    },
   } as unknown as WorkspaceApiDependencies;
 }
 
@@ -149,6 +152,65 @@ describe("handleWorkspaceApi", () => {
 
     expect(response?.statusCode).toBe(403);
     expect(deps.reminders.listForActor).not.toHaveBeenCalled();
+  });
+
+  it("prepares a Telegram user picker for a workspace organizer", async () => {
+    const deps = dependencies(actor("organizer"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "POST",
+        path: "/api/members/prepare-picker",
+        headers: workspaceHeaders,
+        body: "{}",
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(JSON.parse(response?.body ?? "{}").requestId).toBe("prepared-users-request");
+    expect(deps.memberPicker.prepare).toHaveBeenCalledWith(20, "workspace-a");
+  });
+
+  it("does not prepare a member picker for a regular member", async () => {
+    const deps = dependencies(actor("member"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "POST",
+        path: "/api/members/prepare-picker",
+        headers: workspaceHeaders,
+        body: "{}",
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(403);
+    expect(deps.memberPicker.prepare).not.toHaveBeenCalled();
+  });
+
+  it("returns a sanitized error when Telegram cannot prepare the picker", async () => {
+    const deps = dependencies(actor("owner"));
+    deps.memberPicker.prepare = vi.fn().mockRejectedValue(new Error("provider details"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "POST",
+        path: "/api/members/prepare-picker",
+        headers: workspaceHeaders,
+        body: "{}",
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(502);
+    expect(JSON.parse(response?.body ?? "{}")).toEqual({
+      error: "Telegram user picker is temporarily unavailable",
+      code: "telegram_unavailable",
+    });
   });
 
   it("does not reveal whether an unavailable workspace exists", async () => {

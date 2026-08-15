@@ -34,6 +34,10 @@ import {
   type OccurrenceActionInput,
   type OccurrenceActionResult,
 } from "./occurrence-actions.js";
+import {
+  createMemberPickerPreparer,
+  type MemberPickerPreparer,
+} from "./member-picker.js";
 
 export interface WorkspaceApiDependencies {
   workspaces: Pick<
@@ -49,6 +53,7 @@ export interface WorkspaceApiDependencies {
   occurrenceActions: {
     execute(input: OccurrenceActionInput): Promise<OccurrenceActionResult>;
   };
+  memberPicker: MemberPickerPreparer;
 }
 
 function createDependencies(config: AppConfig): WorkspaceApiDependencies {
@@ -60,6 +65,7 @@ function createDependencies(config: AppConfig): WorkspaceApiDependencies {
     occurrenceActions: {
       execute: (input) => executeOccurrenceAction(config, input),
     },
+    memberPicker: createMemberPickerPreparer(config),
   };
 }
 
@@ -73,6 +79,7 @@ function isWorkspaceRoute(method: string, path: string): boolean {
     )) ||
     (method === "POST" && (
       path === "/api/reminders" ||
+      path === "/api/members/prepare-picker" ||
       path === "/api/workspace/transfer-ownership" ||
       /^\/api\/reminders\/[^/]+\/reassign$/.test(path) ||
       /^\/api\/reminders\/[^/]+\/(pause|resume|archive)$/.test(path) ||
@@ -120,6 +127,27 @@ export async function handleWorkspaceApi(
   );
   if (!actor || actor.status !== "active") {
     return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
+  }
+
+  if (method === "POST" && path === "/api/members/prepare-picker") {
+    if (actor.role !== "owner" && actor.role !== "organizer") {
+      return jsonResponse(403, {
+        error: "Only an owner or organizer can add members",
+        code: "forbidden",
+      });
+    }
+    try {
+      const requestId = await dependencies.memberPicker.prepare(
+        initData.user.id,
+        workspace.workspaceId,
+      );
+      return jsonResponse(200, { requestId });
+    } catch {
+      return jsonResponse(502, {
+        error: "Telegram user picker is temporarily unavailable",
+        code: "telegram_unavailable",
+      });
+    }
   }
 
   if (method === "PATCH" && path === "/api/workspace/settings") {

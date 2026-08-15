@@ -240,6 +240,20 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
     if (method === "POST" && path === "/api/members/sync") {
       return fulfill({ members: state.members[selected], synced: state.members[selected].length });
     }
+    if (method === "POST" && path === "/api/members/prepare-picker") {
+      if (selected && !state.members[selected].some((member) => member.userId === 50)) {
+        state.members[selected].push({
+          workspaceId: selected,
+          userId: 50,
+          role: "member",
+          status: "active",
+          username: "olga",
+          displayName: "Ольга",
+          privateChatAvailable: true,
+        });
+      }
+      return fulfill({ requestId: `prepared-${selected}` });
+    }
     if (method === "PATCH" && path === "/api/workspace/settings") {
       const workspace = state.workspaces.find((item) => item.workspaceId === selected)!;
       Object.assign(workspace, body);
@@ -337,6 +351,12 @@ async function installTelegram(page: Page): Promise<void> {
           initDataUnsafe: { user: { id: 10, first_name: "Анна" } },
           ready() {},
           expand() {},
+          requestChat(requestId: string, callback?: (success: boolean) => void) {
+            const target = window as Window & { __memberPickerRequests?: string[] };
+            target.__memberPickerRequests ??= [];
+            target.__memberPickerRequests.push(requestId);
+            callback?.(true);
+          },
           themeParams: {},
           showAlert() {},
         },
@@ -414,6 +434,33 @@ test("recovers from an empty workspace response without leaving disabled control
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toBeEnabled();
   expect(state.requests.filter((request) => request.path === "/api/workspaces").length)
     .toBeGreaterThan(initialWorkspaceRequests);
+});
+
+test("opens Telegram member picker for the selected workspace", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Участники/ }).click();
+
+  await expect.poll(() => page.evaluate(() =>
+    (window as Window & { __memberPickerRequests?: string[] }).__memberPickerRequests ?? [],
+  )).toEqual(["prepared-team"]);
+  expect(state.requests.find((request) =>
+    request.method === "POST" && request.path === "/api/members/prepare-picker"))
+    .toMatchObject({ workspaceId: "team" });
+  await expect(page.getByText("Список участников обновлён")).toBeVisible();
+});
+
+test("uses explicit 24-hour time fields", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const time = page.getByRole("textbox", { name: "Время" });
+  await expect(time).toHaveAttribute("type", "text");
+  await time.fill("1845");
+  await expect(time).toHaveValue("18:45");
+  await expect(page.getByText(/AM|PM/)).toHaveCount(0);
 });
 
 test("lets a member create only a personal reminder for themselves", async ({ page }) => {

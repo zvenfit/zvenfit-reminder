@@ -10,6 +10,7 @@ import {
   listMembers,
   listReminders,
   loadDashboard,
+  prepareMemberPicker,
   reassignReminder,
   snoozeOccurrence,
   transferWorkspaceOwnership,
@@ -17,7 +18,6 @@ import {
   updateReminder,
   updateMemberRole,
   updateWorkspaceSettings,
-  syncMembers,
   selectWorkspace,
   type CreateReminderBody,
   type DeadlineTiming,
@@ -33,6 +33,7 @@ import {
   detectDeviceTimezone,
   DEFAULT_TIMEZONE,
 } from "./timezones";
+import { isLocalTime24, Time24Field } from "./time-24-field";
 import "./styles.css";
 
 type View = "home" | "create" | "settings";
@@ -75,6 +76,12 @@ function localDateInputValue(date = new Date()): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function timePosition(value: string): string {
+  if (!isLocalTime24(value)) return "0%";
+  const [hour, minute] = value.split(":").map(Number);
+  return `${(hour * 60 + minute) / 14.4}%`;
 }
 
 const WEEKDAYS = [
@@ -277,7 +284,34 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.status === 401) {
     return "Сессия Telegram устарела. Закройте панель и откройте её снова кнопкой в чате с ботом.";
   }
+  if (error instanceof ApiError && error.code === "telegram_unavailable") {
+    return "Telegram не открыл выбор участников. Попробуйте ещё раз через минуту.";
+  }
   return error instanceof Error ? error.message : "Что-то пошло не так";
+}
+
+function requestTelegramMemberPicker(requestId: string): Promise<boolean> {
+  const requestChat = window.Telegram?.WebApp?.requestChat;
+  if (!requestChat) {
+    throw new Error(
+      "Обновите Telegram до последней версии или используйте кнопку «Добавить участников» в чате с ботом.",
+    );
+  }
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(
+      () => reject(new Error("Telegram не завершил выбор участников. Попробуйте ещё раз.")),
+      120_000,
+    );
+    try {
+      requestChat(requestId, (success) => {
+        window.clearTimeout(timeout);
+        resolve(success);
+      });
+    } catch (error) {
+      window.clearTimeout(timeout);
+      reject(error);
+    }
+  });
 }
 
 function App() {
@@ -301,10 +335,10 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  const [pickingMembers, setPickingMembers] = useState(false);
   const [ownershipTarget, setOwnershipTarget] = useState("");
   const [confirmingOwnership, setConfirmingOwnership] = useState(false);
   const [transferringOwnership, setTransferringOwnership] = useState(false);
-  const [syncing, setSyncing] = useState(false);
   const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<number | null>(null);
   const [reassigningReminderId, setReassigningReminderId] = useState<string | null>(null);
@@ -568,17 +602,31 @@ function App() {
     }
   }
 
-  async function syncWorkspaceMembers() {
-    setSyncing(true);
+  async function openMemberPicker() {
+    const currentWorkspaceId = workspaceId;
+    if (!currentWorkspaceId) return;
+    setPickingMembers(true);
     setError(null);
     try {
-      await syncMembers();
-      const response = await listMembers();
-      setMembers(response.members);
+      const knownUserIds = new Set(members.map((member) => member.userId));
+      const { requestId } = await prepareMemberPicker();
+      const shared = await requestTelegramMemberPicker(requestId);
+      if (!shared || activeWorkspaceIdRef.current !== currentWorkspaceId) return;
+
+      setNotice("Проверяем выбранных участников…");
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 650));
+        const response = await listMembers();
+        if (activeWorkspaceIdRef.current !== currentWorkspaceId) return;
+        setMembers(response.members);
+        if (response.members.some((member) => !knownUserIds.has(member.userId))) break;
+      }
+      setNotice("Список участников обновлён");
+      window.setTimeout(() => setNotice(null), 2600);
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {
-      setSyncing(false);
+      setPickingMembers(false);
     }
   }
 
@@ -830,6 +878,9 @@ function App() {
 
   const selectedWorkspace = workspaces.find((workspace) =>
     workspace.workspaceId === workspaceId);
+  const selectedWorkspaceTimezone = selectedWorkspace
+    ? describeTimezone(selectedWorkspace.timezone, timezoneReference)
+    : null;
 
   if (telegramAuthMissing) {
     return (
@@ -915,9 +966,9 @@ function App() {
             className="rhythm-map"
             aria-label="Карта ритма группы"
             style={{
-              "--quiet-start": `${(Number(settingsForm.quietHoursStart.slice(0, 2)) * 60 + Number(settingsForm.quietHoursStart.slice(3))) / 14.4}%`,
-              "--quiet-end": `${(Number(settingsForm.quietHoursEnd.slice(0, 2)) * 60 + Number(settingsForm.quietHoursEnd.slice(3))) / 14.4}%`,
-              "--all-day-time": `${(Number(settingsForm.defaultAllDayReminderTime.slice(0, 2)) * 60 + Number(settingsForm.defaultAllDayReminderTime.slice(3))) / 14.4}%`,
+              "--quiet-start": timePosition(settingsForm.quietHoursStart),
+              "--quiet-end": timePosition(settingsForm.quietHoursEnd),
+              "--all-day-time": timePosition(settingsForm.defaultAllDayReminderTime),
             } as CSSProperties}
           >
             <div className="rhythm-map__heading">
@@ -996,15 +1047,33 @@ function App() {
             <div className="schedule-grid">
               <label className="field">
                 <span>Начало тишины</span>
-                <input type="time" required value={settingsForm.quietHoursStart} onChange={(event) => setSettingsForm({ ...settingsForm, quietHoursStart: event.target.value })} />
+                <Time24Field
+                  label="Начало тишины"
+                  required
+                  value={settingsForm.quietHoursStart}
+                  onChange={(quietHoursStart) => setSettingsForm({ ...settingsForm, quietHoursStart })}
+                />
               </label>
               <label className="field">
                 <span>Конец тишины</span>
-                <input type="time" required value={settingsForm.quietHoursEnd} onChange={(event) => setSettingsForm({ ...settingsForm, quietHoursEnd: event.target.value })} />
+                <Time24Field
+                  label="Конец тишины"
+                  required
+                  value={settingsForm.quietHoursEnd}
+                  onChange={(quietHoursEnd) => setSettingsForm({ ...settingsForm, quietHoursEnd })}
+                />
               </label>
               <label className="field field--wide">
                 <span>Напоминать о событиях «на весь день»</span>
-                <input type="time" required value={settingsForm.defaultAllDayReminderTime} onChange={(event) => setSettingsForm({ ...settingsForm, defaultAllDayReminderTime: event.target.value })} />
+                <Time24Field
+                  label="Время напоминаний на весь день"
+                  required
+                  value={settingsForm.defaultAllDayReminderTime}
+                  onChange={(defaultAllDayReminderTime) => setSettingsForm({
+                    ...settingsForm,
+                    defaultAllDayReminderTime,
+                  })}
+                />
               </label>
             </div>
           </section>
@@ -1133,10 +1202,10 @@ function App() {
                 <button
                   className="sync-button"
                   type="button"
-                  disabled={syncing}
-                  onClick={() => void syncWorkspaceMembers()}
+                  disabled={pickingMembers}
+                  onClick={() => void openMemberPicker()}
                 >
-                  {syncing ? "Обновляю…" : "Обновить людей"}
+                  {pickingMembers ? "Открываем…" : "Добавить участников"}
                 </button>
               ) : null}
             </div>
@@ -1324,7 +1393,12 @@ function App() {
               {!form.allDay ? (
                 <label className="field field--wide">
                   <span>Время</span>
-                  <input type="time" value={form.timeLocal} onChange={(event) => setForm({ ...form, timeLocal: event.target.value })} required />
+                  <Time24Field
+                    label="Время"
+                    required
+                    value={form.timeLocal}
+                    onChange={(timeLocal) => setForm({ ...form, timeLocal })}
+                  />
                 </label>
               ) : null}
             </div>
@@ -1410,11 +1484,26 @@ function App() {
       </label>
 
       {selectedWorkspace?.role === "owner" || selectedWorkspace?.role === "organizer" ? (
-        <button className="workspace-settings-link" type="button" onClick={openSettings}>
-          <span aria-hidden="true">◴</span>
-          <span><b>Ритм группы</b><small>{selectedWorkspace.quietHoursStart}–{selectedWorkspace.quietHoursEnd} · {selectedWorkspace.timezone}</small></span>
-          <span aria-hidden="true">→</span>
-        </button>
+        <div className="workspace-tools">
+          <button className="workspace-settings-link" type="button" onClick={openSettings}>
+            <span aria-hidden="true">◴</span>
+            <span><b>Ритм группы</b><small>{selectedWorkspace.quietHoursStart}–{selectedWorkspace.quietHoursEnd} · {selectedWorkspaceTimezone?.city ?? selectedWorkspace.timezone}</small></span>
+            <span aria-hidden="true">→</span>
+          </button>
+          <button
+            className="workspace-settings-link workspace-members-link"
+            type="button"
+            disabled={pickingMembers}
+            onClick={() => void openMemberPicker()}
+          >
+            <span aria-hidden="true">＋</span>
+            <span>
+              <b>Участники</b>
+              <small>{pickingMembers ? "Открываем Telegram…" : `${members.length} добавлено`}</small>
+            </span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </div>
       ) : null}
 
       <section className="home-intro">

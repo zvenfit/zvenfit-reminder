@@ -192,6 +192,35 @@ summary:focus-visible {
   text-align: left;
 }
 
+.workspace-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 10px;
+}
+
+.workspace-tools .workspace-settings-link {
+  min-width: 0;
+  margin-top: 0;
+}
+
+.workspace-members-link > span:first-child {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--signal) 10%, var(--paper));
+  color: var(--signal);
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.workspace-settings-link:disabled {
+  cursor: wait;
+  opacity: 0.68;
+}
+
 .workspace-settings-link > span:nth-child(2) {
   display: grid;
   gap: 1px;
@@ -1328,6 +1357,33 @@ textarea:focus {
   background: var(--paper);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--signal) 10%, transparent);
   outline: 0;
+}
+
+.time-24-control {
+  position: relative;
+  display: block;
+}
+
+.time-24-control input {
+  padding-right: 60px;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+}
+
+.time-24-control > b {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: var(--paper-muted);
+  color: var(--ink-soft);
+  font-size: 9px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  transform: translateY(-50%);
 }
 
 .field--hero input {

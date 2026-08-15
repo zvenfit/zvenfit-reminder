@@ -30,6 +30,7 @@ const TELEGRAM_METHODS = new Set([
   "editMessageText",
   "getChatMember",
   "getMe",
+  "savePreparedKeyboardButton",
   "sendMessage",
 ]);
 const encoder = new TextEncoder();

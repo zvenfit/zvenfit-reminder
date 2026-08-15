@@ -74,6 +74,37 @@ describe("Telegram webhook proxy", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true });
   });
 
+  it("allows the prepared user picker method used by Mini Apps", async () => {
+    const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, result: { id: "prepared-users" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const response = await handleRequest(
+      new Request("https://proxy.example/telegram/savePreparedKeyboardButton", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [PROXY_SECRET_HEADER]: "proxy-secret",
+          [BOT_TOKEN_HEADER]: BOT_TOKEN,
+        },
+        body: JSON.stringify({
+          user_id: 42,
+          button: { text: "Добавить участников", request_users: { request_id: 7 } },
+        }),
+      }),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+
+    expect(response.status).toBe(200);
+    expect(String(telegramFetch.mock.calls[0]?.[0])).toBe(
+      `https://api.telegram.org/bot${BOT_TOKEN}/savePreparedKeyboardButton`,
+    );
+  });
+
   it("fails closed for invalid outbound authorization, methods, and payloads", async () => {
     const telegramFetch = vi.fn<OriginFetch>();
     const baseHeaders = {

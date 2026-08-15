@@ -19,7 +19,8 @@ Cloud Functions также идут через закрытый маршрут W
 - Outbound-маршрут принимает только JSON до 256 KiB, отдельный proxy secret и
   валидный bot token в закрытых заголовках.
 - Разрешены только необходимые методы: `getMe`, `getChatMember`, `sendMessage`,
-  `editMessageText`, `deleteMessage`, `answerCallbackQuery`.
+  `editMessageText`, `deleteMessage`, `answerCallbackQuery` и
+  `savePreparedKeyboardButton` для нативного выбора участников в Mini App.
 - Proxy secret сравнивается constant-time. Bot token не хранится в Worker и не
   попадает в публичный URL или ответы; в Telegram он уходит по HTTPS.
 
