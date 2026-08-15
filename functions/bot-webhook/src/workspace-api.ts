@@ -35,6 +35,10 @@ import {
   type OccurrenceActionResult,
 } from "./occurrence-actions.js";
 import {
+  createMemberAvatarLoader,
+  type MemberAvatarLoader,
+} from "./member-avatar.js";
+import {
   createMemberPickerPreparer,
   type MemberPickerPreparer,
 } from "./member-picker.js";
@@ -53,6 +57,7 @@ export interface WorkspaceApiDependencies {
   occurrenceActions: {
     execute(input: OccurrenceActionInput): Promise<OccurrenceActionResult>;
   };
+  memberAvatar: MemberAvatarLoader;
   memberPicker: MemberPickerPreparer;
 }
 
@@ -65,6 +70,7 @@ function createDependencies(config: AppConfig): WorkspaceApiDependencies {
     occurrenceActions: {
       execute: (input) => executeOccurrenceAction(config, input),
     },
+    memberAvatar: createMemberAvatarLoader(config),
     memberPicker: createMemberPickerPreparer(config),
   };
 }
@@ -75,7 +81,8 @@ function isWorkspaceRoute(method: string, path: string): boolean {
     (method === "GET" && (
       path === "/api/dashboard" ||
       path === "/api/reminders" ||
-      path === "/api/members"
+      path === "/api/members" ||
+      /^\/api\/members\/\d+\/avatar$/.test(path)
     )) ||
     (method === "POST" && (
       path === "/api/reminders" ||
@@ -230,6 +237,26 @@ export async function handleWorkspaceApi(
   if (method === "GET" && path === "/api/members") {
     const members = await dependencies.members.listProfiles(workspace.workspaceId);
     return jsonResponse(200, { members });
+  }
+
+  const memberAvatarMatch = path.match(/^\/api\/members\/(\d+)\/avatar$/);
+  if (method === "GET" && memberAvatarMatch) {
+    const targetUserId = Number(memberAvatarMatch[1]);
+    const target = await dependencies.members.getByUserId(
+      workspace.workspaceId,
+      targetUserId,
+    );
+    if (!target || target.status !== "active") {
+      return jsonResponse(404, { error: "Workspace member not found", code: "not_found" });
+    }
+    try {
+      const avatar = await dependencies.memberAvatar.load(targetUserId);
+      return jsonResponse(200, { avatar });
+    } catch {
+      // A missing, private, or temporarily unavailable Telegram photo should not
+      // prevent the participant selector from working with its monogram fallback.
+      return jsonResponse(200, { avatar: null });
+    }
   }
 
   const reminderUpdateMatch = path.match(/^\/api\/reminders\/([^/]+)$/);

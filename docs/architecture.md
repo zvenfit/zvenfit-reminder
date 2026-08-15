@@ -45,6 +45,11 @@ method-allowlisted `/telegram/*` route because direct Yandex Function egress to
 Telegram is intermittent even when forced to IPv4. The bot token is sent only in
 an encrypted function-to-Worker request header and is never part of the public
 Worker URL. Local development keeps direct Bot API access with IPv4 preference.
+Participant avatars are fetched lazily through authenticated Mini App API calls.
+The function verifies both actor and target membership, requests the smallest
+available Telegram profile photo, and returns a bounded raster data URL. The bot
+token and Telegram file URL never reach the browser; unavailable photos fall
+back to deterministic monograms.
 
 The Mini App is built as static files and uploaded to Yandex Object Storage.
 Both functions bundle application code with esbuild and install the YDB runtime

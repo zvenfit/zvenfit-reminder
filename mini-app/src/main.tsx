@@ -34,6 +34,7 @@ import {
   DEFAULT_TIMEZONE,
 } from "./timezones";
 import { isLocalTime24, Time24Field } from "./time-24-field";
+import { PersonSelect } from "./person-select";
 import "./styles.css";
 
 type View = "home" | "create" | "settings";
@@ -1236,31 +1237,23 @@ function App() {
               <p className="inline-note">Групповые поручения создают организаторы. Личное себе доступно всем.</p>
             ) : null}
 
-            <label className="field">
+            <div className="field">
               <span>Ответственный</span>
-              <select
+              <PersonSelect
+                members={members.filter((member) => canAssignGroup || member.userId === actorId)}
                 value={form.assignmentMode === "anyone" ? "anyone" : form.responsibleUserId}
-                onChange={(event) =>
-                  setForm({
-                    ...form,
-                    assignmentMode: event.target.value === "anyone" ? "anyone" : "person",
-                    responsibleUserId: event.target.value === "anyone" ? "" : event.target.value,
-                  })
-                }
-              >
-                {form.visibility === "group" ? <option value="anyone">Может выполнить любой</option> : null}
-                {members
-                  .filter((member) => canAssignGroup || member.userId === actorId)
-                  .map((member) => (
-                  <option key={member.userId} value={member.userId}>
-                    {member.displayName}{member.userId === actorId ? " · вы" : ""}
-                  </option>
-                  ))}
-              </select>
+                actorId={actorId}
+                includeAnyone={form.visibility === "group"}
+                onChange={(value) => setForm({
+                  ...form,
+                  assignmentMode: value === "anyone" ? "anyone" : "person",
+                  responsibleUserId: value === "anyone" ? "" : value,
+                })}
+              />
               {form.visibility === "private" && selectedResponsible && !selectedResponsible.privateChatAvailable ? (
                 <small className="field-warning">Нужно, чтобы {selectedResponsible.displayName} сначала отправил боту /start.</small>
               ) : null}
-            </label>
+            </div>
 
             {form.visibility === "group" && form.assignmentMode === "person" ? (
               <details className="watchers">

@@ -168,6 +168,7 @@ const mockWorkspaces: Workspace[] = [
 ];
 
 let selectedWorkspaceId: string | null = null;
+const memberAvatarCache = new Map<string, Promise<string | null>>();
 
 function inSelectedWorkspace<T extends { workspaceId: string }>(items: T[]): T[] {
   return items.filter((item) => item.workspaceId === selectedWorkspaceId);
@@ -269,6 +270,18 @@ export function listReminders(): Promise<{ reminders: Reminder[] }> {
 export function listMembers(): Promise<{ members: WorkspaceMember[] }> {
   if (MOCK_MODE) return Promise.resolve({ members: inSelectedWorkspace(mockMembers) });
   return api("/api/members");
+}
+
+export function getMemberAvatar(userId: number): Promise<string | null> {
+  if (MOCK_MODE || !selectedWorkspaceId) return Promise.resolve(null);
+  const key = `${selectedWorkspaceId}:${userId}`;
+  const cached = memberAvatarCache.get(key);
+  if (cached) return cached;
+  const request = api<{ avatar: string | null }>(`/api/members/${userId}/avatar`)
+    .then(({ avatar }) => avatar)
+    .catch(() => null);
+  memberAvatarCache.set(key, request);
+  return request;
 }
 
 export function syncMembers(): Promise<unknown> {

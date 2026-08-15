@@ -102,6 +102,9 @@ function dependencies(member: WorkspaceMember | null = actor()) {
         occurrence: { occurrenceId: "occurrence-a", status: "completed" },
       }),
     },
+    memberAvatar: {
+      load: vi.fn().mockResolvedValue("data:image/jpeg;base64,AQID"),
+    },
     memberPicker: {
       prepare: vi.fn().mockResolvedValue("prepared-users-request"),
     },
@@ -211,6 +214,65 @@ describe("handleWorkspaceApi", () => {
       error: "Telegram user picker is temporarily unavailable",
       code: "telegram_unavailable",
     });
+  });
+
+  it("returns a Telegram avatar only for an active member of the selected workspace", async () => {
+    const deps = dependencies(actor("organizer"));
+    deps.members.getByUserId = vi.fn()
+      .mockResolvedValueOnce(actor("organizer"))
+      .mockResolvedValueOnce({ ...actor("member"), userId: 30 });
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "GET",
+        path: "/api/members/30/avatar",
+        headers: workspaceHeaders,
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(JSON.parse(response?.body ?? "{}").avatar).toBe("data:image/jpeg;base64,AQID");
+    expect(deps.memberAvatar.load).toHaveBeenCalledWith(30);
+  });
+
+  it("falls back safely when a member has no accessible Telegram photo", async () => {
+    const deps = dependencies();
+    deps.memberAvatar.load = vi.fn().mockRejectedValue(new Error("provider details"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "GET",
+        path: "/api/members/20/avatar",
+        headers: workspaceHeaders,
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(JSON.parse(response?.body ?? "{}")).toEqual({ avatar: null });
+  });
+
+  it("does not load an avatar for a user outside the selected workspace", async () => {
+    const deps = dependencies();
+    deps.members.getByUserId = vi.fn()
+      .mockResolvedValueOnce(actor())
+      .mockResolvedValueOnce(null);
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "GET",
+        path: "/api/members/30/avatar",
+        headers: workspaceHeaders,
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(404);
+    expect(deps.memberAvatar.load).not.toHaveBeenCalled();
   });
 
   it("does not reveal whether an unavailable workspace exists", async () => {

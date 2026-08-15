@@ -90,6 +90,7 @@ const policy = {
   ignoreQuietHours: false,
   escalation: { enabled: false },
 };
+const avatarPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function reminder(
   workspaceId: string,
@@ -236,6 +237,9 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
     }
     if (method === "GET" && path === "/api/members") {
       return fulfill({ members: state.members[selected] });
+    }
+    if (method === "GET" && /^\/api\/members\/\d+\/avatar$/.test(path)) {
+      return fulfill({ avatar: avatarPng });
     }
     if (method === "POST" && path === "/api/members/sync") {
       return fulfill({ members: state.members[selected], synced: state.members[selected].length });
@@ -463,6 +467,25 @@ test("uses explicit 24-hour time fields", async ({ page }) => {
   await expect(page.getByText(/AM|PM/)).toHaveCount(0);
 });
 
+test("shows Telegram-style avatars in the participant selector", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const selector = page.getByRole("button", { name: "Ответственный" });
+  await expect(selector).toContainText("Анна");
+  await selector.click();
+
+  const ivan = page.getByRole("option", { name: /Иван/ });
+  await expect(ivan).toBeVisible();
+  await expect(ivan.locator("img")).toBeVisible();
+  await ivan.click();
+  await expect(selector).toContainText("Иван");
+  expect(state.requests.some((request) =>
+    request.method === "GET" && request.path === "/api/members/20/avatar"))
+    .toBe(true);
+});
+
 test("lets a member create only a personal reminder for themselves", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
@@ -471,7 +494,7 @@ test("lets a member create only a personal reminder for themselves", async ({ pa
 
   await expect(page.getByRole("button", { name: /Групповое/ })).toBeDisabled();
   await expect(page.locator(".choice-card.is-selected")).toContainText("Личное");
-  await expect(page.getByRole("combobox", { name: "Ответственный" })).toHaveValue("10");
+  await expect(page.getByRole("button", { name: "Ответственный" })).toContainText("Анна");
 
   await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Купить лекарство");
   await page.getByRole("button", { name: "Создать" }).click();
@@ -651,7 +674,8 @@ test("warns before assigning a personal reminder to a user without a private cha
   await openApp(page, state);
   await page.getByRole("button", { name: "Новое напоминание" }).click();
   await page.getByRole("button", { name: /Личное/ }).click();
-  await page.getByRole("combobox", { name: "Ответственный" }).selectOption("30");
+  await page.getByRole("button", { name: "Ответственный" }).click();
+  await page.getByRole("option", { name: /Маша/ }).click();
   await expect(page.getByText(/Маша сначала отправил боту \/start/)).toBeVisible();
 });
 
@@ -660,7 +684,7 @@ test("keeps a reminder created in the built-in preview mode", async ({ page }) =
   await page.goto("/?mock=1");
   await page.getByRole("combobox", { name: "Выбранная группа" }).selectOption("home");
   await page.getByRole("button", { name: "Новое напоминание" }).click();
-  await expect(page.getByRole("combobox", { name: "Ответственный" })).toHaveValue("10");
+  await expect(page.getByRole("button", { name: "Ответственный" })).toContainText("Анна");
   await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Купить корм");
   await page.getByRole("button", { name: "Создать" }).click();
   await expect(page.getByText("Купить корм")).toBeVisible();

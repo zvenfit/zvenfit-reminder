@@ -15,6 +15,7 @@ type TimingSafeSubtleCrypto = SubtleCrypto & {
 
 export const MAX_UPDATE_BYTES = 1024 * 1024;
 export const MAX_TELEGRAM_API_BYTES = 256 * 1024;
+export const MAX_TELEGRAM_FILE_BYTES = 512 * 1024;
 
 const TELEGRAM_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 const TELEGRAM_PROXY_SECRET_HEADER = "X-Zvenfit-Telegram-Proxy-Secret";
@@ -23,13 +24,17 @@ const JSON_CONTENT_TYPE = "application/json";
 const YANDEX_FUNCTION_HOST = "functions.yandexcloud.net";
 const FUNCTION_PATH_PATTERN = /^\/[a-z0-9]+$/;
 const TELEGRAM_METHOD_PATH_PATTERN = /^\/telegram\/([A-Za-z][A-Za-z0-9]*)$/;
+const TELEGRAM_FILE_PREFIX = "/telegram-file/";
 const TELEGRAM_BOT_TOKEN_PATTERN = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
+const TELEGRAM_FILE_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 const TELEGRAM_METHODS = new Set([
   "answerCallbackQuery",
   "deleteMessage",
   "editMessageText",
   "getChatMember",
+  "getFile",
   "getMe",
+  "getUserProfilePhotos",
   "savePreparedKeyboardButton",
   "sendMessage",
 ]);
@@ -169,6 +174,90 @@ async function handleTelegramApiRequest(
   });
 }
 
+function parseTelegramFilePath(pathname: string): string | null {
+  if (!pathname.startsWith(TELEGRAM_FILE_PREFIX)) return null;
+  let filePath: string;
+  try {
+    filePath = decodeURIComponent(pathname.slice(TELEGRAM_FILE_PREFIX.length));
+  } catch {
+    return null;
+  }
+  if (filePath.length === 0 || filePath.length > 256) return null;
+  const segments = filePath.split("/");
+  if (
+    segments.length < 2 ||
+    segments.some((segment) =>
+      segment === "" ||
+      segment === "." ||
+      segment === ".." ||
+      !TELEGRAM_FILE_SEGMENT_PATTERN.test(segment))
+  ) {
+    return null;
+  }
+  return segments.join("/");
+}
+
+async function handleTelegramFileRequest(
+  request: Request,
+  env: ProxyEnv,
+  filePath: string,
+  telegramFetch: OriginFetch,
+  secretsEqual: SecretComparator,
+): Promise<Response> {
+  if (request.method !== "GET") {
+    return jsonResponse(405, { error: "Method not allowed" }, { Allow: "GET" });
+  }
+  const providedSecret = request.headers.get(TELEGRAM_PROXY_SECRET_HEADER);
+  if (!providedSecret || !await secretsEqual(providedSecret, env.TELEGRAM_PROXY_SECRET)) {
+    return jsonResponse(403, { error: "Forbidden" });
+  }
+  const botToken = request.headers.get(TELEGRAM_BOT_TOKEN_HEADER);
+  if (!botToken || !TELEGRAM_BOT_TOKEN_PATTERN.test(botToken)) {
+    return jsonResponse(403, { error: "Forbidden" });
+  }
+
+  let telegramResponse: Response;
+  try {
+    telegramResponse = await telegramFetch(
+      `https://api.telegram.org/file/bot${botToken}/${filePath}`,
+      {
+        method: "GET",
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+  } catch (error) {
+    console.error(JSON.stringify({
+      message: "Telegram file proxy request failed",
+      error: error instanceof Error ? error.name : "UnknownError",
+    }));
+    return jsonResponse(502, { error: "Telegram file unavailable" });
+  }
+  if (!telegramResponse.ok) {
+    return jsonResponse(502, { error: "Telegram file unavailable" });
+  }
+
+  const contentType = telegramResponse.headers.get("Content-Type")?.split(";", 1)[0]?.trim();
+  if (!contentType || !["image/jpeg", "image/png", "image/webp"].includes(contentType)) {
+    return jsonResponse(502, { error: "Unsupported Telegram file" });
+  }
+  const declaredSize = Number(telegramResponse.headers.get("Content-Length"));
+  if (Number.isFinite(declaredSize) && declaredSize > MAX_TELEGRAM_FILE_BYTES) {
+    return jsonResponse(413, { error: "Telegram file is too large" });
+  }
+  const body = await telegramResponse.arrayBuffer();
+  if (body.byteLength > MAX_TELEGRAM_FILE_BYTES) {
+    return jsonResponse(413, { error: "Telegram file is too large" });
+  }
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Type": contentType,
+    },
+  });
+}
+
 export async function handleRequest(
   request: Request,
   env: ProxyEnv,
@@ -179,6 +268,17 @@ export async function handleRequest(
 
   if (request.method === "GET" && requestUrl.pathname === "/health") {
     return jsonResponse(200, { ok: true });
+  }
+
+  const telegramFilePath = parseTelegramFilePath(requestUrl.pathname);
+  if (telegramFilePath) {
+    return handleTelegramFileRequest(
+      request,
+      env,
+      telegramFilePath,
+      originFetch,
+      secretsEqual,
+    );
   }
 
   const telegramMethod = requestUrl.pathname.match(TELEGRAM_METHOD_PATH_PATTERN)?.[1];

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleRequest,
   MAX_TELEGRAM_API_BYTES,
+  MAX_TELEGRAM_FILE_BYTES,
   MAX_UPDATE_BYTES,
   type OriginFetch,
 } from "./index.js";
@@ -103,6 +104,100 @@ describe("Telegram webhook proxy", () => {
     expect(String(telegramFetch.mock.calls[0]?.[0])).toBe(
       `https://api.telegram.org/bot${BOT_TOKEN}/savePreparedKeyboardButton`,
     );
+  });
+
+  it("allows only the Telegram metadata methods required for profile photos", async () => {
+    const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, result: {} }), {
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    for (const method of ["getUserProfilePhotos", "getFile"]) {
+      const response = await handleRequest(
+        new Request(`https://proxy.example/telegram/${method}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            [PROXY_SECRET_HEADER]: "proxy-secret",
+            [BOT_TOKEN_HEADER]: BOT_TOKEN,
+          },
+          body: "{}",
+        }),
+        env,
+        telegramFetch,
+        compareSecrets,
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(telegramFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("allows only authenticated bounded Telegram profile photo downloads", async () => {
+    const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
+      new Response(new Uint8Array([1, 2, 3]), {
+        headers: { "Content-Type": "image/jpeg", "Content-Length": "3" },
+      }),
+    );
+    const response = await handleRequest(
+      new Request("https://proxy.example/telegram-file/photos/avatar.jpg", {
+        headers: {
+          [PROXY_SECRET_HEADER]: "proxy-secret",
+          [BOT_TOKEN_HEADER]: BOT_TOKEN,
+          "X-Untrusted-Header": "must-not-be-forwarded",
+        },
+      }),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("image/jpeg");
+    expect(String(telegramFetch.mock.calls[0]?.[0])).toBe(
+      `https://api.telegram.org/file/bot${BOT_TOKEN}/photos/avatar.jpg`,
+    );
+    expect(new Headers(telegramFetch.mock.calls[0]?.[1]?.headers).has("X-Untrusted-Header"))
+      .toBe(false);
+  });
+
+  it("rejects unsafe, unauthorized, and oversized Telegram file downloads", async () => {
+    const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
+      new Response(new Uint8Array(), {
+        headers: {
+          "Content-Type": "image/jpeg",
+          "Content-Length": String(MAX_TELEGRAM_FILE_BYTES + 1),
+        },
+      }),
+    );
+    const unauthorized = await handleRequest(
+      new Request("https://proxy.example/telegram-file/photos/avatar.jpg"),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+    const unsafe = await handleRequest(
+      new Request("https://proxy.example/telegram-file/photos/%2E%2E/secrets"),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+    const oversized = await handleRequest(
+      new Request("https://proxy.example/telegram-file/photos/avatar.jpg", {
+        headers: {
+          [PROXY_SECRET_HEADER]: "proxy-secret",
+          [BOT_TOKEN_HEADER]: BOT_TOKEN,
+        },
+      }),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+
+    expect(unauthorized.status).toBe(403);
+    expect(unsafe.status).toBe(404);
+    expect(oversized.status).toBe(413);
+    expect(telegramFetch).toHaveBeenCalledOnce();
   });
 
   it("fails closed for invalid outbound authorization, methods, and payloads", async () => {
