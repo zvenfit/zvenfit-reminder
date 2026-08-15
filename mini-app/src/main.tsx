@@ -855,7 +855,7 @@ function App() {
 
   if (workspaces.length === 0) {
     return (
-      <main className="app app--launch-error">
+      <main className="app app--launch-error app--workspace-recovery">
         <header className="home-header">
           <div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>
         </header>
@@ -866,19 +866,19 @@ function App() {
           <p>
             {loading
               ? `Проверяем группы для ${telegramAccountLabel}.`
-              : <>Для аккаунта <b>{telegramAccountLabel}</b> пока нет доступных групп. Если
-                  команда <b>/setup</b> уже выполнена, проверьте список ещё раз.</>}
+              : <>Для аккаунта <b>{telegramAccountLabel}</b> группы не найдены. Если
+                  команда <b>/setup</b> уже выполнена, обновите список.</>}
           </p>
           {error ? <div className="error-banner" role="alert">{error}</div> : null}
           {!loading ? (
             <div className="workspace-recovery__actions">
-              <button type="button" onClick={retryWorkspaceLoad}>Проверить снова</button>
+              <button type="button" onClick={retryWorkspaceLoad}>Обновить</button>
               <button
                 className="secondary-action"
                 type="button"
                 onClick={() => window.Telegram?.WebApp?.close?.()}
               >
-                Закрыть панель
+                Закрыть
               </button>
             </div>
           ) : null}

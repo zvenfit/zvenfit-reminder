@@ -401,12 +401,14 @@ test("recovers from an empty workspace response without leaving disabled control
   await expect(page.getByRole("heading", { name: "Обновите список групп" })).toBeVisible();
   await expect(page.getByText("Для аккаунта Анна")).toBeVisible();
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Проверить снова" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1))
+    .toBe(true);
   const initialWorkspaceRequests = state.requests.filter((request) =>
     request.path === "/api/workspaces").length;
 
   state.workspaces.push(teamWorkspace);
-  await page.getByRole("button", { name: "Проверить снова" }).click();
+  await page.getByRole("button", { name: "Обновить" }).click();
 
   await expect(page.getByText("Команда", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toBeEnabled();

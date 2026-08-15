@@ -1725,25 +1725,48 @@ button:disabled {
   font-size: clamp(30px, 7vw, 40px);
 }
 
+.app--workspace-recovery {
+  padding-bottom: calc(20px + env(safe-area-inset-bottom));
+}
+
+.app--workspace-recovery .workspace-recovery {
+  margin-top: 24px;
+}
+
 .workspace-recovery .error-banner {
   margin-bottom: 0;
 }
 
 .workspace-recovery__actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-top: 26px;
+  margin-top: 22px;
 }
 
 .workspace-recovery__actions button {
+  width: 100%;
   margin-top: 0;
+  padding: 0 12px;
+  font-size: 14px;
 }
 
 .workspace-recovery__actions .secondary-action {
   border: 1px solid var(--line);
   background: var(--paper-muted);
   color: var(--ink);
+}
+
+@media (max-width: 420px) {
+  .workspace-recovery {
+    padding: 22px;
+  }
+
+  .workspace-recovery .launch-error__mark {
+    width: 42px;
+    height: 42px;
+    margin-bottom: 18px;
+  }
 }
 
 @keyframes breathe {

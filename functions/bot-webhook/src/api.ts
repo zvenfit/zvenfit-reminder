@@ -27,14 +27,14 @@ export interface ApiGatewayResponse {
 }
 
 export function getPath(event: ApiGatewayEvent): string {
-  if (event.path) {
-    return event.path;
+  if (event.url) {
+    try {
+      return new URL(event.url, "https://function.local").pathname;
+    } catch {
+      // Fall back to path for direct Cloud Function and test events.
+    }
   }
-  try {
-    return new URL(event.url ?? "/").pathname;
-  } catch {
-    return "/";
-  }
+  return event.path ?? "/";
 }
 
 export function getHeader(event: ApiGatewayEvent, name: string): string | undefined {
