@@ -283,6 +283,7 @@ function errorMessage(error: unknown): string {
 function App() {
   const previewMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
   const [telegramAuthMissing] = useState(() => !previewMode && !getInitData());
+  const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [view, setView] = useState<View>("home");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
@@ -337,6 +338,11 @@ function App() {
 
   const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
     (previewMode ? members[0]?.userId : undefined);
+  const telegramUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
+  const telegramAccountLabel = telegramUser
+    ? [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(" ") ||
+      (telegramUser.username ? `@${telegramUser.username}` : `ID ${telegramUser.id ?? "—"}`)
+    : "текущего Telegram-аккаунта";
   const memberMap = useMemo(
     () => new Map(members.map((member) => [member.userId, member])),
     [members],
@@ -435,7 +441,11 @@ function App() {
         const initial = response.workspaces.find((workspace) =>
           workspace.workspaceId === storedWorkspaceId) ?? response.workspaces[0];
         if (!initial) {
-          setError("Нет доступных групп. Добавьте бота в группу и выполните /setup.");
+          activeWorkspaceIdRef.current = null;
+          setWorkspaceId(null);
+          setOccurrences([]);
+          setReminders([]);
+          setMembers([]);
           setLoading(false);
           return;
         }
@@ -447,7 +457,12 @@ function App() {
         setLoading(false);
       }
     })();
-  }, [telegramAuthMissing]);
+  }, [telegramAuthMissing, workspaceLoadAttempt]);
+
+  function retryWorkspaceLoad() {
+    setError(null);
+    setWorkspaceLoadAttempt((attempt) => attempt + 1);
+  }
 
   async function changeWorkspace(nextWorkspaceId: string) {
     activeWorkspaceIdRef.current = nextWorkspaceId;
@@ -833,6 +848,40 @@ function App() {
           <button type="button" onClick={() => window.Telegram?.WebApp?.close?.()}>
             Закрыть панель
           </button>
+        </section>
+      </main>
+    );
+  }
+
+  if (workspaces.length === 0) {
+    return (
+      <main className="app app--launch-error">
+        <header className="home-header">
+          <div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>
+        </header>
+        <section className="launch-error workspace-recovery" role="status" aria-busy={loading}>
+          <span className="launch-error__mark" aria-hidden="true">{loading ? "···" : "↻"}</span>
+          <p className="eyebrow">{loading ? "Проверяем доступ" : "Группа не найдена"}</p>
+          <h1>{loading ? "Ищем ваши группы" : "Обновите список групп"}</h1>
+          <p>
+            {loading
+              ? `Проверяем группы для ${telegramAccountLabel}.`
+              : <>Для аккаунта <b>{telegramAccountLabel}</b> пока нет доступных групп. Если
+                  команда <b>/setup</b> уже выполнена, проверьте список ещё раз.</>}
+          </p>
+          {error ? <div className="error-banner" role="alert">{error}</div> : null}
+          {!loading ? (
+            <div className="workspace-recovery__actions">
+              <button type="button" onClick={retryWorkspaceLoad}>Проверить снова</button>
+              <button
+                className="secondary-action"
+                type="button"
+                onClick={() => window.Telegram?.WebApp?.close?.()}
+              >
+                Закрыть панель
+              </button>
+            </div>
+          ) : null}
         </section>
       </main>
     );

@@ -1721,6 +1721,31 @@ button:disabled {
   font-weight: 800;
 }
 
+.workspace-recovery h1 {
+  font-size: clamp(30px, 7vw, 40px);
+}
+
+.workspace-recovery .error-banner {
+  margin-bottom: 0;
+}
+
+.workspace-recovery__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 26px;
+}
+
+.workspace-recovery__actions button {
+  margin-top: 0;
+}
+
+.workspace-recovery__actions .secondary-action {
+  border: 1px solid var(--line);
+  background: var(--paper-muted);
+  color: var(--ink);
+}
+
 @keyframes breathe {
   from { opacity: 0.45; }
   to { opacity: 0.9; }

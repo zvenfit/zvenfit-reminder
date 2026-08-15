@@ -334,7 +334,7 @@ async function installTelegram(page: Page): Promise<void> {
       value: {
         WebApp: {
           initData: "e2e-init-data",
-          initDataUnsafe: { user: { id: 10 } },
+          initDataUnsafe: { user: { id: 10, first_name: "Анна" } },
           ready() {},
           expand() {},
           themeParams: {},
@@ -388,6 +388,30 @@ test("shows a Telegram launch recovery screen without calling the API", async ({
   await expect(page.getByText("Missing X-Telegram-Init-Data")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
   expect(apiRequests).toBe(0);
+});
+
+test("recovers from an empty workspace response without leaving disabled controls", async ({ page }) => {
+  const state = createState();
+  const teamWorkspace = state.workspaces[0]!;
+  state.workspaces = [];
+  await installTelegramAndApi(page, state);
+
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Обновите список групп" })).toBeVisible();
+  await expect(page.getByText("Для аккаунта Анна")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Проверить снова" })).toBeEnabled();
+  const initialWorkspaceRequests = state.requests.filter((request) =>
+    request.path === "/api/workspaces").length;
+
+  state.workspaces.push(teamWorkspace);
+  await page.getByRole("button", { name: "Проверить снова" }).click();
+
+  await expect(page.getByText("Команда", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Новое напоминание" })).toBeEnabled();
+  expect(state.requests.filter((request) => request.path === "/api/workspaces").length)
+    .toBeGreaterThan(initialWorkspaceRequests);
 });
 
 test("lets a member create only a personal reminder for themselves", async ({ page }) => {
