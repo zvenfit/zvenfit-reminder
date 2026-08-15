@@ -23,10 +23,11 @@ Mini App ──────────> API Gateway /api/* ──────�
 
 Cloud Timer (5m) ────────────────────────────> reminder-cron function
                                                      │
-                                                     ├─> Telegram Bot API
+                                                     ├─> Cloudflare Worker /telegram/*
                                                      └─> YDB
 
-bot-webhook function ────────────────────────────────> YDB
+bot-webhook function ──> Cloudflare Worker /telegram/* ──> Telegram Bot API
+          └──────────────────────────────────────────────> YDB
 ```
 
 The Telegram webhook uses a narrow Cloudflare Worker proxy because Telegram
@@ -39,10 +40,11 @@ Telegram API calls are time-bounded. If an update cannot be processed, the
 webhook returns a Bot API method in its HTTP response so Telegram itself can
 show a generic retry message or callback alert without another outbound request.
 The response never exposes exception details or configuration values.
-Both Cloud Functions prefer IPv4 DNS results for Telegram calls because the
-Yandex Cloud Functions public egress path is IPv4-only while Telegram may return
-an IPv6 address first. The grammY client additionally uses an HTTPS agent pinned
-to IPv4; DNS result ordering alone does not constrain node-fetch's connection.
+Production Bot API calls from both functions use the Worker's authenticated,
+method-allowlisted `/telegram/*` route because direct Yandex Function egress to
+Telegram is intermittent even when forced to IPv4. The bot token is sent only in
+an encrypted function-to-Worker request header and is never part of the public
+Worker URL. Local development keeps direct Bot API access with IPv4 preference.
 
 The Mini App is built as static files and uploaded to Yandex Object Storage.
 Both functions bundle application code with esbuild and install the YDB runtime
@@ -132,8 +134,8 @@ already recorded migration with a changed checksum aborts the deploy.
 - CI runs on Node.js 22, matching the supported Yandex Cloud Functions runtime:
   install, typecheck, test, build.
 - A push to `main` applies outstanding YDB migrations, deploys both functions,
-  verifies Telegram API access from inside the bot function runtime, uploads the
-  Mini App, and resets the Telegram webhook.
+  verifies `getMe` and `sendMessage` access from inside the bot function runtime,
+  uploads the Mini App, and resets the Telegram webhook.
 - Function deploy directories are pruned to the runtime-only YDB dependency
   surface, and CI rejects archives above 3.4 MB before direct upload.
 - The deploy job validates all required `production` secrets before changing

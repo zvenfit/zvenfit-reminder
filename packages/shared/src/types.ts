@@ -5,6 +5,8 @@ export interface AppConfig {
   webhookSecret: string;
   defaultTimezone: string;
   miniAppUrl: string;
+  telegramApiRoot?: string;
+  telegramProxySecret?: string;
 }
 
 export function loadConfig(): AppConfig {
@@ -16,6 +18,12 @@ export function loadConfig(): AppConfig {
     return value;
   };
 
+  const telegramApiRoot = process.env.TELEGRAM_API_ROOT?.trim() || undefined;
+  const telegramProxySecret = process.env.TELEGRAM_PROXY_SECRET?.trim() || undefined;
+  if ((telegramApiRoot && !telegramProxySecret) || (!telegramApiRoot && telegramProxySecret)) {
+    throw new Error("TELEGRAM_API_ROOT and TELEGRAM_PROXY_SECRET must be configured together");
+  }
+
   return {
     ydbEndpoint: required("YDB_ENDPOINT"),
     ydbDatabase: required("YDB_DATABASE"),
@@ -23,5 +31,7 @@ export function loadConfig(): AppConfig {
     webhookSecret: required("WEBHOOK_SECRET"),
     defaultTimezone: process.env.DEFAULT_TIMEZONE ?? "Europe/Moscow",
     miniAppUrl: process.env.MINI_APP_URL ?? "",
+    telegramApiRoot,
+    telegramProxySecret,
   };
 }

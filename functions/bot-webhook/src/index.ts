@@ -13,7 +13,7 @@ import {
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
 import { setDefaultResultOrder } from "node:dns";
-import { Bot, type BotConfig, type Context } from "grammy";
+import { Bot, GrammyError, type BotConfig, type Context } from "grammy";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
@@ -117,7 +117,7 @@ export function getBot(): Bot {
     : undefined;
   const bot = new Bot(config.botToken, {
     ...(cachedBotInfo ? { botInfo: cachedBotInfo } : {}),
-    client: telegramClientOptions(TELEGRAM_API_TIMEOUT_SECONDS),
+    client: telegramClientOptions(TELEGRAM_API_TIMEOUT_SECONDS, config),
   });
   const observeSyncedGroupUser = (chatId: number) => async (user: SyncedTelegramUser) =>
     observeTelegramIdentity(
@@ -612,7 +612,17 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
     }
 
     try {
-      await getBot().api.getMe();
+      const bot = getBot();
+      await bot.api.getMe();
+      try {
+        // Chat id 0 is invalid, so Telegram must return a normal 400 response.
+        // This proves the sendMessage transport without posting to a real chat.
+        await bot.api.sendMessage(0, "ZvenFit Reminder runtime health check");
+      } catch (error) {
+        if (!(error instanceof GrammyError && error.method === "sendMessage" && error.error_code === 400)) {
+          throw error;
+        }
+      }
       return jsonResponse(200, { ok: true });
     } catch (error) {
       console.error("Telegram API health check failed", {

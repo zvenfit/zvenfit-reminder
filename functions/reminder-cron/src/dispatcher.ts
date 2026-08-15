@@ -6,6 +6,7 @@ import {
   buildOccurrenceMessage,
   escapeHtml,
   occurrenceCallbackData,
+  telegramApiRequest,
   type AppConfig,
   type ReminderOccurrence,
   type ReservedDelivery,
@@ -15,6 +16,7 @@ import { InlineKeyboard } from "grammy";
 
 // Yandex Cloud Functions has public IPv4 egress, while Telegram may resolve to IPv6 first.
 setDefaultResultOrder("ipv4first");
+const TELEGRAM_API_TIMEOUT_MS = 10_000;
 
 export interface DispatcherStats {
   mode: "workspace";
@@ -79,80 +81,100 @@ class TelegramHttpError extends Error {
   }
 }
 
-export const telegramClient: TelegramClient = {
-  async send(botToken, chatId, text, replyMarkup) {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
+export function createTelegramClient(
+  routing: Pick<AppConfig, "telegramApiRoot" | "telegramProxySecret"> = {},
+): TelegramClient {
+  return {
+    async send(botToken, chatId, text, replyMarkup) {
+      const request = telegramApiRequest({ ...routing, botToken }, "sendMessage");
+      const response = await fetch(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          parse_mode: "HTML",
+          reply_markup: replyMarkup,
+        }),
+        signal: AbortSignal.timeout(TELEGRAM_API_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new TelegramHttpError(response.status);
+      }
+      const body = (await response.json()) as { result?: { message_id?: number } };
+      const messageId = body.result?.message_id;
+      if (!messageId) {
+        throw new Error("Telegram response has no message ID");
+      }
+      return messageId;
+    },
+
+    async delete(botToken, chatId, messageId) {
+      const request = telegramApiRequest({ ...routing, botToken }, "deleteMessage");
+      const response = await fetch(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+        signal: AbortSignal.timeout(TELEGRAM_API_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new TelegramHttpError(response.status);
+      }
+    },
+
+    async editFinal(botToken, chatId, messageId, text) {
+      await editTelegramMessage(
+        routing,
+        botToken,
+        chatId,
+        messageId,
         text,
-        parse_mode: "HTML",
-        reply_markup: replyMarkup,
-      }),
-    });
-    if (!response.ok) {
-      throw new TelegramHttpError(response.status);
-    }
-    const body = (await response.json()) as { result?: { message_id?: number } };
-    const messageId = body.result?.message_id;
-    if (!messageId) {
-      throw new Error("Telegram response has no message ID");
-    }
-    return messageId;
-  },
+        { inline_keyboard: [] },
+      );
+    },
 
-  async delete(botToken, chatId, messageId) {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/deleteMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
-    });
-    if (!response.ok) {
-      throw new TelegramHttpError(response.status);
-    }
-  },
+    async editActive(botToken, chatId, messageId, text, replyMarkup) {
+      await editTelegramMessage(routing, botToken, chatId, messageId, text, replyMarkup);
+    },
+  };
+}
 
-  async editFinal(botToken, chatId, messageId, text) {
-    await editTelegramMessage(botToken, chatId, messageId, text, { inline_keyboard: [] });
-  },
-
-  async editActive(botToken, chatId, messageId, text, replyMarkup) {
-    await editTelegramMessage(botToken, chatId, messageId, text, replyMarkup);
-  },
-};
+export const telegramClient: TelegramClient = createTelegramClient();
 
 async function editTelegramMessage(
+  routing: Pick<AppConfig, "telegramApiRoot" | "telegramProxySecret">,
   botToken: string,
   chatId: number,
   messageId: number,
   text: string,
   replyMarkup: InlineKeyboard | { inline_keyboard: [] },
 ): Promise<void> {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId,
-        text,
-        parse_mode: "HTML",
-        reply_markup: replyMarkup,
-      }),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => null) as { description?: unknown } | null;
-      const description = typeof body?.description === "string" ? body.description : null;
-      const normalized = description?.toLowerCase() ?? "";
-      if (
-        response.status === 400 &&
-        (normalized.includes("message is not modified") ||
-          normalized.includes("message to edit not found"))
-      ) {
-        return;
-      }
-      throw new TelegramHttpError(response.status, description);
+  const request = telegramApiRequest({ ...routing, botToken }, "editMessageText");
+  const response = await fetch(request.url, {
+    method: "POST",
+    headers: request.headers,
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      reply_markup: replyMarkup,
+    }),
+    signal: AbortSignal.timeout(TELEGRAM_API_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { description?: unknown } | null;
+    const description = typeof body?.description === "string" ? body.description : null;
+    const normalized = description?.toLowerCase() ?? "";
+    if (
+      response.status === 400 &&
+      (normalized.includes("message is not modified") ||
+        normalized.includes("message to edit not found"))
+    ) {
+      return;
     }
+    throw new TelegramHttpError(response.status, description);
+  }
 }
 
 function createDependencies(config: AppConfig): DispatcherDependencies {
@@ -161,7 +183,7 @@ function createDependencies(config: AppConfig): DispatcherDependencies {
     occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
     actions: new OccurrenceActionsRepository(config.ydbEndpoint, config.ydbDatabase),
     deliveries: new DeliveriesRepository(config.ydbEndpoint, config.ydbDatabase),
-    telegram: telegramClient,
+    telegram: createTelegramClient(config),
   };
 }
 

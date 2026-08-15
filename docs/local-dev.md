@@ -204,3 +204,5 @@ YDB_DATABASE=/local \
 | `SKIP_INIT_DATA_VALIDATION` | `0` | `1` — bypass initData в dev |
 | `DEV_USER_ID` | — | User id для bypass / генератора |
 | `VITE_DEV_INIT_DATA` | — | initData для Mini App в браузере |
+| `TELEGRAM_API_ROOT` | `https://api.telegram.org` | Production Worker route `/telegram`; настраивается только вместе с proxy secret |
+| `TELEGRAM_PROXY_SECRET` | — | Shared secret для исходящих Bot API-вызовов через Worker |

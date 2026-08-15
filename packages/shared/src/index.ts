@@ -5,6 +5,7 @@ export * from "./occurrence-action-policy.js";
 export * from "./reminder-access-policy.js";
 export * from "./init-data.js";
 export * from "./telegram.js";
+export * from "./telegram-api.js";
 export * from "./db/client.js";
 export * from "./db/transaction.js";
 export * from "./db/delivery-guard.js";

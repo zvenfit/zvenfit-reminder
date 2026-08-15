@@ -7,6 +7,7 @@ import type {
   ReservedDelivery,
 } from "@zvenfit-reminder/shared";
 import {
+  createTelegramClient,
   runDispatcher,
   telegramClient,
   type DispatcherDependencies,
@@ -102,6 +103,34 @@ function noMessageSync() {
 }
 
 describe("runDispatcher", () => {
+  it("routes cron Telegram calls through the authenticated Worker", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({ result: { message_id: 77 } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createTelegramClient({
+      telegramApiRoot: "https://reminder.example.workers.dev/telegram",
+      telegramProxySecret: "proxy-secret",
+    });
+
+    await expect(client.send(
+      "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_123",
+      -100123,
+      "Напоминание",
+      new (await import("grammy")).InlineKeyboard(),
+    )).resolves.toBe(77);
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://reminder.example.workers.dev/telegram/sendMessage");
+    const headers = new Headers(init.headers);
+    expect(headers.get("X-Zvenfit-Telegram-Proxy-Secret")).toBe("proxy-secret");
+    expect(headers.get("X-Zvenfit-Telegram-Bot-Token"))
+      .toBe("123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_123");
+    vi.unstubAllGlobals();
+  });
+
   it.each([
     "Bad Request: message is not modified",
     "Bad Request: message to edit not found",

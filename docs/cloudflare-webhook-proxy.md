@@ -2,7 +2,8 @@
 
 Telegram не может стабильно подключаться напрямую к публичным endpoint Yandex
 Cloud. Worker принимает Telegram webhook на глобальном edge и пересылает его в
-существующую функцию `zvenfit-reminder-bot`.
+существующую функцию `zvenfit-reminder-bot`. Исходящие Bot API-запросы обеих
+Cloud Functions также идут через закрытый маршрут Worker `/telegram/<method>`.
 
 ## Границы безопасности
 
@@ -15,6 +16,12 @@ Cloud. Worker принимает Telegram webhook на глобальном edge
 - Update больше 1 MiB не пересылается.
 - При недоступности origin Worker возвращает `502`, поэтому Telegram повторит
   доставку.
+- Outbound-маршрут принимает только JSON до 256 KiB, отдельный proxy secret и
+  валидный bot token в закрытых заголовках.
+- Разрешены только необходимые методы: `getMe`, `getChatMember`, `sendMessage`,
+  `editMessageText`, `deleteMessage`, `answerCallbackQuery`.
+- Proxy secret сравнивается constant-time. Bot token не хранится в Worker и не
+  попадает в публичный URL или ответы; в Telegram он уходит по HTTPS.
 
 ## Локальная проверка
 
@@ -25,17 +32,19 @@ npm test --workspace=@zvenfit-reminder/telegram-webhook-proxy
 npm run build --workspace=@zvenfit-reminder/telegram-webhook-proxy
 ```
 
-Для локального запуска создай игнорируемый `.dev.vars` только при необходимости
-переопределить `ORIGIN_URL`, затем выполни `npm run dev:proxy`.
+Для локального запуска создай игнорируемый `.dev.vars` с тестовым
+`TELEGRAM_PROXY_SECRET`, затем выполни `npm run dev:proxy`.
 
 ## Production deploy
 
-1. Подключи Cloudflare account и разверни Worker из
-   `edge/telegram-webhook-proxy`.
-2. Проверь `GET https://<worker>.<account>.workers.dev/health` → `{ "ok": true }`.
+1. Создай случайный `TELEGRAM_PROXY_SECRET` и запиши одинаковое значение как
+   Cloudflare Worker secret и GitHub Environment `production` secret.
+2. Разверни Worker из `edge/telegram-webhook-proxy` и проверь
+   `GET https://<worker>.<account>.workers.dev/health` → `{ "ok": true }`.
 3. Запиши корневой URL Worker в GitHub Environment `production`, secret
    `TELEGRAM_WEBHOOK_URL`.
-4. Запусти production deploy: он проверит bot username, установит Telegram
+4. Запусти production deploy: он передаст функциям `/telegram` API root,
+   проверит исходящий `getMe` из runtime, установит Telegram
    webhook на Worker, выполнит синтетический POST через Worker и не пропустит
    свежую ошибку доставки.
 5. Выполни `/setup@zvenfit_reminder_bot` в тестовой группе и проверь логи

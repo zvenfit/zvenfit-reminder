@@ -45,6 +45,7 @@ jobs:
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
+          TELEGRAM_PROXY_SECRET: ${{ secrets.TELEGRAM_PROXY_SECRET }}
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
@@ -57,6 +58,7 @@ jobs:
           : "${WEBHOOK_SECRET:?Missing production secret WEBHOOK_SECRET}"
           : "${WEBHOOK_URL:?Missing production secret WEBHOOK_URL}"
           : "${TELEGRAM_WEBHOOK_URL:?Missing production secret TELEGRAM_WEBHOOK_URL}"
+          : "${TELEGRAM_PROXY_SECRET:?Missing production secret TELEGRAM_PROXY_SECRET}"
           : "${YDB_ENDPOINT:?Missing production secret YDB_ENDPOINT}"
           : "${YDB_DATABASE:?Missing production secret YDB_DATABASE}"
           : "${MINI_APP_URL:?Missing production secret MINI_APP_URL}"
@@ -115,9 +117,18 @@ jobs:
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           MINI_APP_URL: ${{ secrets.MINI_APP_URL }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
+          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
+          TELEGRAM_PROXY_SECRET: ${{ secrets.TELEGRAM_PROXY_SECRET }}
           YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ secrets.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
           EXPECTED_BOT_USERNAME: zvenfit_reminder_bot
         run: |
+          telegram_api_root="$(TELEGRAM_WEBHOOK_URL="$TELEGRAM_WEBHOOK_URL" node --input-type=module -e '
+            const url = new URL(process.env.TELEGRAM_WEBHOOK_URL);
+            if (url.protocol !== "https:" || !url.hostname.endsWith(".workers.dev")) {
+              throw new Error("TELEGRAM_WEBHOOK_URL must use workers.dev");
+            }
+            process.stdout.write(`${url.origin}/telegram`);
+          ')"
           bot_info_response="$(curl -sS "https://api.telegram.org/bot${BOT_TOKEN}/getMe")"
           bot_info_json="$(printf '%s' "$bot_info_response" | jq -ce \
             --arg expected "$EXPECTED_BOT_USERNAME" '
@@ -142,6 +153,8 @@ jobs:
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment MINI_APP_URL="$MINI_APP_URL" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
+            --environment TELEGRAM_API_ROOT="$telegram_api_root" \
+            --environment TELEGRAM_PROXY_SECRET="$TELEGRAM_PROXY_SECRET" \
             --environment NODE_ENV=production \
             --environment BOT_INFO_JSON="$bot_info_json"
       - name: Verify Telegram API from function runtime
@@ -165,8 +178,17 @@ jobs:
           YDB_ENDPOINT: ${{ secrets.YDB_ENDPOINT }}
           YDB_DATABASE: ${{ secrets.YDB_DATABASE }}
           DEFAULT_TIMEZONE: ${{ secrets.DEFAULT_TIMEZONE }}
+          TELEGRAM_WEBHOOK_URL: ${{ secrets.TELEGRAM_WEBHOOK_URL }}
+          TELEGRAM_PROXY_SECRET: ${{ secrets.TELEGRAM_PROXY_SECRET }}
           YC_RUNTIME_SERVICE_ACCOUNT_ID: ${{ secrets.YC_RUNTIME_SERVICE_ACCOUNT_ID }}
         run: |
+          telegram_api_root="$(TELEGRAM_WEBHOOK_URL="$TELEGRAM_WEBHOOK_URL" node --input-type=module -e '
+            const url = new URL(process.env.TELEGRAM_WEBHOOK_URL);
+            if (url.protocol !== "https:" || !url.hostname.endsWith(".workers.dev")) {
+              throw new Error("TELEGRAM_WEBHOOK_URL must use workers.dev");
+            }
+            process.stdout.write(`${url.origin}/telegram`);
+          ')"
           yc serverless function version create \
             --function-name zvenfit-reminder-cron \
             --runtime nodejs22 \
@@ -180,6 +202,8 @@ jobs:
             --environment YDB_ENDPOINT="$YDB_ENDPOINT" \
             --environment YDB_DATABASE="$YDB_DATABASE" \
             --environment DEFAULT_TIMEZONE="${DEFAULT_TIMEZONE:-Europe/Moscow}" \
+            --environment TELEGRAM_API_ROOT="$telegram_api_root" \
+            --environment TELEGRAM_PROXY_SECRET="$TELEGRAM_PROXY_SECRET" \
             --environment NODE_ENV=production
       - name: Upload Mini App
         env:

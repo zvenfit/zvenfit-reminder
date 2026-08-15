@@ -1,13 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   handleRequest,
+  MAX_TELEGRAM_API_BYTES,
   MAX_UPDATE_BYTES,
   type OriginFetch,
 } from "./index.js";
 
 const ORIGIN_URL = "https://functions.yandexcloud.net/d4e3h1o2eoa1vp5g7ec5";
 const SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
-const env: WorkerEnv = { ORIGIN_URL };
+const PROXY_SECRET_HEADER = "X-Zvenfit-Telegram-Proxy-Secret";
+const BOT_TOKEN_HEADER = "X-Zvenfit-Telegram-Bot-Token";
+const BOT_TOKEN = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_123";
+const env: WorkerEnv = { ORIGIN_URL, TELEGRAM_PROXY_SECRET: "proxy-secret" };
+const compareSecrets = async (provided: string, expected: string) => provided === expected;
 
 function telegramRequest(body: BodyInit = JSON.stringify({ update_id: 1 })): Request {
   return new Request("https://proxy.example/", {
@@ -34,6 +39,84 @@ describe("Telegram webhook proxy", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
     expect(originFetch).not.toHaveBeenCalled();
+  });
+
+  it("proxies allowlisted Telegram API methods without exposing the token in its public URL", async () => {
+    const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, result: { id: 123456 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const body = JSON.stringify({ chat_id: -42, text: "Готово" });
+    const request = new Request("https://proxy.example/telegram/sendMessage", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        [PROXY_SECRET_HEADER]: "proxy-secret",
+        [BOT_TOKEN_HEADER]: BOT_TOKEN,
+        "X-Untrusted-Header": "must-not-be-forwarded",
+      },
+      body,
+    });
+
+    const response = await handleRequest(request, env, telegramFetch, compareSecrets);
+
+    expect(telegramFetch).toHaveBeenCalledOnce();
+    const [upstream, init] = telegramFetch.mock.calls[0]!;
+    expect(String(upstream)).toBe(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`);
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers)).toEqual(new Headers({
+      "Content-Type": "application/json",
+    }));
+    expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe(body);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("fails closed for invalid outbound authorization, methods, and payloads", async () => {
+    const telegramFetch = vi.fn<OriginFetch>();
+    const baseHeaders = {
+      "Content-Type": "application/json",
+      [PROXY_SECRET_HEADER]: "wrong-secret",
+      [BOT_TOKEN_HEADER]: BOT_TOKEN,
+    };
+
+    const forbidden = await handleRequest(
+      new Request("https://proxy.example/telegram/getMe", {
+        method: "POST",
+        headers: baseHeaders,
+        body: "{}",
+      }),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+    const unsupported = await handleRequest(
+      new Request("https://proxy.example/telegram/setWebhook", {
+        method: "POST",
+        headers: { ...baseHeaders, [PROXY_SECRET_HEADER]: "proxy-secret" },
+        body: "{}",
+      }),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+    const oversized = await handleRequest(
+      new Request("https://proxy.example/telegram/sendMessage", {
+        method: "POST",
+        headers: { ...baseHeaders, [PROXY_SECRET_HEADER]: "proxy-secret" },
+        body: new Uint8Array(MAX_TELEGRAM_API_BYTES + 1),
+      }),
+      env,
+      telegramFetch,
+      compareSecrets,
+    );
+
+    expect(forbidden.status).toBe(403);
+    expect(unsupported.status).toBe(404);
+    expect(oversized.status).toBe(413);
+    expect(telegramFetch).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported paths and methods", async () => {
@@ -131,7 +214,7 @@ describe("Telegram webhook proxy", () => {
 
     const invalid = await handleRequest(
       telegramRequest(),
-      { ORIGIN_URL: "https://example.com/open-proxy" },
+      { ORIGIN_URL: "https://example.com/open-proxy", TELEGRAM_PROXY_SECRET: "proxy-secret" },
       originFetch,
     );
     const unavailable = await handleRequest(telegramRequest(), env, originFetch);

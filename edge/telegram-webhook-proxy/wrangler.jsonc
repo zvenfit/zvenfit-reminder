@@ -11,5 +11,8 @@
   },
   "vars": {
     "ORIGIN_URL": "https://functions.yandexcloud.net/d4e3h1o2eoa1vp5g7ec5"
+  },
+  "secrets": {
+    "required": ["TELEGRAM_PROXY_SECRET"]
   }
 }

@@ -5,11 +5,14 @@ import {
   WorkspaceMembersRepository,
   WorkspacesRepository,
   canActOnOccurrence,
+  telegramApiRequest,
   type AppConfig,
   type ReminderOccurrence,
 } from "@zvenfit-reminder/shared";
 import type { InlineKeyboard } from "grammy";
 import { renderOccurrenceAction } from "./occurrence-message.js";
+
+const TELEGRAM_API_TIMEOUT_MS = 10_000;
 
 export type OccurrenceAction = "done" | "snooze" | "undo";
 
@@ -75,24 +78,30 @@ export interface OccurrenceActionDependencies {
   };
 }
 
-const telegramEditor: NonNullable<OccurrenceActionDependencies["telegram"]> = {
-  async edit(botToken, chatId, messageId, text, keyboard) {
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId,
-        text,
-        parse_mode: "HTML",
-        reply_markup: keyboard,
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Telegram editMessageText failed with HTTP ${response.status}`);
-    }
-  },
-};
+function createTelegramEditor(
+  config: AppConfig,
+): NonNullable<OccurrenceActionDependencies["telegram"]> {
+  return {
+    async edit(botToken, chatId, messageId, text, keyboard) {
+      const request = telegramApiRequest({ ...config, botToken }, "editMessageText");
+      const response = await fetch(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        }),
+        signal: AbortSignal.timeout(TELEGRAM_API_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        throw new Error(`Telegram editMessageText failed with HTTP ${response.status}`);
+      }
+    },
+  };
+}
 
 function createDependencies(config: AppConfig): OccurrenceActionDependencies {
   return {
@@ -101,7 +110,7 @@ function createDependencies(config: AppConfig): OccurrenceActionDependencies {
     reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
     occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
     actions: new OccurrenceActionsRepository(config.ydbEndpoint, config.ydbDatabase),
-    telegram: telegramEditor,
+    telegram: createTelegramEditor(config),
   };
 }
 
