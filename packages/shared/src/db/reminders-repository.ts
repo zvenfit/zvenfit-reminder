@@ -199,7 +199,7 @@ export class RemindersRepository {
           WHERE watcher.workspace_id = $workspace_id
             AND watcher.reminder_id = $reminder_id
             AND member.status = 'active'
-          ORDER BY watcher.user_id;
+          ORDER BY user_id;
         `,
         {
           $workspace_id: TypedValues.utf8(workspaceId),
@@ -241,7 +241,7 @@ export class RemindersRepository {
             AND member.user_id = watcher.user_id
           WHERE watcher.workspace_id = $workspace_id
             AND member.status = 'active'
-          ORDER BY watcher.reminder_id, watcher.user_id;
+          ORDER BY reminder_id, user_id;
         `,
         {
           $workspace_id: TypedValues.utf8(workspaceId),
@@ -552,7 +552,8 @@ export class RemindersRepository {
               AND runtime.reminder_id = $reminder_id
             LIMIT 1;
 
-            SELECT watcher.user_id AS user_id FROM reminder_watchers AS watcher
+            SELECT watcher.user_id AS user_id, member.status AS member_status
+            FROM reminder_watchers AS watcher
             INNER JOIN workspace_members AS member
               ON member.workspace_id = watcher.workspace_id
               AND member.user_id = watcher.user_id
@@ -560,7 +561,7 @@ export class RemindersRepository {
               AND watcher.reminder_id = $reminder_id
               AND watcher.user_id != $responsible_user_id
               AND member.status = 'active'
-            ORDER BY watcher.user_id;
+            ORDER BY user_id;
           `,
           {
             $workspace_id: TypedValues.utf8(workspaceId),
@@ -655,9 +656,16 @@ export class RemindersRepository {
             DECLARE $watcher_user_ids AS JsonDocument;
             DECLARE $activate_reminder AS Bool;
             DECLARE $retire_old_message AS Bool;
+            DECLARE $person_assignment AS Utf8;
+            DECLARE $active_status AS Utf8;
+            DECLARE $waiting_notification_state AS Utf8;
+            DECLARE $ready_runtime_state AS Utf8;
+            DECLARE $paused_runtime_state AS Utf8;
+            DECLARE $blocked_runtime_state AS Utf8;
+            DECLARE $revision_increment AS Uint64;
             UPDATE reminders SET
-              assignment_mode = 'person', responsible_user_id = $responsible_user_id,
-              status = IF($activate_reminder, 'active', status), updated_at = $now
+              assignment_mode = $person_assignment, responsible_user_id = $responsible_user_id,
+              status = IF($activate_reminder, $active_status, status), updated_at = $now
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
 
             DELETE FROM reminder_watchers
@@ -665,11 +673,11 @@ export class RemindersRepository {
               AND user_id = $responsible_user_id;
 
             UPDATE reminder_occurrences SET
-              state_revision = state_revision + 1,
+              state_revision = state_revision + $revision_increment,
               delivery_lock_key = NULL,
               delivery_locked_at = NULL,
-              assignment_mode = 'person', responsible_user_id = $responsible_user_id,
-              notification_state = 'waiting', next_notification_at = $now,
+              assignment_mode = $person_assignment, responsible_user_id = $responsible_user_id,
+              notification_state = $waiting_notification_state, next_notification_at = $now,
               watcher_user_ids = $watcher_user_ids,
               message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
               message_sync_retire_only = IF(
@@ -682,8 +690,8 @@ export class RemindersRepository {
             UPDATE reminder_runtime SET
               state = IF(
                 current_occurrence_id IS NULL,
-                IF($activate_reminder, 'ready', 'paused'),
-                'blocked'
+                IF($activate_reminder, $ready_runtime_state, $paused_runtime_state),
+                $blocked_runtime_state
               ),
               updated_at = $now
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
@@ -710,6 +718,13 @@ export class RemindersRepository {
             $watcher_user_ids: TypedValues.jsonDocument(JSON.stringify(watcherUserIds)),
             $activate_reminder: TypedValues.bool(activateReminder),
             $retire_old_message: TypedValues.bool(retireOldMessage),
+            $person_assignment: TypedValues.utf8("person"),
+            $active_status: TypedValues.utf8("active"),
+            $waiting_notification_state: TypedValues.utf8("waiting"),
+            $ready_runtime_state: TypedValues.utf8("ready"),
+            $paused_runtime_state: TypedValues.utf8("paused"),
+            $blocked_runtime_state: TypedValues.utf8("blocked"),
+            $revision_increment: TypedValues.uint64(1),
           },
         );
 
@@ -999,6 +1014,9 @@ export class RemindersRepository {
             DECLARE $now AS Timestamp;
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
+            DECLARE $revision_increment AS Uint64;
+            DECLARE $overdue_status AS Utf8;
+            DECLARE $pending_status AS Utf8;
 
             UPDATE reminders SET
               title = $title, description = $description, action_url = $action_url,
@@ -1027,7 +1045,7 @@ export class RemindersRepository {
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
 
             UPDATE reminder_occurrences SET
-              state_revision = state_revision + 1,
+              state_revision = state_revision + $revision_increment,
               delivery_lock_key = NULL,
               delivery_locked_at = NULL,
               reminder_version = $version,
@@ -1043,7 +1061,11 @@ export class RemindersRepository {
               ),
               status = IF(
                 $schedule_changed,
-                IF(COALESCE($next_due_at, due_at) <= $now, 'overdue', 'pending'),
+                IF(
+                  COALESCE($next_due_at, due_at) <= $now,
+                  $overdue_status,
+                  $pending_status
+                ),
                 status
               ),
               next_notification_at = IF(
@@ -1137,6 +1159,9 @@ export class RemindersRepository {
             $next_due_at: optionalTimestamp(deadline?.dueAt),
             $next_reminder_start_at: optionalTimestamp(reminderStartAt),
             $now: timestampValue(now),
+            $revision_increment: TypedValues.uint64(1),
+            $overdue_status: TypedValues.utf8("overdue"),
+            $pending_status: TypedValues.utf8("pending"),
             $event_id: TypedValues.utf8(randomUUID()),
             $payload: TypedValues.jsonDocument(JSON.stringify({
               fromVersion: nextVersion - 1,
@@ -1340,22 +1365,35 @@ export class RemindersRepository {
             DECLARE $event_id AS Utf8;
             DECLARE $event_type AS Utf8;
             DECLARE $payload AS JsonDocument;
+            DECLARE $resume_action AS Utf8;
+            DECLARE $pause_action AS Utf8;
+            DECLARE $archive_action AS Utf8;
+            DECLARE $paused_runtime_state AS Utf8;
+            DECLARE $blocked_runtime_state AS Utf8;
+            DECLARE $ready_runtime_state AS Utf8;
+            DECLARE $waiting_notification_state AS Utf8;
+            DECLARE $stopped_notification_state AS Utf8;
+            DECLARE $cancelled_status AS Utf8;
+            DECLARE $completed_status AS Utf8;
+            DECLARE $reminder_archived_reason AS Utf8;
+            DECLARE $missed_while_paused_reason AS Utf8;
+            DECLARE $revision_increment AS Uint64;
 
             UPDATE reminders SET status = $next_status, updated_at = $now
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
 
             UPDATE reminder_runtime SET
               state = IF(
-                $action != 'resume',
-                'paused',
-                IF($restore_current, 'blocked', 'ready')
+                $action != $resume_action,
+                $paused_runtime_state,
+                IF($restore_current, $blocked_runtime_state, $ready_runtime_state)
               ),
-              next_due_at = IF($action = 'resume', $next_due_at, NULL),
+              next_due_at = IF($action = $resume_action, $next_due_at, NULL),
               next_reminder_start_at = IF(
-                $action = 'resume', $next_reminder_start_at, NULL
+                $action = $resume_action, $next_reminder_start_at, NULL
               ),
               current_occurrence_id = IF(
-                $action = 'pause',
+                $action = $pause_action,
                 current_occurrence_id,
                 IF($restore_current, current_occurrence_id, NULL)
               ),
@@ -1364,48 +1402,61 @@ export class RemindersRepository {
             WHERE workspace_id = $workspace_id AND reminder_id = $reminder_id;
 
             UPDATE reminder_occurrences SET
-              state_revision = state_revision + 1,
+              state_revision = state_revision + $revision_increment,
               delivery_lock_key = NULL,
               delivery_locked_at = NULL,
               notification_state = IF(
-                $action = 'resume' AND $restore_current,
-                'waiting',
-                IF(status IN ('scheduled', 'pending', 'overdue'), 'stopped', notification_state)
+                $action = $resume_action AND $restore_current,
+                $waiting_notification_state,
+                IF(
+                  status IN ('scheduled', 'pending', 'overdue'),
+                  $stopped_notification_state,
+                  notification_state
+                )
               ),
               next_notification_at = IF(
-                $action = 'resume' AND $restore_current, $now, NULL
+                $action = $resume_action AND $restore_current, $now, NULL
               ),
               status = IF(
                 status IN ('scheduled', 'pending', 'overdue')
-                  AND ($action = 'archive' OR ($action = 'resume' AND NOT $restore_current)),
-                'cancelled', status
+                  AND (
+                    $action = $archive_action
+                    OR ($action = $resume_action AND NOT $restore_current)
+                  ),
+                $cancelled_status, status
               ),
               cancelled_by = IF(
                 status IN ('scheduled', 'pending', 'overdue')
-                  AND ($action = 'archive' OR ($action = 'resume' AND NOT $restore_current)),
+                  AND (
+                    $action = $archive_action
+                    OR ($action = $resume_action AND NOT $restore_current)
+                  ),
                 $actor_user_id, cancelled_by
               ),
               cancellation_reason = IF(
-                status IN ('scheduled', 'pending', 'overdue') AND $action = 'archive',
-                'reminder_archived',
+                status IN ('scheduled', 'pending', 'overdue') AND $action = $archive_action,
+                $reminder_archived_reason,
                 IF(
                   status IN ('scheduled', 'pending', 'overdue')
-                    AND $action = 'resume' AND NOT $restore_current,
-                  'missed_while_paused', cancellation_reason
+                    AND $action = $resume_action AND NOT $restore_current,
+                  $missed_while_paused_reason, cancellation_reason
                 )
               ),
               cancelled_at = IF(
                 status IN ('scheduled', 'pending', 'overdue')
-                  AND ($action = 'archive' OR ($action = 'resume' AND NOT $restore_current)),
+                  AND (
+                    $action = $archive_action
+                    OR ($action = $resume_action AND NOT $restore_current)
+                  ),
                 $now, cancelled_at
               ),
               completion_finalized_at = IF(
-                $action = 'archive' AND status = 'completed',
+                $action = $archive_action AND status = $completed_status,
                 $now,
                 completion_finalized_at
               ),
               undo_until = IF(
-                $action = 'archive' AND status = 'completed',
+                $action = $archive_action AND status = $completed_status,
                 $now,
                 undo_until
               ),
@@ -1441,6 +1492,19 @@ export class RemindersRepository {
                 action === "resume" ? "reminder.resumed" : "reminder.archived",
             ),
             $payload: TypedValues.jsonDocument(JSON.stringify({ from: currentStatus, to: nextStatus })),
+            $resume_action: TypedValues.utf8("resume"),
+            $pause_action: TypedValues.utf8("pause"),
+            $archive_action: TypedValues.utf8("archive"),
+            $paused_runtime_state: TypedValues.utf8("paused"),
+            $blocked_runtime_state: TypedValues.utf8("blocked"),
+            $ready_runtime_state: TypedValues.utf8("ready"),
+            $waiting_notification_state: TypedValues.utf8("waiting"),
+            $stopped_notification_state: TypedValues.utf8("stopped"),
+            $cancelled_status: TypedValues.utf8("cancelled"),
+            $completed_status: TypedValues.utf8("completed"),
+            $reminder_archived_reason: TypedValues.utf8("reminder_archived"),
+            $missed_while_paused_reason: TypedValues.utf8("missed_while_paused"),
+            $revision_increment: TypedValues.uint64(1),
           },
         );
       }),

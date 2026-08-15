@@ -293,7 +293,7 @@ export class OccurrencesRepository {
               OR reminder.creator_user_id = $actor_user_id
               OR occurrence.responsible_user_id = $actor_user_id
             )
-          ORDER BY occurrence.due_at, occurrence.occurrence_id;
+          ORDER BY due_at, occurrence_id;
         `,
         {
           $workspace_id: TypedValues.utf8(workspaceId),

@@ -100,7 +100,7 @@ export class WorkspaceMembersRepository {
           FROM workspace_members AS member
           INNER JOIN users AS user ON member.user_id = user.user_id
           WHERE member.workspace_id = $workspace_id AND member.status = 'active'
-          ORDER BY member.role, user.display_name, member.user_id;
+          ORDER BY role, display_name, user_id;
         `,
         { $workspace_id: TypedValues.utf8(workspaceId) },
       );

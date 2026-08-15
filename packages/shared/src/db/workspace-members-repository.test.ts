@@ -62,6 +62,38 @@ describe("WorkspaceMembersRepository", () => {
     );
   });
 
+  it("sorts projected member profiles using output column names accepted by YDB", async () => {
+    const session = {
+      executeQuery: vi.fn().mockResolvedValue({
+        resultSets: [
+          resultSet({
+            workspace_id: "workspace-a",
+            user_id: 20,
+            role: "member",
+            status: "active",
+            role_granted_by: null,
+            role_granted_at: null,
+            last_observed_at: "2026-08-13T12:00:00.000Z",
+            created_at: "2026-08-01T10:00:00.000Z",
+            updated_at: "2026-08-13T12:00:00.000Z",
+            username: "member",
+            display_name: "Member",
+            private_chat_available: 1,
+          }),
+        ],
+      }),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    await repository.listProfiles("workspace-a");
+
+    const query = session.executeQuery.mock.calls[0]?.[0] ?? "";
+    expect(query).toContain("ORDER BY role, display_name, user_id");
+    expect(query).not.toContain("ORDER BY member.role");
+  });
+
   it("reactivates an observed removed member without restoring elevated rights", async () => {
     const removedRow = {
       workspace_id: "workspace-a",

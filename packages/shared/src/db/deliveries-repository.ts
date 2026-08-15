@@ -205,14 +205,14 @@ export class DeliveriesRepository {
             INNER JOIN users AS user ON user.user_id = member.user_id
             WHERE member.workspace_id = $workspace_id
               AND member.status = 'active'
-            ORDER BY member.user_id;
+            ORDER BY user_id;
 
             SELECT delivery.claimed_at AS claimed_at
             FROM notification_deliveries AS delivery
             WHERE delivery.workspace_id = $workspace_id
               AND delivery.occurrence_id = $occurrence_id
               AND delivery.delivery_type = 'escalation'
-            ORDER BY delivery.claimed_at DESC
+            ORDER BY claimed_at DESC
             LIMIT 1;
           `,
           {
@@ -392,6 +392,7 @@ export class DeliveriesRepository {
             DECLARE $telegram_chat_id AS Int64;
             DECLARE $next_notification_at AS Timestamp;
             DECLARE $next_sequence AS Uint32;
+            DECLARE $overdue_status AS Utf8;
 
             INSERT INTO notification_deliveries (
               workspace_id, delivery_key, occurrence_id, reminder_id,
@@ -404,7 +405,7 @@ export class DeliveriesRepository {
             );
 
             UPDATE reminder_occurrences SET
-              status = IF(due_at <= $claimed_at, 'overdue', status),
+              status = IF(due_at <= $claimed_at, $overdue_status, status),
               next_notification_at = $next_notification_at,
               notification_sequence = $next_sequence,
               delivery_lock_key = $delivery_key,
@@ -435,6 +436,7 @@ export class DeliveriesRepository {
             $telegram_chat_id: TypedValues.int64(targetChatId),
             $next_notification_at: timestampValue(nextNotificationAt),
             $next_sequence: TypedValues.uint32(delivery.sequence + 1),
+            $overdue_status: TypedValues.utf8("overdue"),
           },
         );
 
@@ -487,8 +489,7 @@ export class DeliveriesRepository {
           INNER JOIN workspaces AS workspace
             ON workspace.workspace_id = delivery.workspace_id
           LEFT JOIN users AS user
-            ON occurrence.assignment_mode = 'person'
-            AND user.user_id = occurrence.responsible_user_id
+            ON user.user_id = occurrence.responsible_user_id
           WHERE delivery.workspace_id = $workspace_id
             AND delivery.delivery_key = $delivery_key
           LIMIT 1;

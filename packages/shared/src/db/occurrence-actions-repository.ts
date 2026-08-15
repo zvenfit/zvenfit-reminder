@@ -107,9 +107,9 @@ export class OccurrenceActionsRepository {
               AND reminder.reminder_id = occurrence.reminder_id
             INNER JOIN workspace_members AS actor
               ON actor.workspace_id = occurrence.workspace_id
-              AND actor.user_id = $actor_user_id
             WHERE occurrence.workspace_id = $workspace_id
               AND occurrence.occurrence_id = $occurrence_id
+              AND actor.user_id = $actor_user_id
               AND actor.status = 'active'
               AND reminder.status = 'active'
               AND (
@@ -168,11 +168,13 @@ export class OccurrenceActionsRepository {
             DECLARE $snooze_until AS Timestamp;
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
+            DECLARE $revision_increment AS Uint64;
+            DECLARE $overdue_status AS Utf8;
             UPDATE reminder_occurrences SET
-              state_revision = state_revision + 1,
+              state_revision = state_revision + $revision_increment,
               delivery_lock_key = NULL,
               delivery_locked_at = NULL,
-              status = IF(due_at <= $now, 'overdue', status),
+              status = IF(due_at <= $now, $overdue_status, status),
               next_notification_at = $snooze_until,
               snoozed_by = $actor_user_id,
               snoozed_at = $now,
@@ -197,6 +199,8 @@ export class OccurrenceActionsRepository {
             $actor_user_id: TypedValues.int64(actorUserId),
             $now: timestampValue(now),
             $snooze_until: timestampValue(snoozeUntil),
+            $revision_increment: TypedValues.uint64(1),
+            $overdue_status: TypedValues.utf8("overdue"),
             $event_id: TypedValues.utf8(randomUUID()),
             $payload: TypedValues.jsonDocument(
               JSON.stringify({ snoozeUntil: snoozeUntil.toISOString() }),
@@ -239,11 +243,11 @@ export class OccurrenceActionsRepository {
               AND reminder.reminder_id = occurrence.reminder_id
             INNER JOIN workspace_members AS actor
               ON actor.workspace_id = occurrence.workspace_id
-              AND actor.user_id = $actor_user_id
             INNER JOIN users AS actor_user
               ON actor_user.user_id = actor.user_id
             WHERE occurrence.workspace_id = $workspace_id
               AND occurrence.occurrence_id = $occurrence_id
+              AND actor.user_id = $actor_user_id
               AND actor.status = 'active'
               AND reminder.status = 'active'
               AND (
@@ -399,9 +403,9 @@ export class OccurrenceActionsRepository {
               AND reminder.reminder_id = occurrence.reminder_id
             INNER JOIN workspace_members AS actor
               ON actor.workspace_id = occurrence.workspace_id
-              AND actor.user_id = $actor_user_id
             WHERE occurrence.workspace_id = $workspace_id
               AND occurrence.occurrence_id = $occurrence_id
+              AND actor.user_id = $actor_user_id
               AND actor.status = 'active'
               AND reminder.status = 'active'
               AND (

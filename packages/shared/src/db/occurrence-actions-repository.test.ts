@@ -200,7 +200,11 @@ describe("OccurrenceActionsRepository", () => {
     expect(occurrence?.status).toBe("overdue");
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("snoozed_by = $actor_user_id"));
-    expect(writeCall?.[0]).toContain("status = IF(due_at <= $now, 'overdue', status)");
+    expect(writeCall?.[0]).toContain(
+      "status = IF(due_at <= $now, $overdue_status, status)",
+    );
+    expect(decodeYdbValue(writeCall?.[1]?.$revision_increment)).toBe(1);
+    expect(decodeYdbValue(writeCall?.[1]?.$overdue_status)).toBe("overdue");
   });
 
   it("completes idempotently while retaining the runtime slot for ten minutes", async () => {
@@ -221,6 +225,10 @@ describe("OccurrenceActionsRepository", () => {
     expect(occurrence?.undoUntil?.toISOString()).toBe("2026-08-13T12:10:00.000Z");
     const readCall = session.executeQuery.mock.calls[0];
     expect(readCall?.[0]).toContain("INNER JOIN workspace_members AS actor");
+    expect(readCall?.[0]).toContain("AND actor.user_id = $actor_user_id");
+    expect(readCall?.[0]).not.toContain(
+      "ON actor.workspace_id = occurrence.workspace_id\n              AND actor.user_id",
+    );
     expect(readCall?.[0]).toContain("reminder.status = 'active'");
     expect(decodeYdbValue(readCall?.[1]?.$actor_user_id)).toBe(20);
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>

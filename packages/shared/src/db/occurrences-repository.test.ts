@@ -272,6 +272,8 @@ describe("OccurrencesRepository.listActionableForActor", () => {
     expect(query).toContain("occurrence.visibility = 'group'");
     expect(query).toContain("reminder.status = 'active'");
     expect(query).toContain("reminder.creator_user_id = $actor_user_id");
+    expect(query).toContain("ORDER BY due_at, occurrence_id");
+    expect(query).not.toContain("ORDER BY occurrence.due_at");
     expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
   });

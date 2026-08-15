@@ -131,11 +131,21 @@ describe("DeliveriesRepository.reserve", () => {
       "2026-08-13T18:00:00.000Z",
     );
 
+    const readCall = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("AND next_notification_at <= $now"),
+    );
+    expect(readCall?.[0]).toContain("ORDER BY user_id");
+    expect(readCall?.[0]).toContain("ORDER BY claimed_at DESC");
+    expect(readCall?.[0]).not.toContain("ORDER BY member.user_id");
+    expect(readCall?.[0]).not.toContain("ORDER BY delivery.claimed_at");
+
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("INSERT INTO notification_deliveries"),
     );
     expect(writeCall?.[0]).toContain("notification_sequence = $next_sequence");
     expect(writeCall?.[0]).toContain("delivery_lock_key = $delivery_key");
+    expect(writeCall?.[0]).toContain("status = IF(due_at <= $claimed_at, $overdue_status, status)");
+    expect(decodeYdbValue(writeCall?.[1]?.$overdue_status)).toBe("overdue");
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(writeCall?.[1]?.$next_sequence)).toBe(1);
     expect(decodeYdbValue(writeCall?.[1]?.$occurrence_revision)).toBe(1);
@@ -331,6 +341,12 @@ describe("DeliveriesRepository.beginSend", () => {
     ))
       .resolves.toEqual({ valid: false, targetChatId: 200 });
     expect(session.executeQuery.mock.calls[0]?.[0]).toContain("delivery.status AS delivery_status");
+    expect(session.executeQuery.mock.calls[0]?.[0]).toContain(
+      "ON user.user_id = occurrence.responsible_user_id",
+    );
+    expect(session.executeQuery.mock.calls[0]?.[0]).not.toContain(
+      "ON occurrence.assignment_mode = 'person'",
+    );
     expect(session.executeQuery.mock.calls[1]?.[0]).toContain("reservation_stale");
   });
 

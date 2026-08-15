@@ -190,6 +190,8 @@ describe("RemindersRepository", () => {
     const [query, params] = session.executeQuery.mock.calls[0] ?? [];
     expect(query).toContain("visibility = 'group'");
     expect(query).toContain("responsible_user_id = $actor_user_id");
+    expect(query).toContain("ORDER BY reminder_id, user_id");
+    expect(query).not.toContain("ORDER BY watcher.reminder_id");
     expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
   });
@@ -262,11 +264,17 @@ describe("RemindersRepository", () => {
     expect(reminder?.assignment).toEqual({ mode: "person", responsibleUserId: 30 });
     const write = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("UPDATE reminders SET"));
-    expect(write?.[0]).toContain("notification_state = 'waiting'");
-    expect(write?.[0]).toContain("IF($activate_reminder, 'ready', 'paused')");
+    expect(write?.[0]).toContain("notification_state = $waiting_notification_state");
+    expect(write?.[0]).toContain(
+      "IF($activate_reminder, $ready_runtime_state, $paused_runtime_state)",
+    );
     expect(decodeYdbValue(write?.[1]?.$activate_reminder)).toBe(true);
     expect(decodeYdbValue(write?.[1]?.$watcher_user_ids)).toBe("[10]");
     expect(decodeYdbValue(write?.[1]?.$retire_old_message)).toBe(false);
+    expect(decodeYdbValue(write?.[1]?.$person_assignment)).toBe("person");
+    expect(decodeYdbValue(write?.[1]?.$active_status)).toBe("active");
+    expect(decodeYdbValue(write?.[1]?.$waiting_notification_state)).toBe("waiting");
+    expect(decodeYdbValue(write?.[1]?.$revision_increment)).toBe(1);
     expect(write?.[0]).toContain("'reminder.reassigned'");
   });
 
@@ -582,6 +590,9 @@ describe("RemindersRepository", () => {
     expect(write?.[0]).toContain("current_occurrence_id IS NULL");
     expect(decodeYdbValue(write?.[1]?.$version)).toBe(3);
     expect(decodeYdbValue(write?.[1]?.$schedule_changed)).toBe(false);
+    expect(decodeYdbValue(write?.[1]?.$revision_increment)).toBe(1);
+    expect(decodeYdbValue(write?.[1]?.$overdue_status)).toBe("overdue");
+    expect(decodeYdbValue(write?.[1]?.$pending_status)).toBe("pending");
     expect(session.executeQuery.mock.calls.some(([query]) =>
       query.includes("DELETE FROM reminder_occurrence_slots"))).toBe(false);
     const payload = JSON.parse(String(decodeYdbValue(write?.[1]?.$payload)));
@@ -816,7 +827,11 @@ describe("RemindersRepository", () => {
       query.includes("DECLARE $restore_current AS Bool"));
     expect(decodeYdbValue(write?.[1]?.$restore_current)).toBe(false);
     expect(decodeYdbValue(write?.[1]?.$current_occurrence_id)).toBe("occurrence-a");
-    expect(write?.[0]).toContain("'missed_while_paused'");
+    expect(write?.[0]).toContain("$missed_while_paused_reason");
+    expect(decodeYdbValue(write?.[1]?.$missed_while_paused_reason))
+      .toBe("missed_while_paused");
+    expect(decodeYdbValue(write?.[1]?.$ready_runtime_state)).toBe("ready");
+    expect(decodeYdbValue(write?.[1]?.$revision_increment)).toBe(1);
   });
 
   it("does not resume a reminder assigned to a removed member", async () => {
