@@ -202,6 +202,16 @@ function memberRoleLabel(role: WorkspaceMember["role"]): string {
   return "Участник";
 }
 
+function BackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button className="back-button" type="button" aria-label="Назад" onClick={onClick}>
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <path d="M15 18 9 12l6-6" />
+      </svg>
+    </button>
+  );
+}
+
 function formatAmount(amountMinor: number | null, currency: string | null): string | null {
   if (amountMinor == null || !currency) return null;
   return new Intl.NumberFormat("ru-RU", {
@@ -976,16 +986,21 @@ function App() {
           <div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>
         </header>
         <section className="launch-error" role="alert">
-          <span className="launch-error__mark" aria-hidden="true">↗</span>
-          <p className="eyebrow">Нужен запуск из Telegram</p>
-          <h1>Откройте панель из чата с ботом</h1>
+          <div className="launch-error__status">
+            <span className="launch-error__mark" aria-hidden="true">↻</span>
+            <p className="eyebrow">Панель не загрузилась</p>
+          </div>
+          <h1>Попробуйте обновить</h1>
           <p>
-            Закройте это окно, отправьте боту <b>/start</b> и нажмите кнопку
-            «Открыть панель» под новым сообщением.
+            Telegram не передал данные для входа. Обычно достаточно обновить панель.
           </p>
-          <button type="button" onClick={() => window.Telegram?.WebApp?.close?.()}>
-            Закрыть панель
+          <button className="recovery-action" type="button" onClick={() => window.location.reload()}>
+            <span aria-hidden="true">↻</span>
+            Обновить
           </button>
+          <small className="recovery-hint">
+            Если не поможет, вернитесь в чат с ботом и откройте панель ещё раз.
+          </small>
         </section>
       </main>
     );
@@ -998,25 +1013,29 @@ function App() {
           <div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>
         </header>
         <section className="launch-error workspace-recovery" role="status" aria-busy={loading}>
-          <span className="launch-error__mark" aria-hidden="true">{loading ? "···" : "↻"}</span>
-          <p className="eyebrow">{loading ? "Проверяем доступ" : "Группа не найдена"}</p>
-          <h1>{loading ? "Ищем ваши группы" : "Обновите список групп"}</h1>
+          <div className="launch-error__status">
+            <span className="launch-error__mark" aria-hidden="true">{loading ? "···" : "↻"}</span>
+            <p className="eyebrow">
+              {loading ? "Проверяем доступ" : error ? "Не удалось загрузить" : "Группа не найдена"}
+            </p>
+          </div>
+          <h1>
+            {loading ? "Ищем ваши группы" : error ? "Попробуйте ещё раз" : "Обновите список групп"}
+          </h1>
           <p>
             {loading
               ? `Проверяем группы для ${telegramAccountLabel}.`
-              : <>Для аккаунта <b>{telegramAccountLabel}</b> группы не найдены. Если
-                  команда <b>/setup</b> уже выполнена, обновите список.</>}
+              : error
+                ? "Не получилось получить данные. Проверьте соединение и обновите панель."
+                : <>Для аккаунта <b>{telegramAccountLabel}</b> группы не найдены. Если
+                    команда <b>/setup</b> уже выполнена, обновите список.</>}
           </p>
           {error ? <div className="error-banner" role="alert">{error}</div> : null}
           {!loading ? (
             <div className="workspace-recovery__actions">
-              <button type="button" onClick={retryWorkspaceLoad}>Обновить</button>
-              <button
-                className="secondary-action"
-                type="button"
-                onClick={() => window.Telegram?.WebApp?.close?.()}
-              >
-                Закрыть
+              <button className="recovery-action" type="button" onClick={retryWorkspaceLoad}>
+                <span aria-hidden="true">↻</span>
+                Обновить
               </button>
             </div>
           ) : null}
@@ -1029,9 +1048,7 @@ function App() {
     return (
       <main className="app app--members">
         <header className="topbar">
-          <button className="back-button" type="button" onClick={() => setView(membersReturnView)}>
-            <span aria-hidden="true">←</span> Назад
-          </button>
+          <BackButton onClick={() => setView(membersReturnView)} />
           <span className="utility-label">{selectedWorkspace.displayName}</span>
         </header>
 
@@ -1225,9 +1242,7 @@ function App() {
     return (
       <main className="app app--form app--settings">
         <header className="topbar">
-          <button className="back-button" type="button" onClick={() => setView("home")}>
-            <span aria-hidden="true">←</span> Назад
-          </button>
+          <BackButton onClick={() => setView("home")} />
           <span className="utility-label">{selectedWorkspace.displayName}</span>
         </header>
 
@@ -1412,9 +1427,7 @@ function App() {
     return (
       <main className="app app--form">
         <header className="topbar">
-          <button className="back-button" type="button" onClick={() => setView("home")}>
-            <span aria-hidden="true">←</span> Назад
-          </button>
+          <BackButton onClick={() => setView("home")} />
           <span className="utility-label">
             {editingReminderId ? "Редактирование" : selectedWorkspace?.displayName ?? "Новое"}
           </span>

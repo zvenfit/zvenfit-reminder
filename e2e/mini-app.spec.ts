@@ -77,6 +77,7 @@ interface ApiState {
     body: unknown;
   }>;
   undoErrorCode?: "undo_expired" | "not_actionable";
+  workspaceFailuresRemaining?: number;
 }
 
 const now = "2026-08-14T09:00:00.000Z";
@@ -232,6 +233,10 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
 
     const fulfill = (json: unknown, status = 200) => route.fulfill({ status, json });
     if (method === "GET" && path === "/api/workspaces") {
+      if ((state.workspaceFailuresRemaining ?? 0) > 0) {
+        state.workspaceFailuresRemaining = (state.workspaceFailuresRemaining ?? 1) - 1;
+        return fulfill({ error: "Temporary failure", code: "temporary_failure" }, 503);
+      }
       return fulfill({ workspaces: state.workspaces });
     }
     if (!selected || !state.members[selected]) {
@@ -402,7 +407,9 @@ test("shows a Telegram launch recovery screen without calling the API", async ({
 
   await page.goto("/");
 
-  await expect(page.getByRole("alert")).toContainText("Откройте панель из чата с ботом");
+  await expect(page.getByRole("alert")).toContainText("Попробуйте обновить");
+  await expect(page.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /Закрыть/ })).toHaveCount(0);
   await expect(page.getByText("Missing X-Telegram-Init-Data")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
   expect(apiRequests).toBe(0);
@@ -428,10 +435,27 @@ test("recovers from an empty workspace response without leaving disabled control
   state.workspaces.push(teamWorkspace);
   await page.getByRole("button", { name: "Обновить" }).click();
 
-  await expect(page.getByText("Команда", { exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveValue("team");
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toBeEnabled();
   expect(state.requests.filter((request) => request.path === "/api/workspaces").length)
     .toBeGreaterThan(initialWorkspaceRequests);
+});
+
+test("offers refresh instead of a dead close action when workspace loading fails", async ({ page }) => {
+  const state = createState();
+  state.workspaceFailuresRemaining = 2;
+  await installTelegramAndApi(page, state);
+
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Попробуйте ещё раз" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: /Закрыть/ })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Обновить" }).click();
+
+  await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveValue("team");
+  expect(state.workspaceFailuresRemaining).toBe(0);
 });
 
 test("manages verified members and publishes self-enrollment to the selected group", async ({ page }) => {
