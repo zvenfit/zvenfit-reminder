@@ -54,12 +54,12 @@ Mini App. If the owner has left, another Telegram administrator can recover
 vacant ownership with `/setup`.
 
 Telegram does not expose the complete group roster to bots, including bot
-administrators. An owner or organizer can import up to ten users at a time with
-Telegram's native user picker in the private bot chat. The picker is not scoped
-to a group, so the backend verifies every selected user with `getChatMember`
-against the workspace group before activating membership. Future joins and
-group activity are observed automatically. Starting the bot is required only
-when a member needs private notifications.
+administrators. An owner or organizer publishes a self-enrollment button in the
+target group from the Mini App or with `/members`. Each participant can add only
+their own account; the backend matches the callback workspace to the message
+chat and verifies the sender with `getChatMember` before activating membership.
+Future joins and group activity are observed automatically. Starting the bot is
+required only when a member needs private notifications.
 
 When Telegram reports that a member has left a group, that workspace membership
 becomes removed. Active reminders assigned to the user are paused, pending

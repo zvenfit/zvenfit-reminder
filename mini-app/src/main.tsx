@@ -10,7 +10,7 @@ import {
   listMembers,
   listReminders,
   loadDashboard,
-  prepareMemberPicker,
+  publishMemberEnrollment,
   reassignReminder,
   snoozeOccurrence,
   transferWorkspaceOwnership,
@@ -34,10 +34,10 @@ import {
   DEFAULT_TIMEZONE,
 } from "./timezones";
 import { isLocalTime24, Time24Field } from "./time-24-field";
-import { PersonSelect } from "./person-select";
+import { MemberAvatar, PersonSelect } from "./person-select";
 import "./styles.css";
 
-type View = "home" | "create" | "settings";
+type View = "home" | "create" | "settings" | "members";
 type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
 
@@ -188,6 +188,12 @@ function memberName(member: WorkspaceMember | undefined): string {
   return member?.displayName ?? "Участник";
 }
 
+function memberRoleLabel(role: WorkspaceMember["role"]): string {
+  if (role === "owner") return "Владелец";
+  if (role === "organizer") return "Организатор";
+  return "Участник";
+}
+
 function formatAmount(amountMinor: number | null, currency: string | null): string | null {
   if (amountMinor == null || !currency) return null;
   return new Intl.NumberFormat("ru-RU", {
@@ -286,33 +292,9 @@ function errorMessage(error: unknown): string {
     return "Сессия Telegram устарела. Закройте панель и откройте её снова кнопкой в чате с ботом.";
   }
   if (error instanceof ApiError && error.code === "telegram_unavailable") {
-    return "Telegram не открыл выбор участников. Попробуйте ещё раз через минуту.";
+    return "Не удалось опубликовать кнопку в группе. Попробуйте ещё раз через минуту.";
   }
   return error instanceof Error ? error.message : "Что-то пошло не так";
-}
-
-function requestTelegramMemberPicker(requestId: string): Promise<boolean> {
-  const requestChat = window.Telegram?.WebApp?.requestChat;
-  if (!requestChat) {
-    throw new Error(
-      "Обновите Telegram до последней версии или используйте кнопку «Добавить участников» в чате с ботом.",
-    );
-  }
-  return new Promise((resolve, reject) => {
-    const timeout = window.setTimeout(
-      () => reject(new Error("Telegram не завершил выбор участников. Попробуйте ещё раз.")),
-      120_000,
-    );
-    try {
-      requestChat(requestId, (success) => {
-        window.clearTimeout(timeout);
-        resolve(success);
-      });
-    } catch (error) {
-      window.clearTimeout(timeout);
-      reject(error);
-    }
-  });
 }
 
 function App() {
@@ -336,7 +318,11 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
-  const [pickingMembers, setPickingMembers] = useState(false);
+  const [memberSearch, setMemberSearch] = useState("");
+  const [membersReturnView, setMembersReturnView] = useState<"home" | "create">("home");
+  const [refreshingMembers, setRefreshingMembers] = useState(false);
+  const [publishingEnrollment, setPublishingEnrollment] = useState(false);
+  const [confirmingEnrollment, setConfirmingEnrollment] = useState(false);
   const [ownershipTarget, setOwnershipTarget] = useState("");
   const [confirmingOwnership, setConfirmingOwnership] = useState(false);
   const [transferringOwnership, setTransferringOwnership] = useState(false);
@@ -382,6 +368,13 @@ function App() {
     () => new Map(members.map((member) => [member.userId, member])),
     [members],
   );
+  const filteredMembers = useMemo(() => {
+    const query = memberSearch.trim().toLocaleLowerCase("ru-RU");
+    if (!query) return members;
+    return members.filter((member) =>
+      member.displayName.toLocaleLowerCase("ru-RU").includes(query) ||
+      member.username?.toLocaleLowerCase("ru-RU").includes(query));
+  }, [memberSearch, members]);
   const reminderMap = useMemo(
     () => new Map(reminders.map((reminder) => [reminder.reminderId, reminder])),
     [reminders],
@@ -509,6 +502,8 @@ function App() {
     setReassigningReminderId(null);
     setManagingReminderId(null);
     setUpdatingRoleUserId(null);
+    setMemberSearch("");
+    setConfirmingEnrollment(false);
     setNotice(null);
     setError(null);
     setOccurrences([]);
@@ -553,6 +548,68 @@ function App() {
     setError(null);
     setView("settings");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openMembers(returnView: "home" | "create") {
+    const workspace = workspaces.find((item) => item.workspaceId === workspaceId);
+    if (!workspace || (workspace.role !== "owner" && workspace.role !== "organizer")) return;
+    setMembersReturnView(returnView);
+    setMemberSearch("");
+    setConfirmingEnrollment(false);
+    setError(null);
+    setNotice(null);
+    setView("members");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  async function refreshMemberRoster() {
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
+    const knownUserIds = new Set(members.map((member) => member.userId));
+    setRefreshingMembers(true);
+    setError(null);
+    try {
+      const response = await listMembers();
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setMembers(response.members);
+      const added = response.members.filter((member) => !knownUserIds.has(member.userId)).length;
+      setNotice(added > 0 ? `Новых участников: ${added}` : "Список уже актуален");
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
+    } catch (requestError) {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
+    } finally {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setRefreshingMembers(false);
+      }
+    }
+  }
+
+  async function publishEnrollment() {
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
+    setPublishingEnrollment(true);
+    setError(null);
+    try {
+      await publishMemberEnrollment();
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setConfirmingEnrollment(false);
+      setNotice("Кнопка подключения опубликована в группе");
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 3200);
+    } catch (requestError) {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
+    } finally {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setPublishingEnrollment(false);
+      }
+    }
   }
 
   async function saveWorkspaceSettings() {
@@ -600,34 +657,6 @@ function App() {
       setError(errorMessage(requestError));
     } finally {
       setTransferringOwnership(false);
-    }
-  }
-
-  async function openMemberPicker() {
-    const currentWorkspaceId = workspaceId;
-    if (!currentWorkspaceId) return;
-    setPickingMembers(true);
-    setError(null);
-    try {
-      const knownUserIds = new Set(members.map((member) => member.userId));
-      const { requestId } = await prepareMemberPicker();
-      const shared = await requestTelegramMemberPicker(requestId);
-      if (!shared || activeWorkspaceIdRef.current !== currentWorkspaceId) return;
-
-      setNotice("Проверяем выбранных участников…");
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        await new Promise((resolve) => window.setTimeout(resolve, 650));
-        const response = await listMembers();
-        if (activeWorkspaceIdRef.current !== currentWorkspaceId) return;
-        setMembers(response.members);
-        if (response.members.some((member) => !knownUserIds.has(member.userId))) break;
-      }
-      setNotice("Список участников обновлён");
-      window.setTimeout(() => setNotice(null), 2600);
-    } catch (requestError) {
-      setError(errorMessage(requestError));
-    } finally {
-      setPickingMembers(false);
     }
   }
 
@@ -939,6 +968,133 @@ function App() {
     );
   }
 
+  if (view === "members" && selectedWorkspace) {
+    return (
+      <main className="app app--members">
+        <header className="topbar">
+          <button className="back-button" type="button" onClick={() => setView(membersReturnView)}>
+            <span aria-hidden="true">←</span> Назад
+          </button>
+          <span className="utility-label">{selectedWorkspace.displayName}</span>
+        </header>
+
+        <section className="members-intro">
+          <div>
+            <p className="eyebrow">Участники группы</p>
+            <h1>Кто может отвечать</h1>
+            <p>В списке только люди, которых бот уже встретил и связал с этой Telegram-группой.</p>
+          </div>
+          <div className="member-constellation" aria-label={`Подтверждено участников: ${members.length}`}>
+            <div className="member-constellation__avatars" aria-hidden="true">
+              {members.slice(0, 4).map((member) => (
+                <MemberAvatar member={member} size="regular" key={member.userId} />
+              ))}
+              {members.length > 4 ? <span>+{members.length - 4}</span> : null}
+            </div>
+            <span><b>{members.length}</b><small>подтверждено</small></span>
+            <button type="button" disabled={refreshingMembers} onClick={() => void refreshMemberRoster()}>
+              {refreshingMembers ? "Обновляю…" : "Обновить"}
+            </button>
+          </div>
+        </section>
+
+        <section className="member-roster-panel">
+          <label className="member-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              type="search"
+              aria-label="Найти участника"
+              placeholder="Имя или @username"
+              value={memberSearch}
+              onChange={(event) => setMemberSearch(event.target.value)}
+            />
+          </label>
+
+          <div className="member-roster" role="list" aria-label="Подтверждённые участники">
+            {filteredMembers.length === 0 ? (
+              <div className="member-roster__empty">
+                <b>Никого не нашли</b>
+                <span>Проверьте имя или username.</span>
+              </div>
+            ) : filteredMembers.map((member) => (
+              <article className="member-roster__row" role="listitem" key={member.userId}>
+                <MemberAvatar member={member} />
+                <span className="member-roster__identity">
+                  <b>{member.displayName}{member.userId === actorId ? " · вы" : ""}</b>
+                  <small>{member.username ? `@${member.username}` : "Telegram-имя не указано"}</small>
+                </span>
+                <span className={`member-chat-state${member.privateChatAvailable ? " is-ready" : ""}`}>
+                  {member.privateChatAvailable ? "Личный чат подключён" : "Только группа"}
+                </span>
+                {actor?.role === "owner" && member.role !== "owner" ? (
+                  <select
+                    aria-label={`Роль: ${member.displayName}`}
+                    disabled={updatingRoleUserId === member.userId}
+                    value={member.role === "organizer" ? "organizer" : "member"}
+                    onChange={(event) => void changeMemberRole(
+                      member.userId,
+                      event.target.value as "organizer" | "member",
+                    )}
+                  >
+                    <option value="member">Участник</option>
+                    <option value="organizer">Организатор</option>
+                  </select>
+                ) : (
+                  <span className={`member-role member-role--${member.role}`}>
+                    {memberRoleLabel(member.role)}
+                  </span>
+                )}
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="member-enrollment-panel">
+          <span className="member-enrollment-panel__signal" aria-hidden="true">＋</span>
+          <div>
+            <p className="eyebrow">Подключение</p>
+            <h2>Позвать остальных</h2>
+            <p>
+              В группе появится сообщение с кнопкой. Каждый человек добавит только себя,
+              а бот проверит его участие перед сохранением.
+            </p>
+          </div>
+          {!confirmingEnrollment ? (
+            <button
+              className="primary-action member-enrollment-panel__action"
+              type="button"
+              onClick={() => setConfirmingEnrollment(true)}
+            >
+              Опубликовать кнопку в группе
+            </button>
+          ) : (
+            <div className="member-enrollment-confirm" role="alert">
+              <b>Отправить сообщение в «{selectedWorkspace.displayName}»?</b>
+              <small>Оно будет видно всем участникам группы.</small>
+              <div>
+                <button type="button" onClick={() => setConfirmingEnrollment(false)}>Отмена</button>
+                <button
+                  className="primary-action"
+                  type="button"
+                  disabled={publishingEnrollment}
+                  onClick={() => void publishEnrollment()}
+                >
+                  {publishingEnrollment ? "Публикую…" : "Да, опубликовать"}
+                </button>
+              </div>
+            </div>
+          )}
+          <small className="member-enrollment-panel__hint">
+            Новые вступления и действия в группе бот также обнаруживает автоматически.
+          </small>
+        </section>
+
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {notice ? <div className="notice-toast notice-toast--inline" role="status">{notice}</div> : null}
+      </main>
+    );
+  }
+
   if (view === "settings" && selectedWorkspace) {
     const targetMember = members.find((member) => String(member.userId) === ownershipTarget);
     return (
@@ -1203,10 +1359,9 @@ function App() {
                 <button
                   className="sync-button"
                   type="button"
-                  disabled={pickingMembers}
-                  onClick={() => void openMemberPicker()}
+                  onClick={() => openMembers("create")}
                 >
-                  {pickingMembers ? "Открываем…" : "Добавить участников"}
+                  Участники группы
                 </button>
               ) : null}
             </div>
@@ -1486,13 +1641,12 @@ function App() {
           <button
             className="workspace-settings-link workspace-members-link"
             type="button"
-            disabled={pickingMembers}
-            onClick={() => void openMemberPicker()}
+            onClick={() => openMembers("home")}
           >
-            <span aria-hidden="true">＋</span>
+            <span aria-hidden="true">◎</span>
             <span>
               <b>Участники</b>
-              <small>{pickingMembers ? "Открываем Telegram…" : `${members.length} добавлено`}</small>
+              <small>{members.length} подтверждено</small>
             </span>
             <span aria-hidden="true">→</span>
           </button>
@@ -1691,39 +1845,6 @@ function App() {
           </div>
         )}
       </section>
-
-      {actor?.role === "owner" ? (
-        <section className="access-section">
-          <details className="access-panel">
-            <summary>
-              <span><b>Доступы</b><small>Кто может создавать групповые поручения</small></span>
-              <span aria-hidden="true">＋</span>
-            </summary>
-            <div className="access-list">
-              {members
-                .filter((member) => member.role !== "owner")
-                .map((member) => (
-                  <label className="access-row" key={member.userId}>
-                    <span className="avatar">{member.displayName.slice(0, 1).toUpperCase()}</span>
-                    <span className="access-person"><b>{member.displayName}</b><small>{member.username ? `@${member.username}` : "Участник группы"}</small></span>
-                    <select
-                      aria-label={`Роль: ${member.displayName}`}
-                      disabled={updatingRoleUserId === member.userId}
-                      value={member.role === "organizer" ? "organizer" : "member"}
-                      onChange={(event) => void changeMemberRole(
-                        member.userId,
-                        event.target.value as "organizer" | "member",
-                      )}
-                    >
-                      <option value="member">Участник</option>
-                      <option value="organizer">Организатор</option>
-                    </select>
-                  </label>
-                ))}
-            </div>
-          </details>
-        </section>
-      ) : null}
 
       <button className="floating-create" disabled={!workspaceId} onClick={openCreate}>
         <span aria-hidden="true">＋</span> Новое напоминание

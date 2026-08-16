@@ -284,14 +284,9 @@ export function getMemberAvatar(userId: number): Promise<string | null> {
   return request;
 }
 
-export function syncMembers(): Promise<unknown> {
-  if (MOCK_MODE) return Promise.resolve({ members: inSelectedWorkspace(mockMembers) });
-  return api("/api/members/sync", { method: "POST", body: "{}" });
-}
-
-export function prepareMemberPicker(): Promise<{ requestId: string }> {
-  if (MOCK_MODE) return Promise.resolve({ requestId: "mock-member-picker" });
-  return api("/api/members/prepare-picker", { method: "POST", body: "{}" });
+export function publishMemberEnrollment(): Promise<{ published: true }> {
+  if (MOCK_MODE) return Promise.resolve({ published: true });
+  return api("/api/members/publish-enrollment", { method: "POST", body: "{}" });
 }
 
 export function updateWorkspaceSettings(
@@ -475,7 +470,6 @@ declare global {
         ready: () => void;
         expand: () => void;
         close?: () => void;
-        requestChat?: (requestId: string, callback?: (success: boolean) => void) => void;
         themeParams: Record<string, string>;
         showAlert: (message: string) => void;
       };

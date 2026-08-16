@@ -61,15 +61,15 @@ dependencies into their deployment directories.
 
 The bot resolves every Telegram group through `telegram_chat_workspaces`;
 unregistered groups can only use `/setup`.
-Callbacks, `/start`, and native user-picker results are also accepted in private
-chats and then authorized through workspace membership and role. Every observed
+Occurrence callbacks and `/start` are also accepted in private chats and then
+authorized through workspace membership and role. Every observed
 sender in a registered group is upserted into `users` and that workspace's
 `workspace_members` model.
 Telegram does not provide an API for listing every group member. Owners and
-organizers can therefore select up to ten users at a time in the private bot
-chat; the backend verifies every selected ID with `getChatMember` against the
-selected workspace's Telegram group before saving it. Manual sync remains a
-fallback for admins, cached users, and the requesting user. Join/leave updates
+organizers therefore publish a workspace-scoped self-enrollment button in the
+target group. Each click is matched to that chat and verified with
+`getChatMember` before the sender is saved. Manual sync remains a fallback for
+admins, cached users, and the requesting user. Join/leave updates
 activate or remove membership. Removing an assignee pauses their reminders and
 stops pending deliveries until an owner or organizer reassigns them.
 
@@ -154,8 +154,8 @@ already recorded migration with a changed checksum aborts the deploy.
 ## Known risks and gaps
 
 1. Telegram cannot enumerate all group members. Automatic join and activity
-   observation cover normal use, while the native picker imports at most ten
-   selected users per request after `getChatMember` verification.
+   observation cover normal use, while a workspace-scoped group button lets
+   missing participants enroll themselves after `getChatMember` verification.
 2. A workspace owner can transfer ownership to an active member. If the owner
    leaves first, another Telegram administrator can recover ownership with
    `/setup`; the repository allows recovery only while the old owner is inactive.

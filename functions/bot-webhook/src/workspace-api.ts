@@ -39,9 +39,9 @@ import {
   type MemberAvatarLoader,
 } from "./member-avatar.js";
 import {
-  createMemberPickerPreparer,
-  type MemberPickerPreparer,
-} from "./member-picker.js";
+  createMemberEnrollmentPublisher,
+  type MemberEnrollmentPublisher,
+} from "./member-enrollment.js";
 
 export interface WorkspaceApiDependencies {
   workspaces: Pick<
@@ -58,7 +58,7 @@ export interface WorkspaceApiDependencies {
     execute(input: OccurrenceActionInput): Promise<OccurrenceActionResult>;
   };
   memberAvatar: MemberAvatarLoader;
-  memberPicker: MemberPickerPreparer;
+  memberEnrollment: MemberEnrollmentPublisher;
 }
 
 function createDependencies(config: AppConfig): WorkspaceApiDependencies {
@@ -71,7 +71,7 @@ function createDependencies(config: AppConfig): WorkspaceApiDependencies {
       execute: (input) => executeOccurrenceAction(config, input),
     },
     memberAvatar: createMemberAvatarLoader(config),
-    memberPicker: createMemberPickerPreparer(config),
+    memberEnrollment: createMemberEnrollmentPublisher(config),
   };
 }
 
@@ -86,7 +86,7 @@ function isWorkspaceRoute(method: string, path: string): boolean {
     )) ||
     (method === "POST" && (
       path === "/api/reminders" ||
-      path === "/api/members/prepare-picker" ||
+      path === "/api/members/publish-enrollment" ||
       path === "/api/workspace/transfer-ownership" ||
       /^\/api\/reminders\/[^/]+\/reassign$/.test(path) ||
       /^\/api\/reminders\/[^/]+\/(pause|resume|archive)$/.test(path) ||
@@ -136,22 +136,23 @@ export async function handleWorkspaceApi(
     return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
   }
 
-  if (method === "POST" && path === "/api/members/prepare-picker") {
+  if (method === "POST" && path === "/api/members/publish-enrollment") {
     if (actor.role !== "owner" && actor.role !== "organizer") {
       return jsonResponse(403, {
-        error: "Only an owner or organizer can add members",
+        error: "Only an owner or organizer can invite members",
         code: "forbidden",
       });
     }
     try {
-      const requestId = await dependencies.memberPicker.prepare(
-        initData.user.id,
-        workspace.workspaceId,
-      );
-      return jsonResponse(200, { requestId });
+      await dependencies.memberEnrollment.publish({
+        workspaceId: workspace.workspaceId,
+        telegramChatId: workspace.telegramChatId,
+        displayName: workspace.displayName,
+      });
+      return jsonResponse(200, { published: true });
     } catch {
       return jsonResponse(502, {
-        error: "Telegram user picker is temporarily unavailable",
+        error: "Telegram enrollment message is temporarily unavailable",
         code: "telegram_unavailable",
       });
     }

@@ -17,10 +17,15 @@ import { Bot, GrammyError, HttpError, type BotConfig, type Context } from "gramm
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
-import { importSharedGroupMembers } from "./member-import.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
 import { buildStartResponse } from "./start-response.js";
-import { managedWorkspaces, workspaceForMemberImport } from "./bot-workspaces.js";
+import {
+  isActiveGroupMember,
+  isEnrollmentTarget,
+  memberEnrollmentKeyboard,
+  memberEnrollmentMessage,
+  parseMemberEnrollmentCallbackData,
+} from "./member-enrollment.js";
 import {
   OccurrenceActionForbiddenError,
   OccurrenceActionNotFoundError,
@@ -161,6 +166,9 @@ export function getBot(): Bot {
     const callbackData = ctx.callbackQuery && "data" in ctx.callbackQuery
       ? ctx.callbackQuery.data
       : null;
+    const enrollmentWorkspaceId = callbackData
+      ? parseMemberEnrollmentCallbackData(callbackData)
+      : null;
     const isPrivateCallback =
       ctx.chat?.type === "private" &&
       userId != null &&
@@ -170,10 +178,7 @@ export function getBot(): Bot {
       ctx.chat?.type === "private" &&
       userId != null &&
       ctx.message?.text?.startsWith("/start") === true;
-    const isPrivateUsersShared =
-      ctx.chat?.type === "private" &&
-      userId != null &&
-      ctx.message?.users_shared != null;
+    const isMemberEnrollmentCallback = userId != null && enrollmentWorkspaceId != null;
     const isGroupSetup =
       isGroupChat &&
       userId != null &&
@@ -183,13 +188,18 @@ export function getBot(): Bot {
       !isConfiguredGroup &&
       !isPrivateCallback &&
       !isPrivateStart &&
-      !isPrivateUsersShared &&
+      !isMemberEnrollmentCallback &&
       !isGroupSetup
     ) {
       return;
     }
 
-    if (ctx.from && ctx.chat && (ctx.chat.type === "private" || isConfiguredGroup || isGroupSetup)) {
+    if (
+      ctx.from &&
+      ctx.chat &&
+      !isMemberEnrollmentCallback &&
+      (ctx.chat.type === "private" || isConfiguredGroup || isGroupSetup)
+    ) {
       await observeTelegramIdentity(
         config,
         {
@@ -211,15 +221,10 @@ export function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => {
-    const actorWorkspaces = ctx.chat.type === "private" && ctx.from
-      ? await workspacesRepo.listForUser(ctx.from.id)
-      : [];
-    const manageable = managedWorkspaces(actorWorkspaces);
     const response = buildStartResponse(
       ctx.chat.type,
       config.miniAppUrl,
       bot.botInfo.username,
-      manageable.map(({ workspaceId, displayName }) => ({ workspaceId, displayName })),
     );
     await ctx.reply(response.message, {
       reply_markup: response.removeReplyKeyboard
@@ -229,69 +234,6 @@ export function getBot(): Bot {
     if (response.removeReplyKeyboard && response.keyboard) {
       await ctx.reply("Панель напоминаний", { reply_markup: response.keyboard });
     }
-    if (response.memberPicker) {
-      await ctx.reply(response.memberPicker.message, {
-        reply_markup: response.memberPicker.keyboard,
-      });
-    }
-  });
-
-  bot.on("message:users_shared", async (ctx) => {
-    if (
-      ctx.chat.type !== "private" ||
-      !ctx.from
-    ) {
-      return;
-    }
-
-    const actorWorkspaces = await workspacesRepo.listForUser(ctx.from.id);
-    const workspace = workspaceForMemberImport(
-      actorWorkspaces,
-      ctx.message.users_shared.request_id,
-    );
-    if (!workspace) {
-      await ctx.reply("Добавлять участников может только владелец или организатор группы.");
-      return;
-    }
-
-    const result = await importSharedGroupMembers(
-      workspace.telegramChatId,
-      ctx.message.users_shared.users,
-      {
-        getChatMember: (chatId, userId) => bot.api.getChatMember(chatId, userId),
-        saveMember: async (membership) => {
-          const user = membership.user;
-          await observeTelegramIdentity(
-            config,
-            {
-              id: user.id,
-              username: user.username,
-              firstName: user.first_name,
-              lastName: user.last_name,
-              languageCode: user.language_code,
-            },
-            { id: workspace.telegramChatId, type: "group" },
-          );
-        },
-      },
-    );
-
-    const response = buildStartResponse(
-      "private",
-      config.miniAppUrl,
-      bot.botInfo.username,
-      managedWorkspaces(actorWorkspaces).map(({ workspaceId, displayName }) => ({
-        workspaceId,
-        displayName,
-      })),
-    );
-    const skippedText = result.skipped > 0
-      ? ` Не добавлено: ${result.skipped} — они не состоят в группе «${workspace.displayName}» или недоступны.`
-      : "";
-    await ctx.reply(
-      `✅ ${workspace.displayName}: добавлено участников — ${result.imported}.${skippedText}`,
-      { reply_markup: response.keyboard },
-    );
   });
 
   bot.command("list", async (ctx) => {
@@ -429,6 +371,26 @@ export function getBot(): Bot {
     }
   });
 
+  bot.command("members", async (ctx) => {
+    const workspace = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup"
+      ? await workspacesRepo.getByTelegramChatId(ctx.chat.id)
+      : null;
+    if (!workspace || workspace.status !== "active") {
+      await ctx.reply("Сначала настройте эту группу командой /setup.");
+      return;
+    }
+    const actor = ctx.from
+      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id)
+      : null;
+    if (!actor || (actor.role !== "owner" && actor.role !== "organizer")) {
+      await ctx.reply("Приглашать участников может только владелец или организатор группы.");
+      return;
+    }
+    await ctx.reply(memberEnrollmentMessage(workspace.displayName), {
+      reply_markup: memberEnrollmentKeyboard(workspace.workspaceId),
+    });
+  });
+
   bot.on("chat_member", async (ctx) => {
     const workspace = await workspacesRepo.getByTelegramChatId(ctx.chatMember.chat.id);
     if (!workspace || workspace.status !== "active") {
@@ -472,6 +434,55 @@ export function getBot(): Bot {
   });
 
   bot.on("callback_query:data", async (ctx) => {
+    const enrollmentWorkspaceId = parseMemberEnrollmentCallbackData(ctx.callbackQuery.data);
+    if (enrollmentWorkspaceId) {
+      if (!ctx.from || !ctx.chat || ctx.chat.type === "private") {
+        await ctx.answerCallbackQuery({
+          text: "Нажмите эту кнопку в исходной группе",
+          show_alert: true,
+        });
+        return;
+      }
+      const workspace = await workspacesRepo.getByTelegramChatId(ctx.chat.id);
+      if (!isEnrollmentTarget(workspace, enrollmentWorkspaceId, ctx.chat.id)) {
+        await ctx.answerCallbackQuery({
+          text: "Кнопка относится к другой группе",
+          show_alert: true,
+        });
+        return;
+      }
+      let membership;
+      try {
+        membership = await ctx.getChatMember(ctx.from.id);
+      } catch {
+        await ctx.answerCallbackQuery({
+          text: "Не удалось проверить участие в группе",
+          show_alert: true,
+        });
+        return;
+      }
+      if (!isActiveGroupMember(membership)) {
+        await ctx.answerCallbackQuery({
+          text: "Добавиться могут только участники этой группы",
+          show_alert: true,
+        });
+        return;
+      }
+      await observeTelegramIdentity(
+        config,
+        {
+          id: ctx.from.id,
+          username: ctx.from.username,
+          firstName: ctx.from.first_name,
+          lastName: ctx.from.last_name,
+          languageCode: ctx.from.language_code,
+        },
+        { id: workspace.telegramChatId, type: "group" },
+      );
+      await ctx.answerCallbackQuery({ text: "Готово — вы добавлены в планировщик" });
+      return;
+    }
+
     const occurrenceCallback = parseOccurrenceCallbackData(ctx.callbackQuery.data);
     if (occurrenceCallback) {
       if (!ctx.from || !ctx.chat) {

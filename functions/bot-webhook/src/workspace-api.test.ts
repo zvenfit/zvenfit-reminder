@@ -105,8 +105,8 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     memberAvatar: {
       load: vi.fn().mockResolvedValue("data:image/jpeg;base64,AQID"),
     },
-    memberPicker: {
-      prepare: vi.fn().mockResolvedValue("prepared-users-request"),
+    memberEnrollment: {
+      publish: vi.fn().mockResolvedValue(undefined),
     },
   } as unknown as WorkspaceApiDependencies;
 }
@@ -157,12 +157,18 @@ describe("handleWorkspaceApi", () => {
     expect(deps.reminders.listForActor).not.toHaveBeenCalled();
   });
 
-  it("prepares a Telegram user picker for a workspace organizer", async () => {
+  it("publishes a self-enrollment message for a workspace organizer", async () => {
     const deps = dependencies(actor("organizer"));
+    deps.workspaces.getById = vi.fn().mockResolvedValue({
+      workspaceId: "workspace-a",
+      telegramChatId: -1001,
+      displayName: "Команда",
+      status: "active",
+    });
     const response = await handleWorkspaceApi(
       {
         httpMethod: "POST",
-        path: "/api/members/prepare-picker",
+        path: "/api/members/publish-enrollment",
         headers: workspaceHeaders,
         body: "{}",
       },
@@ -172,16 +178,20 @@ describe("handleWorkspaceApi", () => {
     );
 
     expect(response?.statusCode).toBe(200);
-    expect(JSON.parse(response?.body ?? "{}").requestId).toBe("prepared-users-request");
-    expect(deps.memberPicker.prepare).toHaveBeenCalledWith(20, "workspace-a");
+    expect(JSON.parse(response?.body ?? "{}")).toEqual({ published: true });
+    expect(deps.memberEnrollment.publish).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      telegramChatId: -1001,
+      displayName: "Команда",
+    });
   });
 
-  it("does not prepare a member picker for a regular member", async () => {
+  it("does not publish an enrollment message for a regular member", async () => {
     const deps = dependencies(actor("member"));
     const response = await handleWorkspaceApi(
       {
         httpMethod: "POST",
-        path: "/api/members/prepare-picker",
+        path: "/api/members/publish-enrollment",
         headers: workspaceHeaders,
         body: "{}",
       },
@@ -191,16 +201,16 @@ describe("handleWorkspaceApi", () => {
     );
 
     expect(response?.statusCode).toBe(403);
-    expect(deps.memberPicker.prepare).not.toHaveBeenCalled();
+    expect(deps.memberEnrollment.publish).not.toHaveBeenCalled();
   });
 
-  it("returns a sanitized error when Telegram cannot prepare the picker", async () => {
+  it("returns a sanitized error when Telegram cannot publish the enrollment message", async () => {
     const deps = dependencies(actor("owner"));
-    deps.memberPicker.prepare = vi.fn().mockRejectedValue(new Error("provider details"));
+    deps.memberEnrollment.publish = vi.fn().mockRejectedValue(new Error("provider details"));
     const response = await handleWorkspaceApi(
       {
         httpMethod: "POST",
-        path: "/api/members/prepare-picker",
+        path: "/api/members/publish-enrollment",
         headers: workspaceHeaders,
         body: "{}",
       },
@@ -211,7 +221,7 @@ describe("handleWorkspaceApi", () => {
 
     expect(response?.statusCode).toBe(502);
     expect(JSON.parse(response?.body ?? "{}")).toEqual({
-      error: "Telegram user picker is temporarily unavailable",
+      error: "Telegram enrollment message is temporarily unavailable",
       code: "telegram_unavailable",
     });
   });

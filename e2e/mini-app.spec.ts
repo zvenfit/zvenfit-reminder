@@ -81,7 +81,7 @@ const now = "2026-08-14T09:00:00.000Z";
 const onceSchedule = {
   version: 1,
   frequency: "once",
-  date: "2026-08-15",
+  date: "2099-08-15",
   timing: { kind: "timed", timeLocal: "09:00" },
 };
 const policy = {
@@ -244,19 +244,8 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
     if (method === "POST" && path === "/api/members/sync") {
       return fulfill({ members: state.members[selected], synced: state.members[selected].length });
     }
-    if (method === "POST" && path === "/api/members/prepare-picker") {
-      if (selected && !state.members[selected].some((member) => member.userId === 50)) {
-        state.members[selected].push({
-          workspaceId: selected,
-          userId: 50,
-          role: "member",
-          status: "active",
-          username: "olga",
-          displayName: "Ольга",
-          privateChatAvailable: true,
-        });
-      }
-      return fulfill({ requestId: `prepared-${selected}` });
+    if (method === "POST" && path === "/api/members/publish-enrollment") {
+      return fulfill({ published: true });
     }
     if (method === "PATCH" && path === "/api/workspace/settings") {
       const workspace = state.workspaces.find((item) => item.workspaceId === selected)!;
@@ -355,12 +344,6 @@ async function installTelegram(page: Page): Promise<void> {
           initDataUnsafe: { user: { id: 10, first_name: "Анна" } },
           ready() {},
           expand() {},
-          requestChat(requestId: string, callback?: (success: boolean) => void) {
-            const target = window as Window & { __memberPickerRequests?: string[] };
-            target.__memberPickerRequests ??= [];
-            target.__memberPickerRequests.push(requestId);
-            callback?.(true);
-          },
           themeParams: {},
           showAlert() {},
         },
@@ -440,19 +423,36 @@ test("recovers from an empty workspace response without leaving disabled control
     .toBeGreaterThan(initialWorkspaceRequests);
 });
 
-test("opens Telegram member picker for the selected workspace", async ({ page }) => {
+test("manages verified members and publishes self-enrollment to the selected group", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
 
   await page.getByRole("button", { name: /Участники/ }).click();
 
-  await expect.poll(() => page.evaluate(() =>
-    (window as Window & { __memberPickerRequests?: string[] }).__memberPickerRequests ?? [],
-  )).toEqual(["prepared-team"]);
+  await expect(page.getByRole("heading", { name: "Кто может отвечать" })).toBeVisible();
+  await expect(page.getByRole("list", { name: "Подтверждённые участники" })).toContainText("Анна");
+  await expect(page.getByRole("list", { name: "Подтверждённые участники" })).toContainText("Иван");
+  await page.getByRole("button", { name: "Опубликовать кнопку в группе" }).click();
+  await expect(page.getByText("Отправить сообщение в «Команда»?")).toBeVisible();
+  await page.getByRole("button", { name: "Да, опубликовать" }).click();
+
   expect(state.requests.find((request) =>
-    request.method === "POST" && request.path === "/api/members/prepare-picker"))
+    request.method === "POST" && request.path === "/api/members/publish-enrollment"))
     .toMatchObject({ workspaceId: "team" });
-  await expect(page.getByText("Список участников обновлён")).toBeVisible();
+  await expect(page.getByText("Кнопка подключения опубликована в группе")).toBeVisible();
+
+  state.members.team.push({
+    workspaceId: "team",
+    userId: 50,
+    role: "member",
+    status: "active",
+    username: "olga",
+    displayName: "Ольга",
+    privateChatAvailable: true,
+  });
+  await page.getByRole("button", { name: "Обновить" }).click();
+  await expect(page.getByRole("list", { name: "Подтверждённые участники" })).toContainText("Ольга");
+  await expect(page.getByText("Новых участников: 1")).toBeVisible();
 });
 
 test("uses explicit 24-hour time fields", async ({ page }) => {
@@ -465,6 +465,21 @@ test("uses explicit 24-hour time fields", async ({ page }) => {
   await time.fill("1845");
   await expect(time).toHaveValue("18:45");
   await expect(page.getByText(/AM|PM/)).toHaveCount(0);
+});
+
+test("returns from the member roster without losing a reminder draft", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  const title = page.getByRole("textbox", { name: "Что нужно сделать" });
+  await title.fill("Сверить расписание");
+
+  await page.getByRole("button", { name: "Участники группы" }).click();
+  await expect(page.getByRole("heading", { name: "Кто может отвечать" })).toBeVisible();
+  await page.getByRole("button", { name: "Назад" }).click();
+
+  await expect(page.getByRole("heading", { name: "О чём не дать забыть?" })).toBeVisible();
+  await expect(title).toHaveValue("Сверить расписание");
 });
 
 test("shows Telegram-style avatars in the participant selector", async ({ page }) => {
@@ -553,7 +568,7 @@ test("reassigns a paused reminder and manages organizer access", async ({ page }
   await expect(page.getByText("Ответственный изменён, напоминание снова активно")).toBeVisible();
   await expect(paused.getByText("Ответственный вышел")).toHaveCount(0);
 
-  await page.getByText("Доступы", { exact: true }).click();
+  await page.getByRole("button", { name: /Участники/ }).click();
   await page.getByRole("combobox", { name: "Роль: Иван" }).selectOption("organizer");
   await expect(page.getByText("Доступ организатора выдан")).toBeVisible();
 });
