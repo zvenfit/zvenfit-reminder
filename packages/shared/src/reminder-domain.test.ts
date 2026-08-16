@@ -4,6 +4,7 @@ import {
   DEFAULT_ESCALATION_REPEAT_MINUTES,
   DEFAULT_REPEAT_INTERVAL_MINUTES,
   reminderDraftSchema,
+  reminderDraftUpdateSchema,
   scheduleSpecSchema,
 } from "./reminder-domain.js";
 
@@ -98,6 +99,25 @@ describe("reminderDraftSchema", () => {
 
     expect(result.kind).toBe("payment");
     expect(result.amountMinor).toBeNull();
+  });
+
+  it("keeps kind absent in legacy update payloads", () => {
+    const result = reminderDraftUpdateSchema.parse(minimalDraft);
+
+    expect(result.kind).toBeUndefined();
+  });
+
+  it("requires HTTPS for payment links while retaining HTTP task links", () => {
+    expect(reminderDraftSchema.safeParse({
+      ...minimalDraft,
+      kind: "payment",
+      actionUrl: "http://example.com/pay",
+    }).success).toBe(false);
+    expect(reminderDraftSchema.safeParse({
+      ...minimalDraft,
+      kind: "task",
+      actionUrl: "http://example.com/context",
+    }).success).toBe(true);
   });
 
   it("rejects non-HTTP actions and invalid timezones", () => {

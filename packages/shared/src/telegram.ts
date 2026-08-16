@@ -53,6 +53,22 @@ function formatOccurrenceAmount(occurrence: ReminderOccurrence): string | null {
   }
 }
 
+function formatOccurrenceActionLink(occurrence: ReminderOccurrence): string | null {
+  if (!occurrence.actionUrl) return null;
+  try {
+    const url = new URL(occurrence.actionUrl);
+    if (occurrence.kind === "payment" && url.protocol !== "https:") {
+      return "Ссылка на оплату скрыта: нужен HTTPS";
+    }
+    const label = occurrence.kind === "payment"
+      ? `Перейти к оплате · ${url.hostname}`
+      : "Открыть ссылку";
+    return `<a href="${escapeHtml(url.toString())}">${escapeHtml(label)}</a>`;
+  } catch {
+    return null;
+  }
+}
+
 export function buildOccurrenceMessage(
   occurrence: ReminderOccurrence,
   now: Date = new Date(),
@@ -68,6 +84,7 @@ export function buildOccurrenceMessage(
     timeZone: occurrence.timezone,
   }).format(occurrence.dueAt);
   const amount = formatOccurrenceAmount(occurrence);
+  const actionLink = formatOccurrenceActionLink(occurrence);
   const lines = [
     `${overdue ? "🔴" : "🔔"} <b>${escapeHtml(occurrence.title)}</b>`,
     overdue
@@ -80,12 +97,8 @@ export function buildOccurrenceMessage(
   if (occurrence.description) {
     lines.push(escapeHtml(occurrence.description));
   }
-  if (occurrence.actionUrl) {
-    lines.push(
-      `<a href="${escapeHtml(occurrence.actionUrl)}">${
-        occurrence.kind === "payment" ? "Перейти к оплате" : "Открыть ссылку"
-      }</a>`,
-    );
+  if (actionLink) {
+    lines.push(actionLink);
   }
   if (occurrence.visibility === "group" && occurrence.assignment.mode === "person") {
     lines.push(

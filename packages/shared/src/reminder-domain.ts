@@ -242,7 +242,7 @@ const actionUrlSchema = z
     }
   }, "Only HTTP and HTTPS links are supported");
 
-export const reminderDraftSchema = z
+const reminderDraftBaseSchema = z
   .object({
     kind: reminderKindSchema.optional(),
     title: z.string().trim().min(1).max(200),
@@ -265,6 +265,7 @@ export const reminderDraftSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    const effectiveKind = value.kind ?? (value.amountMinor == null ? "task" : "payment");
     if ((value.amountMinor == null) !== (value.currency == null)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -299,7 +300,24 @@ export const reminderDraftSchema = z
         message: "The responsible person cannot also be a watcher",
       });
     }
-  })
+
+    if (
+      effectiveKind === "payment" &&
+      value.actionUrl != null &&
+      new URL(value.actionUrl).protocol !== "https:"
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["actionUrl"],
+        message: "Payment links must use HTTPS",
+      });
+    }
+  });
+
+export const reminderDraftUpdateSchema = reminderDraftBaseSchema;
+export type ReminderDraftUpdate = z.infer<typeof reminderDraftUpdateSchema>;
+
+export const reminderDraftSchema = reminderDraftBaseSchema
   .transform((value) => ({
     ...value,
     kind: value.kind ?? (value.amountMinor == null ? "task" as const : "payment" as const),

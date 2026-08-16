@@ -22,11 +22,13 @@ import {
   UndoWindowExpiredError,
   canCreateReminder,
   reminderDraftSchema,
+  reminderDraftUpdateSchema,
   workspaceMemberDisplayNameUpdateSchema,
   workspaceSettingsSchema,
   type AppConfig,
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
+import { ZodError } from "zod";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import {
@@ -274,7 +276,7 @@ export async function handleWorkspaceApi(
     } catch {
       return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
     }
-    const parsedDraft = reminderDraftSchema.safeParse(body);
+    const parsedDraft = reminderDraftUpdateSchema.safeParse(body);
     if (!parsedDraft.success) {
       return jsonResponse(400, {
         error: "Invalid reminder",
@@ -296,6 +298,16 @@ export async function handleWorkspaceApi(
         ? jsonResponse(200, { reminder })
         : jsonResponse(404, { error: "Reminder not found", code: "not_found" });
     } catch (error) {
+      if (error instanceof ZodError) {
+        return jsonResponse(400, {
+          error: "Invalid reminder",
+          code: "validation_failed",
+          issues: error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message,
+          })),
+        });
+      }
       if (error instanceof DeliveryInProgressError) {
         return jsonResponse(409, {
           error: "A notification is being sent; retry in a moment",

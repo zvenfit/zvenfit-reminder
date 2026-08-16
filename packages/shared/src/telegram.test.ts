@@ -65,8 +65,18 @@ describe("occurrence Telegram UX", () => {
     expect(message).toContain("tg://user?id=42");
     expect(message).toContain("личный кабинет &amp; приложение");
     expect(message).toContain(
-      '<a href="https://example.com/pay?for=a&amp;b=1">Перейти к оплате</a>',
+      '<a href="https://example.com/pay?for=a&amp;b=1">Перейти к оплате · example.com</a>',
     );
+  });
+
+  it("does not publish legacy cleartext payment links", () => {
+    const message = buildOccurrenceMessage({
+      ...occurrence,
+      actionUrl: "http://example.com/pay",
+    });
+
+    expect(message).toContain("Ссылка на оплату скрыта: нужен HTTPS");
+    expect(message).not.toContain('href="http://example.com/pay"');
   });
 
   it("mentions active watchers only for an escalation delivery", () => {

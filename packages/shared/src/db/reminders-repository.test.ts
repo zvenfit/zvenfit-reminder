@@ -528,10 +528,11 @@ describe("RemindersRepository", () => {
     )).rejects.toBeInstanceOf(ReminderReassignmentForbiddenError);
   });
 
-  it("updates the live occurrence and future definition as one new version", async () => {
+  it("preserves an amountless payment kind for legacy updates", async () => {
     const existing = {
       workspace_id: "workspace-a",
       reminder_id: "reminder-a",
+      kind: "payment",
       visibility: "group",
       creator_user_id: 10,
       responsible_user_id: 20,
@@ -577,7 +578,7 @@ describe("RemindersRepository", () => {
     await repository.update(
       "workspace-a",
       "reminder-a",
-      { ...draft, title: "Новые показания" },
+      { ...draft, kind: undefined, title: "Новые показания" },
       10,
       new Date("2026-08-14T00:00:00.000Z"),
     );
@@ -591,7 +592,7 @@ describe("RemindersRepository", () => {
     expect(write?.[0]).toContain("$now");
     expect(write?.[0]).toContain("current_occurrence_id IS NULL");
     expect(decodeYdbValue(write?.[1]?.$version)).toBe(3);
-    expect(decodeYdbValue(write?.[1]?.$kind)).toBe("task");
+    expect(decodeYdbValue(write?.[1]?.$kind)).toBe("payment");
     expect(decodeYdbValue(write?.[1]?.$schedule_changed)).toBe(false);
     expect(decodeYdbValue(write?.[1]?.$revision_increment)).toBe(1);
     expect(decodeYdbValue(write?.[1]?.$overdue_status)).toBe("overdue");

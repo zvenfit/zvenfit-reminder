@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
   reminderDraftSchema,
+  reminderDraftUpdateSchema,
+  reminderKindSchema,
   reminderStatusSchema,
   type ReminderDefinition,
   type ReminderDraft,
+  type ReminderDraftUpdate,
 } from "../reminder-domain.js";
 import {
   calculateFirstNotificationAt,
@@ -108,6 +111,13 @@ function nullableString(value: unknown): string | null {
   return value == null ? null : String(value);
 }
 
+function reminderKindFromRow(data: Record<string, unknown>): ReminderDraft["kind"] {
+  const storedKind = getField(data, "kind");
+  return reminderKindSchema.parse(
+    storedKind ?? (getField(data, "amount_minor") == null ? "task" : "payment"),
+  );
+}
+
 function rowToReminder(
   data: Record<string, unknown>,
   watcherUserIds: number[],
@@ -115,7 +125,7 @@ function rowToReminder(
   const escalationEnabled = Boolean(getField(data, "escalation_enabled"));
   const storedAmount = getField(data, "amount_minor");
   const draft = reminderDraftSchema.parse({
-    kind: getField(data, "kind") ?? (storedAmount == null ? "task" : "payment"),
+    kind: reminderKindFromRow(data),
     title: getField(data, "title"),
     description: nullableString(getField(data, "description")),
     actionUrl: nullableString(getField(data, "action_url")),
@@ -758,11 +768,11 @@ export class RemindersRepository {
   async update(
     workspaceId: string,
     reminderId: string,
-    input: ReminderDraft,
+    input: ReminderDraftUpdate,
     actorUserId: number,
     now: Date = new Date(),
   ): Promise<ReminderDefinition | null> {
-    const parsed = reminderDraftSchema.parse(input);
+    const parsedInput = reminderDraftUpdateSchema.parse(input);
 
     await this.runSession((session) =>
       withSerializableTransaction(session, async (transaction) => {
@@ -812,6 +822,10 @@ export class RemindersRepository {
         if (!workspaceRow || !runtimeRow) {
           throw new WorkspaceUnavailableError(workspaceId);
         }
+        const parsed = reminderDraftSchema.parse({
+          ...parsedInput,
+          kind: parsedInput.kind ?? reminderKindFromRow(reminderRow),
+        });
         const existingVisibility = String(getField(reminderRow, "visibility"));
         const actorIsManager = Boolean(
           actorRow &&
