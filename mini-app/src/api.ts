@@ -28,6 +28,8 @@ export interface WorkspaceMember {
   status: "active" | "removed";
   username: string | null;
   displayName: string;
+  telegramDisplayName: string;
+  displayNameOverride: string | null;
   privateChatAvailable: boolean;
 }
 
@@ -135,11 +137,11 @@ const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const MOCK_MODE = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
 
 const mockMembers: WorkspaceMember[] = [
-  { workspaceId: "demo", userId: 10, role: "owner", status: "active", username: "anna", displayName: "Анна", privateChatAvailable: true },
-  { workspaceId: "demo", userId: 20, role: "member", status: "active", username: "ivan", displayName: "Иван", privateChatAvailable: true },
-  { workspaceId: "demo", userId: 30, role: "member", status: "active", username: null, displayName: "Маша", privateChatAvailable: false },
-  { workspaceId: "home", userId: 10, role: "member", status: "active", username: "anna", displayName: "Анна", privateChatAvailable: true },
-  { workspaceId: "home", userId: 40, role: "owner", status: "active", username: "max", displayName: "Максим", privateChatAvailable: true },
+  { workspaceId: "demo", userId: 10, role: "owner", status: "active", username: "anna", displayName: "Анна", telegramDisplayName: "Анна", displayNameOverride: null, privateChatAvailable: true },
+  { workspaceId: "demo", userId: 20, role: "member", status: "active", username: "ivan", displayName: "Иван", telegramDisplayName: "Иван", displayNameOverride: null, privateChatAvailable: true },
+  { workspaceId: "demo", userId: 30, role: "member", status: "active", username: null, displayName: "Маша", telegramDisplayName: "Маша", displayNameOverride: null, privateChatAvailable: false },
+  { workspaceId: "home", userId: 10, role: "member", status: "active", username: "anna", displayName: "Анна", telegramDisplayName: "Анна", displayNameOverride: null, privateChatAvailable: true },
+  { workspaceId: "home", userId: 40, role: "owner", status: "active", username: "max", displayName: "Максим", telegramDisplayName: "Максим", displayNameOverride: null, privateChatAvailable: true },
 ];
 
 const mockWorkspaces: Workspace[] = [
@@ -420,6 +422,23 @@ export function updateMemberRole(
   return api(`/api/members/${userId}/role`, {
     method: "PATCH",
     body: JSON.stringify({ role }),
+  });
+}
+
+export function updateMemberDisplayName(
+  userId: number,
+  displayName: string | null,
+): Promise<{ member: WorkspaceMember }> {
+  if (MOCK_MODE) {
+    const member = mockMembers.find((item) =>
+      item.workspaceId === selectedWorkspaceId && item.userId === userId)!;
+    member.displayNameOverride = displayName;
+    member.displayName = displayName ?? member.telegramDisplayName;
+    return Promise.resolve({ member });
+  }
+  return api(`/api/members/${userId}/display-name`, {
+    method: "PATCH",
+    body: JSON.stringify({ displayName }),
   });
 }
 

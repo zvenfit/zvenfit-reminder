@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { TableSession } from "ydb-sdk";
 import type { SessionRunner } from "./client.js";
 import { DeliveryInProgressError } from "./delivery-guard.js";
-import { WorkspaceMembersRepository } from "./workspace-members-repository.js";
+import {
+  WorkspaceMemberDisplayNameChangeForbiddenError,
+  WorkspaceMembersRepository,
+} from "./workspace-members-repository.js";
 import { decodeYdbValue } from "./ydb-utils.js";
 
 function resultSet(row: Record<string, string | number | null>) {
@@ -78,6 +81,8 @@ describe("WorkspaceMembersRepository", () => {
             updated_at: "2026-08-13T12:00:00.000Z",
             username: "member",
             display_name: "Member",
+            telegram_display_name: "Member",
+            display_name_override: null,
             private_chat_available: 1,
           }),
         ],
@@ -92,6 +97,159 @@ describe("WorkspaceMembersRepository", () => {
     const query = session.executeQuery.mock.calls[0]?.[0] ?? "";
     expect(query).toContain("ORDER BY role, display_name, user_id");
     expect(query).not.toContain("ORDER BY member.role");
+    expect(query).toContain("COALESCE(member.display_name_override, user.display_name)");
+  });
+
+  it("stores a workspace-local display name without changing the Telegram profile", async () => {
+    const memberRow = (userId: number, role: string) => ({
+      workspace_id: "workspace-a",
+      user_id: userId,
+      role,
+      status: "active",
+      role_granted_by: null,
+      role_granted_at: null,
+      last_observed_at: "2026-08-16T10:00:00.000Z",
+      created_at: "2026-08-14T10:00:00.000Z",
+      updated_at: "2026-08-16T10:00:00.000Z",
+    });
+    const targetProfile = {
+      ...memberRow(20, "member"),
+      username: null,
+      display_name: "Я",
+      telegram_display_name: "Я",
+      display_name_override: null,
+      private_chat_available: 0,
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-display-name" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("SELECT status FROM workspaces")
+          ? [
+              resultSet({ status: "active" }),
+              resultSet(memberRow(10, "owner")),
+              resultSet(targetProfile),
+            ]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    const updated = await repository.setDisplayNameOverride(
+      "workspace-a",
+      20,
+      "Алексей Тренер",
+      10,
+      new Date("2026-08-16T12:00:00.000Z"),
+    );
+
+    expect(updated).toMatchObject({
+      displayName: "Алексей Тренер",
+      telegramDisplayName: "Я",
+      displayNameOverride: "Алексей Тренер",
+    });
+    const writeCall = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("workspace_member.display_name_changed"));
+    expect(writeCall?.[0]).toContain("display_name_override = $display_name_override");
+    expect(decodeYdbValue(writeCall?.[1]?.$display_name_override)).toBe("Алексей Тренер");
+    expect(decodeYdbValue(writeCall?.[1]?.$actor_user_id)).toBe(10);
+  });
+
+  it("lets a member reset their own workspace-local display name", async () => {
+    const ownProfile = {
+      workspace_id: "workspace-a",
+      user_id: 20,
+      role: "member",
+      status: "active",
+      role_granted_by: null,
+      role_granted_at: null,
+      last_observed_at: "2026-08-16T10:00:00.000Z",
+      created_at: "2026-08-14T10:00:00.000Z",
+      updated_at: "2026-08-16T10:00:00.000Z",
+      username: null,
+      display_name: "Алексей Тренер",
+      telegram_display_name: "Я",
+      display_name_override: "Алексей Тренер",
+      private_chat_available: 0,
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-reset-name" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("SELECT status FROM workspaces")
+          ? [resultSet({ status: "active" }), resultSet(ownProfile), resultSet(ownProfile)]
+          : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    const updated = await repository.setDisplayNameOverride(
+      "workspace-a",
+      20,
+      null,
+      20,
+      new Date("2026-08-16T12:00:00.000Z"),
+    );
+
+    expect(updated).toMatchObject({
+      displayName: "Я",
+      telegramDisplayName: "Я",
+      displayNameOverride: null,
+    });
+    const writeCall = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("workspace_member.display_name_changed"));
+    expect(decodeYdbValue(writeCall?.[1]?.$display_name_override)).toBeNull();
+  });
+
+  it("does not let an organizer rename the workspace owner", async () => {
+    const memberRow = (userId: number, role: string) => ({
+      workspace_id: "workspace-a",
+      user_id: userId,
+      role,
+      status: "active",
+      role_granted_by: null,
+      role_granted_at: null,
+      last_observed_at: "2026-08-16T10:00:00.000Z",
+      created_at: "2026-08-14T10:00:00.000Z",
+      updated_at: "2026-08-16T10:00:00.000Z",
+    });
+    const ownerProfile = {
+      ...memberRow(10, "owner"),
+      username: "owner",
+      display_name: "Владелец",
+      telegram_display_name: "Владелец",
+      display_name_override: null,
+      private_chat_available: 1,
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-forbidden-name" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined),
+      rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn().mockResolvedValue({
+        resultSets: [
+          resultSet({ status: "active" }),
+          resultSet(memberRow(20, "organizer")),
+          resultSet(ownerProfile),
+        ],
+      }),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new WorkspaceMembersRepository("", "", runSession);
+
+    await expect(repository.setDisplayNameOverride(
+      "workspace-a",
+      10,
+      "Новое имя",
+      20,
+    )).rejects.toBeInstanceOf(WorkspaceMemberDisplayNameChangeForbiddenError);
+    expect(session.commitTransaction).not.toHaveBeenCalled();
   });
 
   it("reactivates an observed removed member without restoring elevated rights", async () => {

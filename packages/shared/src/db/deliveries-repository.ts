@@ -200,7 +200,8 @@ export class DeliveriesRepository {
             WHERE workspace_id = $workspace_id
             LIMIT 1;
 
-            SELECT member.user_id AS user_id, user.display_name AS display_name
+            SELECT member.user_id AS user_id,
+              COALESCE(member.display_name_override, user.display_name) AS display_name
             FROM workspace_members AS member
             INNER JOIN users AS user ON user.user_id = member.user_id
             WHERE member.workspace_id = $workspace_id

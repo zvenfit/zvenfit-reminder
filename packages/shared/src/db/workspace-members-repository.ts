@@ -13,6 +13,7 @@ import {
   mapResultRows,
   optionalInt64,
   optionalTimestamp,
+  optionalUtf8,
   parseYdbTimestamp,
   parseYdbTimestampRequired,
   timestampValue,
@@ -29,6 +30,13 @@ export class WorkspaceMemberNotFoundError extends Error {
   constructor(readonly userId: number) {
     super(`Workspace member ${userId} was not found`);
     this.name = "WorkspaceMemberNotFoundError";
+  }
+}
+
+export class WorkspaceMemberDisplayNameChangeForbiddenError extends Error {
+  constructor() {
+    super("This member display name cannot be changed by the current actor");
+    this.name = "WorkspaceMemberDisplayNameChangeForbiddenError";
   }
 }
 
@@ -60,6 +68,17 @@ function rowToWorkspaceMember(row: Record<string, unknown>): WorkspaceMember {
 
 function nullableString(value: unknown): string | null {
   return value == null ? null : String(value);
+}
+
+function rowToWorkspaceMemberProfile(row: Record<string, unknown>): WorkspaceMemberProfile {
+  return {
+    ...rowToWorkspaceMember(row),
+    username: nullableString(getField(row, "username")),
+    displayName: String(getField(row, "display_name")),
+    telegramDisplayName: String(getField(row, "telegram_display_name")),
+    displayNameOverride: nullableString(getField(row, "display_name_override")),
+    privateChatAvailable: Boolean(getField(row, "private_chat_available")),
+  };
 }
 
 export class WorkspaceMembersRepository {
@@ -95,7 +114,8 @@ export class WorkspaceMembersRepository {
         `
           DECLARE $workspace_id AS Utf8;
           SELECT member.*, user.username AS username,
-            user.display_name AS display_name,
+            COALESCE(member.display_name_override, user.display_name) AS display_name,
+            user.display_name AS telegram_display_name,
             user.private_chat_available AS private_chat_available
           FROM workspace_members AS member
           INNER JOIN users AS user ON member.user_id = user.user_id
@@ -104,13 +124,116 @@ export class WorkspaceMembersRepository {
         `,
         { $workspace_id: TypedValues.utf8(workspaceId) },
       );
-      return mapResultRows(resultSets[0]).map((row) => ({
-        ...rowToWorkspaceMember(row),
-        username: nullableString(getField(row, "username")),
-        displayName: String(getField(row, "display_name")),
-        privateChatAvailable: Boolean(getField(row, "private_chat_available")),
-      }));
+      return mapResultRows(resultSets[0]).map(rowToWorkspaceMemberProfile);
     });
+  }
+
+  async setDisplayNameOverride(
+    workspaceId: string,
+    targetUserId: number,
+    displayNameOverride: string | null,
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<WorkspaceMemberProfile> {
+    return this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $target_user_id AS Int64;
+            SELECT status FROM workspaces
+            WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT * FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT member.*, user.username AS username,
+              COALESCE(member.display_name_override, user.display_name) AS display_name,
+              user.display_name AS telegram_display_name,
+              user.private_chat_available AS private_chat_available
+            FROM workspace_members AS member
+            INNER JOIN users AS user ON user.user_id = member.user_id
+            WHERE member.workspace_id = $workspace_id
+              AND member.user_id = $target_user_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $target_user_id: TypedValues.int64(targetUserId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const actorRow = mapResultRows(resultSets[1])[0];
+        const targetRow = mapResultRows(resultSets[2])[0];
+        if (!targetRow) {
+          throw new WorkspaceMemberNotFoundError(targetUserId);
+        }
+        const actor = actorRow ? rowToWorkspaceMember(actorRow) : null;
+        const target = rowToWorkspaceMemberProfile(targetRow);
+        const actorCanRenameTarget = actor?.userId === targetUserId ||
+          actor?.role === "owner" ||
+          (actor?.role === "organizer" && target.role !== "owner");
+        if (
+          !workspaceRow ||
+          getField(workspaceRow, "status") !== "active" ||
+          !actor ||
+          actor.status !== "active" ||
+          target.status !== "active" ||
+          !actorCanRenameTarget
+        ) {
+          throw new WorkspaceMemberDisplayNameChangeForbiddenError();
+        }
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $target_user_id AS Int64;
+            DECLARE $display_name_override AS Utf8?;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $entity_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            UPDATE workspace_members SET
+              display_name_override = $display_name_override,
+              updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND user_id = $target_user_id
+              AND status = 'active';
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $entity_id, $now, $event_id, 'workspace_member',
+              'workspace_member.display_name_changed', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $target_user_id: TypedValues.int64(targetUserId),
+            $display_name_override: optionalUtf8(displayNameOverride),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $entity_id: TypedValues.utf8(`member:${targetUserId}`),
+            $payload: TypedValues.jsonDocument(JSON.stringify({
+              action: displayNameOverride === null ? "reset" : "set",
+            })),
+          },
+        );
+
+        return {
+          ...target,
+          displayNameOverride,
+          displayName: displayNameOverride ?? target.telegramDisplayName,
+          updatedAt: now,
+        };
+      }),
+    );
   }
 
   async observe(

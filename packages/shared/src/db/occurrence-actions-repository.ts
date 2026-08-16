@@ -236,7 +236,8 @@ export class OccurrenceActionsRepository {
             DECLARE $workspace_id AS Utf8;
             DECLARE $occurrence_id AS Utf8;
             DECLARE $actor_user_id AS Int64;
-            SELECT occurrence.*, actor_user.display_name AS actor_display_name
+            SELECT occurrence.*,
+              COALESCE(actor.display_name_override, actor_user.display_name) AS actor_display_name
             FROM reminder_occurrences AS occurrence
             INNER JOIN reminders AS reminder
               ON reminder.workspace_id = occurrence.workspace_id

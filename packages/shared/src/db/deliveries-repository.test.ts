@@ -212,7 +212,7 @@ describe("DeliveriesRepository.reserve", () => {
   });
 
   it("escalates overdue work to active watchers no more often than configured", async () => {
-    const { repository } = reservationDouble(
+    const { repository, session } = reservationDouble(
       occurrenceRow({
         status: "overdue",
         due_at: "2026-08-12T12:00:00.000Z",
@@ -231,6 +231,9 @@ describe("DeliveriesRepository.reserve", () => {
 
     expect(reservation?.delivery.deliveryType).toBe("escalation");
     expect(reservation?.escalationWatchers).toEqual([{ userId: 10, displayName: "Анна" }]);
+    expect(session.executeQuery.mock.calls[0]?.[0]).toContain(
+      "COALESCE(member.display_name_override, user.display_name)",
+    );
   });
 
   it("keeps regular repeats before the next watcher escalation window", async () => {

@@ -59,6 +59,17 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     members: {
       getByUserId: vi.fn().mockResolvedValue(member),
       listProfiles: vi.fn().mockResolvedValue([]),
+      setDisplayNameOverride: vi.fn().mockImplementation(
+        async (_workspaceId, userId, displayName) => ({
+          workspaceId: "workspace-a",
+          userId,
+          role: "member",
+          status: "active",
+          displayName: displayName ?? "Я",
+          telegramDisplayName: "Я",
+          displayNameOverride: displayName,
+        }),
+      ),
       setRole: vi.fn().mockImplementation(async (_workspaceId, userId, role) => ({
         workspaceId: "workspace-a",
         userId,
@@ -393,6 +404,67 @@ describe("handleWorkspaceApi", () => {
       "organizer",
       20,
     );
+  });
+
+  it("stores and resets a workspace-local member display name", async () => {
+    const deps = dependencies(actor("owner"));
+    const renamed = await handleWorkspaceApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/members/30/display-name",
+        headers: workspaceHeaders,
+        body: JSON.stringify({ displayName: "  Алексей Тренер  " }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(renamed?.statusCode).toBe(200);
+    expect(deps.members.setDisplayNameOverride).toHaveBeenCalledWith(
+      "workspace-a",
+      30,
+      "Алексей Тренер",
+      20,
+    );
+
+    const reset = await handleWorkspaceApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/members/30/display-name",
+        headers: workspaceHeaders,
+        body: JSON.stringify({ displayName: null }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(reset?.statusCode).toBe(200);
+    expect(deps.members.setDisplayNameOverride).toHaveBeenLastCalledWith(
+      "workspace-a",
+      30,
+      null,
+      20,
+    );
+  });
+
+  it("rejects an invalid workspace-local display name before persistence", async () => {
+    const deps = dependencies(actor("owner"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/members/30/display-name",
+        headers: workspaceHeaders,
+        body: JSON.stringify({ displayName: "   " }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(400);
+    expect(deps.members.setDisplayNameOverride).not.toHaveBeenCalled();
   });
 
   it("updates workspace delivery settings for an organizer", async () => {

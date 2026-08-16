@@ -119,7 +119,9 @@ export function PersonSelect({
             ? "Ответственный определится по факту"
             : selectedMember?.userId === actorId
               ? "Это вы"
-              : selectedMember?.username ? `@${selectedMember.username}` : "Участник группы"}</small>
+              : selectedMember?.displayNameOverride
+                ? `Telegram: ${selectedMember.telegramDisplayName}`
+                : selectedMember?.username ? `@${selectedMember.username}` : "Участник группы"}</small>
         </span>
         <span className="person-select__chevron" aria-hidden="true">⌄</span>
       </button>
@@ -153,7 +155,9 @@ export function PersonSelect({
                 <MemberAvatar member={member} />
                 <span>
                   <b>{member.displayName}{member.userId === actorId ? " · вы" : ""}</b>
-                  <small>{member.username ? `@${member.username}` : "Участник группы"}</small>
+                  <small>{member.displayNameOverride
+                    ? `Telegram: ${member.telegramDisplayName}`
+                    : member.username ? `@${member.username}` : "Участник группы"}</small>
                 </span>
                 {selected ? <span className="person-select__check" aria-hidden="true">✓</span> : null}
               </button>

@@ -13,6 +13,7 @@ import {
   ScheduleHasNoFutureDeadlineError,
   RemindersRepository,
   WorkspaceMembersRepository,
+  WorkspaceMemberDisplayNameChangeForbiddenError,
   WorkspaceMemberNotFoundError,
   WorkspaceOwnershipTransferForbiddenError,
   WorkspaceRoleChangeForbiddenError,
@@ -21,6 +22,7 @@ import {
   UndoWindowExpiredError,
   canCreateReminder,
   reminderDraftSchema,
+  workspaceMemberDisplayNameUpdateSchema,
   workspaceSettingsSchema,
   type AppConfig,
   type ParsedInitData,
@@ -48,7 +50,10 @@ export interface WorkspaceApiDependencies {
     WorkspacesRepository,
     "getById" | "listForUser" | "updateSettings" | "transferOwnership"
   >;
-  members: Pick<WorkspaceMembersRepository, "getByUserId" | "listProfiles" | "setRole">;
+  members: Pick<
+    WorkspaceMembersRepository,
+    "getByUserId" | "listProfiles" | "setDisplayNameOverride" | "setRole"
+  >;
   reminders: Pick<
     RemindersRepository,
     "listForActor" | "create" | "update" | "reassign" | "changeLifecycle"
@@ -95,6 +100,7 @@ function isWorkspaceRoute(method: string, path: string): boolean {
     (method === "PATCH" && (
       path === "/api/workspace/settings" ||
       /^\/api\/reminders\/[^/]+$/.test(path) ||
+      /^\/api\/members\/\d+\/display-name$/.test(path) ||
       /^\/api\/members\/\d+\/role$/.test(path)
     ))
   );
@@ -407,6 +413,44 @@ export async function handleWorkspaceApi(
   }
 
   const memberRoleMatch = path.match(/^\/api\/members\/(\d+)\/role$/);
+  const memberDisplayNameMatch = path.match(/^\/api\/members\/(\d+)\/display-name$/);
+  if (method === "PATCH" && memberDisplayNameMatch) {
+    const targetUserId = Number(memberDisplayNameMatch[1]);
+    if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {
+      return jsonResponse(400, { error: "Invalid user ID", code: "validation_failed" });
+    }
+    let body: unknown;
+    try {
+      body = JSON.parse(event.body ?? "{}");
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    const parsed = workspaceMemberDisplayNameUpdateSchema.safeParse(body);
+    if (!parsed.success) {
+      return jsonResponse(400, {
+        error: "Display name must contain 1–80 characters or be null",
+        code: "validation_failed",
+      });
+    }
+    try {
+      const member = await dependencies.members.setDisplayNameOverride(
+        workspace.workspaceId,
+        targetUserId,
+        parsed.data.displayName,
+        actor.userId,
+      );
+      return jsonResponse(200, { member });
+    } catch (error) {
+      if (error instanceof WorkspaceMemberDisplayNameChangeForbiddenError) {
+        return jsonResponse(403, { error: "Cannot rename this member", code: "forbidden" });
+      }
+      if (error instanceof WorkspaceMemberNotFoundError) {
+        return jsonResponse(404, { error: "Workspace member not found", code: "not_found" });
+      }
+      throw error;
+    }
+  }
+
   if (method === "PATCH" && memberRoleMatch) {
     const targetUserId = Number(memberRoleMatch[1]);
     if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0) {

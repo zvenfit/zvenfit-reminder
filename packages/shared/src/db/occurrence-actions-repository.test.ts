@@ -225,6 +225,9 @@ describe("OccurrenceActionsRepository", () => {
     expect(occurrence?.undoUntil?.toISOString()).toBe("2026-08-13T12:10:00.000Z");
     const readCall = session.executeQuery.mock.calls[0];
     expect(readCall?.[0]).toContain("INNER JOIN workspace_members AS actor");
+    expect(readCall?.[0]).toContain(
+      "COALESCE(actor.display_name_override, actor_user.display_name)",
+    );
     expect(readCall?.[0]).toContain("AND actor.user_id = $actor_user_id");
     expect(readCall?.[0]).not.toContain(
       "ON actor.workspace_id = occurrence.workspace_id\n              AND actor.user_id",

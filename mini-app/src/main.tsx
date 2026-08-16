@@ -16,6 +16,7 @@ import {
   transferWorkspaceOwnership,
   undoOccurrenceCompletion,
   updateReminder,
+  updateMemberDisplayName,
   updateMemberRole,
   updateWorkspaceSettings,
   selectWorkspace,
@@ -188,6 +189,13 @@ function memberName(member: WorkspaceMember | undefined): string {
   return member?.displayName ?? "Участник";
 }
 
+function memberTelegramIdentity(member: WorkspaceMember): string {
+  if (member.displayNameOverride) {
+    return `Telegram: ${member.telegramDisplayName}${member.username ? ` · @${member.username}` : ""}`;
+  }
+  return member.username ? `@${member.username}` : "Имя из Telegram";
+}
+
 function memberRoleLabel(role: WorkspaceMember["role"]): string {
   if (role === "owner") return "Владелец";
   if (role === "organizer") return "Организатор";
@@ -328,6 +336,9 @@ function App() {
   const [transferringOwnership, setTransferringOwnership] = useState(false);
   const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<number | null>(null);
+  const [editingMemberUserId, setEditingMemberUserId] = useState<number | null>(null);
+  const [memberDisplayNameDraft, setMemberDisplayNameDraft] = useState("");
+  const [updatingDisplayNameUserId, setUpdatingDisplayNameUserId] = useState<number | null>(null);
   const [reassigningReminderId, setReassigningReminderId] = useState<string | null>(null);
   const [managingReminderId, setManagingReminderId] = useState<string | null>(null);
   const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
@@ -373,6 +384,7 @@ function App() {
     if (!query) return members;
     return members.filter((member) =>
       member.displayName.toLocaleLowerCase("ru-RU").includes(query) ||
+      member.telegramDisplayName.toLocaleLowerCase("ru-RU").includes(query) ||
       member.username?.toLocaleLowerCase("ru-RU").includes(query));
   }, [memberSearch, members]);
   const reminderMap = useMemo(
@@ -502,6 +514,8 @@ function App() {
     setReassigningReminderId(null);
     setManagingReminderId(null);
     setUpdatingRoleUserId(null);
+    setEditingMemberUserId(null);
+    setUpdatingDisplayNameUserId(null);
     setMemberSearch("");
     setConfirmingEnrollment(false);
     setNotice(null);
@@ -555,6 +569,8 @@ function App() {
     if (!workspace || (workspace.role !== "owner" && workspace.role !== "organizer")) return;
     setMembersReturnView(returnView);
     setMemberSearch("");
+    setEditingMemberUserId(null);
+    setMemberDisplayNameDraft("");
     setConfirmingEnrollment(false);
     setError(null);
     setNotice(null);
@@ -843,6 +859,47 @@ function App() {
     }
   }
 
+  function editMemberDisplayName(member: WorkspaceMember) {
+    setEditingMemberUserId(member.userId);
+    setMemberDisplayNameDraft(member.displayName);
+    setError(null);
+  }
+
+  async function saveMemberDisplayName(
+    member: WorkspaceMember,
+    nextDisplayName: string | null,
+  ) {
+    const normalized = nextDisplayName?.trim() ?? null;
+    if (normalized !== null && normalized.length === 0) {
+      setError("Введите имя или верните имя из Telegram.");
+      return;
+    }
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
+    setUpdatingDisplayNameUserId(member.userId);
+    setError(null);
+    try {
+      const { member: updated } = await updateMemberDisplayName(member.userId, normalized);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setMembers((current) => current.map((item) =>
+        item.userId === member.userId ? updated : item));
+      setEditingMemberUserId(null);
+      setMemberDisplayNameDraft("");
+      setNotice(normalized === null ? "Имя из Telegram восстановлено" : "Имя участника обновлено");
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 2600);
+    } catch (requestError) {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setError(errorMessage(requestError));
+      }
+    } finally {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setUpdatingDisplayNameUserId(null);
+      }
+    }
+  }
+
   async function submitReassignment(reminderId: string) {
     const responsibleUserId = Number(reassignment[reminderId]);
     if (!responsibleUserId) {
@@ -1004,7 +1061,7 @@ function App() {
             <input
               type="search"
               aria-label="Найти участника"
-              placeholder="Имя или @username"
+              placeholder="Имя, Telegram или @username"
               value={memberSearch}
               onChange={(event) => setMemberSearch(event.target.value)}
             />
@@ -1016,36 +1073,104 @@ function App() {
                 <b>Никого не нашли</b>
                 <span>Проверьте имя или username.</span>
               </div>
-            ) : filteredMembers.map((member) => (
-              <article className="member-roster__row" role="listitem" key={member.userId}>
-                <MemberAvatar member={member} />
-                <span className="member-roster__identity">
-                  <b>{member.displayName}{member.userId === actorId ? " · вы" : ""}</b>
-                  <small>{member.username ? `@${member.username}` : "Telegram-имя не указано"}</small>
-                </span>
-                <span className={`member-chat-state${member.privateChatAvailable ? " is-ready" : ""}`}>
-                  {member.privateChatAvailable ? "Личный чат подключён" : "Только группа"}
-                </span>
-                {actor?.role === "owner" && member.role !== "owner" ? (
-                  <select
-                    aria-label={`Роль: ${member.displayName}`}
-                    disabled={updatingRoleUserId === member.userId}
-                    value={member.role === "organizer" ? "organizer" : "member"}
-                    onChange={(event) => void changeMemberRole(
-                      member.userId,
-                      event.target.value as "organizer" | "member",
-                    )}
-                  >
-                    <option value="member">Участник</option>
-                    <option value="organizer">Организатор</option>
-                  </select>
-                ) : (
-                  <span className={`member-role member-role--${member.role}`}>
-                    {memberRoleLabel(member.role)}
+            ) : filteredMembers.map((member) => {
+              const canEditDisplayName = actor?.userId === member.userId ||
+                actor?.role === "owner" ||
+                (actor?.role === "organizer" && member.role !== "owner");
+              const editingDisplayName = editingMemberUserId === member.userId;
+              const updatingDisplayName = updatingDisplayNameUserId === member.userId;
+              return (
+                <article className="member-roster__row" role="listitem" key={member.userId}>
+                  <MemberAvatar member={member} />
+                  <span className="member-roster__identity">
+                    <span className="member-roster__identity-line">
+                      <b>{member.displayName}{member.userId === actorId ? " · вы" : ""}</b>
+                      {canEditDisplayName ? (
+                        <button
+                          className="member-name-edit"
+                          type="button"
+                          aria-label={`Переименовать ${member.displayName}`}
+                          aria-expanded={editingDisplayName}
+                          onClick={() => editingDisplayName
+                            ? setEditingMemberUserId(null)
+                            : editMemberDisplayName(member)}
+                        >
+                          <span aria-hidden="true">✎</span>
+                        </button>
+                      ) : null}
+                    </span>
+                    <small>{memberTelegramIdentity(member)}</small>
                   </span>
-                )}
-              </article>
-            ))}
+                  <span className={`member-chat-state${member.privateChatAvailable ? " is-ready" : ""}`}>
+                    {member.privateChatAvailable ? "Личный чат подключён" : "Только группа"}
+                  </span>
+                  {actor?.role === "owner" && member.role !== "owner" ? (
+                    <select
+                      aria-label={`Роль: ${member.displayName}`}
+                      disabled={updatingRoleUserId === member.userId}
+                      value={member.role === "organizer" ? "organizer" : "member"}
+                      onChange={(event) => void changeMemberRole(
+                        member.userId,
+                        event.target.value as "organizer" | "member",
+                      )}
+                    >
+                      <option value="member">Участник</option>
+                      <option value="organizer">Организатор</option>
+                    </select>
+                  ) : (
+                    <span className={`member-role member-role--${member.role}`}>
+                      {memberRoleLabel(member.role)}
+                    </span>
+                  )}
+                  {editingDisplayName ? (
+                    <form
+                      className="member-name-editor"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void saveMemberDisplayName(member, memberDisplayNameDraft);
+                      }}
+                    >
+                      <label>
+                        <span>Имя в этой группе</span>
+                        <input
+                          type="text"
+                          autoFocus
+                          maxLength={80}
+                          value={memberDisplayNameDraft}
+                          onChange={(event) => setMemberDisplayNameDraft(event.target.value)}
+                        />
+                      </label>
+                      <small>Telegram-профиль останется «{member.telegramDisplayName}».</small>
+                      <div>
+                        {member.displayNameOverride ? (
+                          <button
+                            type="button"
+                            disabled={updatingDisplayName}
+                            onClick={() => void saveMemberDisplayName(member, null)}
+                          >
+                            Как в Telegram
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          disabled={updatingDisplayName}
+                          onClick={() => setEditingMemberUserId(null)}
+                        >
+                          Отмена
+                        </button>
+                        <button
+                          className="primary-action"
+                          type="submit"
+                          disabled={updatingDisplayName || memberDisplayNameDraft.trim().length === 0}
+                        >
+                          {updatingDisplayName ? "Сохраняю…" : "Сохранить"}
+                        </button>
+                      </div>
+                    </form>
+                  ) : null}
+                </article>
+              );
+            })}
           </div>
         </section>
 

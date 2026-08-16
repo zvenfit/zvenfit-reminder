@@ -9,6 +9,8 @@ interface ApiMember {
   status: "active";
   username: string | null;
   displayName: string;
+  telegramDisplayName: string;
+  displayNameOverride: string | null;
   privateChatAvailable: boolean;
 }
 
@@ -173,13 +175,13 @@ function createState(): ApiState {
     ],
     members: {
       team: [
-        { workspaceId: "team", userId: 10, role: "owner", status: "active", username: "anna", displayName: "Анна", privateChatAvailable: true },
-        { workspaceId: "team", userId: 20, role: "member", status: "active", username: "ivan", displayName: "Иван", privateChatAvailable: true },
-        { workspaceId: "team", userId: 30, role: "member", status: "active", username: null, displayName: "Маша", privateChatAvailable: false },
+        { workspaceId: "team", userId: 10, role: "owner", status: "active", username: "anna", displayName: "Анна", telegramDisplayName: "Анна", displayNameOverride: null, privateChatAvailable: true },
+        { workspaceId: "team", userId: 20, role: "member", status: "active", username: "ivan", displayName: "Иван", telegramDisplayName: "Иван", displayNameOverride: null, privateChatAvailable: true },
+        { workspaceId: "team", userId: 30, role: "member", status: "active", username: null, displayName: "Я", telegramDisplayName: "Я", displayNameOverride: null, privateChatAvailable: false },
       ],
       home: [
-        { workspaceId: "home", userId: 10, role: "member", status: "active", username: "anna", displayName: "Анна", privateChatAvailable: true },
-        { workspaceId: "home", userId: 40, role: "owner", status: "active", username: "max", displayName: "Максим", privateChatAvailable: true },
+        { workspaceId: "home", userId: 10, role: "member", status: "active", username: "anna", displayName: "Анна", telegramDisplayName: "Анна", displayNameOverride: null, privateChatAvailable: true },
+        { workspaceId: "home", userId: 40, role: "owner", status: "active", username: "max", displayName: "Максим", telegramDisplayName: "Максим", displayNameOverride: null, privateChatAvailable: true },
       ],
     },
     reminders: {
@@ -291,6 +293,15 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       const member = state.members[selected].find((item) => item.userId === Number(roleMatch[1]));
       if (!member) return fulfill({ error: "Not found" }, 404);
       member.role = body?.role as Role;
+      return fulfill({ member });
+    }
+    const displayNameMatch = path.match(/^\/api\/members\/(\d+)\/display-name$/);
+    if (method === "PATCH" && displayNameMatch) {
+      const member = state.members[selected].find((item) =>
+        item.userId === Number(displayNameMatch[1]));
+      if (!member) return fulfill({ error: "Not found" }, 404);
+      member.displayNameOverride = body?.displayName as string | null;
+      member.displayName = member.displayNameOverride ?? member.telegramDisplayName;
       return fulfill({ member });
     }
     const reassignMatch = path.match(/^\/api\/reminders\/([^/]+)\/reassign$/);
@@ -448,11 +459,39 @@ test("manages verified members and publishes self-enrollment to the selected gro
     status: "active",
     username: "olga",
     displayName: "Ольга",
+    telegramDisplayName: "Ольга",
+    displayNameOverride: null,
     privateChatAvailable: true,
   });
   await page.getByRole("button", { name: "Обновить" }).click();
   await expect(page.getByRole("list", { name: "Подтверждённые участники" })).toContainText("Ольга");
   await expect(page.getByText("Новых участников: 1")).toBeVisible();
+});
+
+test("renames a member only inside the selected workspace and keeps the Telegram identity", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: /Участники/ }).click();
+
+  await page.getByRole("button", { name: "Переименовать Я" }).click();
+  await expect(page.getByText("Telegram-профиль останется «Я».")).toBeVisible();
+  await page.getByLabel("Имя в этой группе").fill("Алексей Тренер");
+  await page.getByRole("button", { name: "Сохранить" }).click();
+
+  const roster = page.getByRole("list", { name: "Подтверждённые участники" });
+  await expect(roster).toContainText("Алексей Тренер");
+  await expect(roster).toContainText("Telegram: Я");
+  expect(state.requests.find((request) =>
+    request.method === "PATCH" && request.path === "/api/members/30/display-name"))
+    .toMatchObject({ workspaceId: "team", body: { displayName: "Алексей Тренер" } });
+  expect(state.members.home.some((member) => member.displayName === "Алексей Тренер")).toBe(false);
+
+  await page.getByLabel("Найти участника").fill("Я");
+  await expect(roster).toContainText("Алексей Тренер");
+  await page.getByRole("button", { name: "Переименовать Алексей Тренер" }).click();
+  await page.getByRole("button", { name: "Как в Telegram" }).click();
+  await expect(roster).toContainText("Я");
+  await expect(page.getByText("Имя из Telegram восстановлено")).toBeVisible();
 });
 
 test("uses explicit 24-hour time fields", async ({ page }) => {
@@ -690,8 +729,8 @@ test("warns before assigning a personal reminder to a user without a private cha
   await page.getByRole("button", { name: "Новое напоминание" }).click();
   await page.getByRole("button", { name: /Личное/ }).click();
   await page.getByRole("button", { name: "Ответственный" }).click();
-  await page.getByRole("option", { name: /Маша/ }).click();
-  await expect(page.getByText(/Маша сначала отправил боту \/start/)).toBeVisible();
+  await page.getByRole("option", { name: /Я/ }).click();
+  await expect(page.getByText(/Я сначала отправил боту \/start/)).toBeVisible();
 });
 
 test("keeps a reminder created in the built-in preview mode", async ({ page }) => {

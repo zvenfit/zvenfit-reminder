@@ -119,8 +119,8 @@ the current one is incomplete.
 
 - `workspaces` and `telegram_chat_workspaces`: one isolated workspace per
   registered Telegram group.
-- `users` and `workspace_members`: Telegram identity plus group-scoped role and
-  membership status.
+- `users` and `workspace_members`: Telegram identity plus group-scoped role,
+  membership status, and an optional workspace-local display-name override.
 - `reminders`, `reminder_watchers`, and `reminder_runtime`: reminder definition,
   observers, and current scheduling slot.
 - `reminder_occurrences` and `reminder_occurrence_slots`: actionable instances
@@ -133,6 +133,9 @@ The complete greenfield schema is the first migration in
 records their versions and checksums in `schema_migrations`. Production deploys
 apply outstanding migrations after tests and before updating functions. An
 already recorded migration with a changed checksum aborts the deploy.
+Migration `0002_workspace_member_display_name.sql` adds the nullable local-name
+column without rewriting existing memberships; a missing value continues to
+resolve to the current Telegram profile name.
 
 ## Build and deployment
 

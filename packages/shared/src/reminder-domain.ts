@@ -17,6 +17,12 @@ export type WorkspaceStatus = z.infer<typeof workspaceStatusSchema>;
 export const membershipStatusSchema = z.enum(["active", "removed"]);
 export type MembershipStatus = z.infer<typeof membershipStatusSchema>;
 
+export const workspaceMemberDisplayNameUpdateSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(80).nullable(),
+  })
+  .strict();
+
 export const reminderVisibilitySchema = z.enum(["group", "private"]);
 export type ReminderVisibility = z.infer<typeof reminderVisibilitySchema>;
 
@@ -336,6 +342,8 @@ export interface TelegramUser {
 export interface WorkspaceMemberProfile extends WorkspaceMember {
   username: string | null;
   displayName: string;
+  telegramDisplayName: string;
+  displayNameOverride: string | null;
   privateChatAvailable: boolean;
 }
 
