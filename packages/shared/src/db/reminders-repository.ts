@@ -113,12 +113,13 @@ function rowToReminder(
   watcherUserIds: number[],
 ): ReminderDefinition {
   const escalationEnabled = Boolean(getField(data, "escalation_enabled"));
+  const storedAmount = getField(data, "amount_minor");
   const draft = reminderDraftSchema.parse({
+    kind: getField(data, "kind") ?? (storedAmount == null ? "task" : "payment"),
     title: getField(data, "title"),
     description: nullableString(getField(data, "description")),
     actionUrl: nullableString(getField(data, "action_url")),
-    amountMinor:
-      getField(data, "amount_minor") == null ? null : Number(getField(data, "amount_minor")),
+    amountMinor: storedAmount == null ? null : Number(storedAmount),
     currency: nullableString(getField(data, "currency")),
     visibility: getField(data, "visibility"),
     assignment:
@@ -393,6 +394,7 @@ export class RemindersRepository {
           `
             DECLARE $workspace_id AS Utf8;
             DECLARE $reminder_id AS Utf8;
+            DECLARE $kind AS Utf8;
             DECLARE $title AS Utf8;
             DECLARE $description AS Utf8?;
             DECLARE $action_url AS Utf8?;
@@ -418,14 +420,14 @@ export class RemindersRepository {
             DECLARE $updated_at AS Timestamp;
 
             INSERT INTO reminders (
-              workspace_id, reminder_id, title, description, action_url,
+              workspace_id, reminder_id, kind, title, description, action_url,
               amount_minor, currency, visibility, creator_user_id,
               assignment_mode, responsible_user_id, schedule_spec, timezone,
               lead_minutes, repeat_interval_minutes, ignore_quiet_hours,
               escalation_enabled, escalation_delay_minutes,
               escalation_repeat_minutes, status, version, created_at, updated_at
             ) VALUES (
-              $workspace_id, $reminder_id, $title, $description, $action_url,
+              $workspace_id, $reminder_id, $kind, $title, $description, $action_url,
               $amount_minor, $currency, $visibility, $creator_user_id,
               $assignment_mode, $responsible_user_id, $schedule_spec, $timezone,
               $lead_minutes, $repeat_interval_minutes, $ignore_quiet_hours,
@@ -444,6 +446,7 @@ export class RemindersRepository {
           {
             $workspace_id: TypedValues.utf8(reminder.workspaceId),
             $reminder_id: TypedValues.utf8(reminder.reminderId),
+            $kind: TypedValues.utf8(reminder.kind),
             $title: TypedValues.utf8(reminder.title),
             $description: optionalUtf8(reminder.description),
             $action_url: optionalUtf8(reminder.actionUrl),
@@ -987,6 +990,7 @@ export class RemindersRepository {
             DECLARE $workspace_id AS Utf8;
             DECLARE $reminder_id AS Utf8;
             DECLARE $actor_user_id AS Int64;
+            DECLARE $kind AS Utf8;
             DECLARE $title AS Utf8;
             DECLARE $description AS Utf8?;
             DECLARE $action_url AS Utf8?;
@@ -1019,7 +1023,7 @@ export class RemindersRepository {
             DECLARE $pending_status AS Utf8;
 
             UPDATE reminders SET
-              title = $title, description = $description, action_url = $action_url,
+              kind = $kind, title = $title, description = $description, action_url = $action_url,
               amount_minor = $amount_minor, currency = $currency,
               visibility = $visibility, assignment_mode = $assignment_mode,
               responsible_user_id = $responsible_user_id,
@@ -1081,7 +1085,7 @@ export class RemindersRepository {
                 ),
                 next_notification_at
               ),
-              title = $title, description = $description, action_url = $action_url,
+              kind = $kind, title = $title, description = $description, action_url = $action_url,
               amount_minor = $amount_minor, currency = $currency,
               visibility = $visibility, assignment_mode = $assignment_mode,
               responsible_user_id = $responsible_user_id,
@@ -1122,6 +1126,7 @@ export class RemindersRepository {
             $workspace_id: TypedValues.utf8(workspaceId),
             $reminder_id: TypedValues.utf8(reminderId),
             $actor_user_id: TypedValues.int64(actorUserId),
+            $kind: TypedValues.utf8(parsed.kind),
             $title: TypedValues.utf8(parsed.title),
             $description: optionalUtf8(parsed.description),
             $action_url: optionalUtf8(parsed.actionUrl),

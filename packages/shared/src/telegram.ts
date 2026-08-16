@@ -4,7 +4,8 @@ export function escapeHtml(text: string): string {
   return text
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
 }
 
 export function occurrenceCallbackData(
@@ -78,6 +79,13 @@ export function buildOccurrenceMessage(
   }
   if (occurrence.description) {
     lines.push(escapeHtml(occurrence.description));
+  }
+  if (occurrence.actionUrl) {
+    lines.push(
+      `<a href="${escapeHtml(occurrence.actionUrl)}">${
+        occurrence.kind === "payment" ? "Перейти к оплате" : "Открыть ссылку"
+      }</a>`,
+    );
   }
   if (occurrence.visibility === "group" && occurrence.assignment.mode === "person") {
     lines.push(

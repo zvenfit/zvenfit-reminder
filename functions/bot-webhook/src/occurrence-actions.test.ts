@@ -28,6 +28,7 @@ function occurrence(
     occurrenceId: "occurrence-a",
     reminderId: "reminder-a",
     stateRevision: 1,
+    kind: "task",
     visibility: "group",
     assignment: { mode: "person", responsibleUserId: 20 },
     status: "pending",

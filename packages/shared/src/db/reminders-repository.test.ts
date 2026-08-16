@@ -107,6 +107,7 @@ describe("RemindersRepository", () => {
     expect(writeCall?.[0]).toContain("next_reminder_start_at");
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(writeCall?.[1]?.$reminder_id)).toBe("reminder-a");
+    expect(decodeYdbValue(writeCall?.[1]?.$kind)).toBe("task");
 
     const watcherCalls = session.executeQuery.mock.calls.filter(([query]) =>
       query.includes("INSERT INTO reminder_watchers"),
@@ -584,11 +585,13 @@ describe("RemindersRepository", () => {
     const write = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("'reminder.updated'"));
     expect(write?.[0]).toContain("UPDATE reminder_occurrences");
+    expect(write?.[0]).toContain("kind = $kind");
     expect(write?.[0]).toContain("watcher_user_ids = $watcher_user_ids");
     expect(write?.[0]).toContain("notification_state = 'waiting'");
     expect(write?.[0]).toContain("$now");
     expect(write?.[0]).toContain("current_occurrence_id IS NULL");
     expect(decodeYdbValue(write?.[1]?.$version)).toBe(3);
+    expect(decodeYdbValue(write?.[1]?.$kind)).toBe("task");
     expect(decodeYdbValue(write?.[1]?.$schedule_changed)).toBe(false);
     expect(decodeYdbValue(write?.[1]?.$revision_increment)).toBe(1);
     expect(decodeYdbValue(write?.[1]?.$overdue_status)).toBe("overdue");

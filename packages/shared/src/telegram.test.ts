@@ -27,9 +27,10 @@ describe("occurrence Telegram UX", () => {
     status: "pending",
     notificationState: "waiting",
     assignment: { mode: "person", responsibleUserId: 42 },
+    kind: "payment",
     title: "Передать <показания>",
     description: "Через личный кабинет & приложение",
-    actionUrl: null,
+    actionUrl: "https://example.com/pay?for=a&b=1",
     amountMinor: 123_450,
     currency: "RUB",
     visibility: "group",
@@ -63,6 +64,9 @@ describe("occurrence Telegram UX", () => {
     expect(message).toContain("1 234,50 ₽");
     expect(message).toContain("tg://user?id=42");
     expect(message).toContain("личный кабинет &amp; приложение");
+    expect(message).toContain(
+      '<a href="https://example.com/pay?for=a&amp;b=1">Перейти к оплате</a>',
+    );
   });
 
   it("mentions active watchers only for an escalation delivery", () => {

@@ -23,6 +23,7 @@ import {
   type CreateReminderBody,
   type DeadlineTiming,
   type Reminder,
+  type ReminderKind,
   type ReminderOccurrence,
   type ScheduleSpec,
   type WorkspaceMember,
@@ -43,9 +44,12 @@ type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
 
 interface ReminderFormState {
+  kind: ReminderKind;
   title: string;
   description: string;
+  actionUrl: string;
   amountRub: string;
+  currency: string;
   visibility: "group" | "private";
   assignmentMode: "person" | "anyone";
   responsibleUserId: string;
@@ -109,9 +113,12 @@ function localDate(daysFromToday = 0): string {
 
 function emptyForm(responsibleUserId?: number): ReminderFormState {
   return {
+    kind: "task",
     title: "",
     description: "",
+    actionUrl: "",
     amountRub: "",
+    currency: "RUB",
     visibility: "group",
     assignmentMode: "person",
     responsibleUserId: responsibleUserId ? String(responsibleUserId) : "",
@@ -137,9 +144,12 @@ function reminderForm(reminder: Reminder): ReminderFormState {
   const form = emptyForm(
     reminder.assignment.mode === "person" ? reminder.assignment.responsibleUserId : undefined,
   );
+  form.kind = reminder.kind;
   form.title = reminder.title;
   form.description = reminder.description ?? "";
+  form.actionUrl = reminder.actionUrl ?? "";
   form.amountRub = reminder.amountMinor == null ? "" : String(reminder.amountMinor / 100);
+  form.currency = reminder.currency ?? "RUB";
   form.visibility = reminder.visibility;
   form.assignmentMode = reminder.assignment.mode;
   form.responsibleUserId = reminder.assignment.mode === "person"
@@ -721,11 +731,14 @@ function App() {
     const editingReminder = reminders.find((reminder) =>
       reminder.reminderId === editingReminderId);
     const payload: CreateReminderBody = {
+      kind: form.kind,
       title: form.title.trim(),
       description: form.description.trim() || null,
-      actionUrl: editingReminder?.actionUrl ?? null,
-      amountMinor: amount,
-      currency: amount == null ? null : (editingReminder?.currency ?? "RUB"),
+      actionUrl: form.actionUrl.trim() || null,
+      amountMinor: form.kind === "payment" ? amount : null,
+      currency: form.kind === "payment" && amount != null
+        ? form.currency
+        : null,
       visibility: form.visibility,
       assignment:
         form.assignmentMode === "anyone"
@@ -1434,11 +1447,15 @@ function App() {
         </header>
 
         <section className="form-intro">
-          <p className="eyebrow">{editingReminderId ? "Текущее и будущие" : "Обязательство"}</p>
+          <p className="eyebrow">{editingReminderId
+            ? "Текущее и будущие"
+            : form.kind === "payment" ? "Платёж" : "Поручение"}</p>
           <h1>{editingReminderId ? "Что изменить?" : "О чём не дать забыть?"}</h1>
           <p>{editingReminderId
-            ? "Новые параметры применятся к текущему незавершённому поручению и следующим повторам. История не изменится."
-            : "Бот будет возвращать напоминание, пока ответственный не отметит выполнение."}</p>
+            ? "Новые параметры применятся к текущему незавершённому напоминанию и следующим повторам. История не изменится."
+            : form.kind === "payment"
+              ? "Бот будет возвращать напоминание, пока ответственный не отметит оплату."
+              : "Бот будет возвращать напоминание, пока ответственный не отметит выполнение."}</p>
         </section>
 
         <form
@@ -1449,41 +1466,83 @@ function App() {
           }}
         >
           <section className="form-panel form-panel--primary">
+            <div className="kind-field">
+              <span>Что создаём</span>
+              <div className="kind-switch" role="radiogroup" aria-label="Тип напоминания">
+                <button
+                  aria-checked={form.kind === "task"}
+                  className={form.kind === "task" ? "kind-option is-selected" : "kind-option"}
+                  role="radio"
+                  type="button"
+                  onClick={() => setForm({ ...form, kind: "task" })}
+                >
+                  <span className="kind-option__mark" aria-hidden="true">✓</span>
+                  <span><b>Поручение</b><small>Сделать и отметить</small></span>
+                </button>
+                <button
+                  aria-checked={form.kind === "payment"}
+                  className={form.kind === "payment" ? "kind-option is-selected" : "kind-option"}
+                  role="radio"
+                  type="button"
+                  onClick={() => setForm({ ...form, kind: "payment" })}
+                >
+                  <span className="kind-option__mark" aria-hidden="true">₽</span>
+                  <span><b>Платёж</b><small>Оплатить к сроку</small></span>
+                </button>
+              </div>
+            </div>
             <label className="field field--hero">
-              <span>Что нужно сделать</span>
+              <span>{form.kind === "payment" ? "Что нужно оплатить" : "Что нужно сделать"}</span>
               <input
                 autoFocus
                 maxLength={200}
-                placeholder="Например, передать показания"
+                placeholder={form.kind === "payment"
+                  ? "Например, домашний интернет"
+                  : "Например, передать показания"}
                 value={form.title}
                 onChange={(event) => setForm({ ...form, title: event.target.value })}
                 required
               />
             </label>
+            {form.kind === "payment" ? (
+              <label className="field field--amount">
+                <span>Сумма <small>можно добавить позже</small></span>
+                <span className="amount-input">
+                  <input
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    type="number"
+                    placeholder="0"
+                    value={form.amountRub}
+                    onChange={(event) => setForm({ ...form, amountRub: event.target.value })}
+                  />
+                  <b>{form.currency === "RUB" ? "₽" : form.currency}</b>
+                </span>
+              </label>
+            ) : null}
             <label className="field">
-              <span>Детали <small>необязательно</small></span>
+              <span>{form.kind === "payment" ? "Получатель или детали" : "Детали"} <small>необязательно</small></span>
               <textarea
                 rows={3}
                 maxLength={2000}
-                placeholder="Ссылка, инструкция или контекст"
+                placeholder={form.kind === "payment"
+                  ? "Реквизиты, назначение или комментарий"
+                  : "Инструкция или контекст"}
                 value={form.description}
                 onChange={(event) => setForm({ ...form, description: event.target.value })}
               />
             </label>
-            <label className="field field--amount">
-              <span>Сумма <small>если это платёж</small></span>
-              <span className="amount-input">
-                <input
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  type="number"
-                  placeholder="0"
-                  value={form.amountRub}
-                  onChange={(event) => setForm({ ...form, amountRub: event.target.value })}
-                />
-                <b>₽</b>
-              </span>
+            <label className="field">
+              <span>{form.kind === "payment" ? "Ссылка на оплату" : "Ссылка"} <small>необязательно</small></span>
+              <input
+                inputMode="url"
+                maxLength={2048}
+                placeholder={form.kind === "payment" ? "https://…" : "Материалы или страница с деталями"}
+                type="url"
+                value={form.actionUrl}
+                onChange={(event) => setForm({ ...form, actionUrl: event.target.value })}
+              />
             </label>
           </section>
 
@@ -1692,7 +1751,7 @@ function App() {
 
           <section className="form-panel">
             <p className="eyebrow">Повторные сигналы</p>
-            <h2>Пока не выполнено</h2>
+            <h2>{form.kind === "payment" ? "Пока не оплачено" : "Пока не выполнено"}</h2>
             <div className="schedule-grid">
               <label className="field">
                 <span>Первый сигнал</span>
@@ -1725,10 +1784,16 @@ function App() {
           <div className="form-submit-bar">
             <div>
               <small>{form.visibility === "group" ? "Увидит группа" : "Личное"}</small>
-              <b>{form.assignmentMode === "anyone" ? "Выполнит любой" : memberName(selectedResponsible)}</b>
+              <b>{form.assignmentMode === "anyone"
+                ? form.kind === "payment" ? "Оплатит любой" : "Выполнит любой"
+                : memberName(selectedResponsible)}</b>
             </div>
             <button className="primary-action" type="submit" disabled={saving}>
-              {saving ? "Сохраняю…" : editingReminderId ? "Сохранить" : "Создать"}
+              {saving
+                ? "Сохраняю…"
+                : editingReminderId
+                  ? "Сохранить"
+                  : form.kind === "payment" ? "Создать платёж" : "Создать поручение"}
             </button>
           </div>
         </form>
@@ -1803,7 +1868,7 @@ function App() {
       {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
       {undoableOccurrence ? (
         <div className="undo-banner" role="status">
-          <span><b>Выполнено</b><small>Можно отменить в течение 10 минут</small></span>
+          <span><b>{undoableOccurrence.kind === "payment" ? "Оплачено" : "Выполнено"}</b><small>Можно отменить в течение 10 минут</small></span>
           <button
             type="button"
             disabled={actingOccurrenceId === undoableOccurrence.occurrenceId}
@@ -1865,7 +1930,7 @@ function App() {
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
                         onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}
                       >
-                        ✓ Выполнено
+                        ✓ {occurrence.kind === "payment" ? "Оплачено" : "Выполнено"}
                       </button> : null}
                       {canSnooze ? <button
                         className="rail-action"

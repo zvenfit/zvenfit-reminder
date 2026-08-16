@@ -136,6 +136,10 @@ already recorded migration with a changed checksum aborts the deploy.
 Migration `0002_workspace_member_display_name.sql` adds the nullable local-name
 column without rewriting existing memberships; a missing value continues to
 resolve to the current Telegram profile name.
+Migrations `0003_reminder_kind.sql` and `0004_occurrence_kind.sql` add the
+nullable `kind` discriminator to reminder definitions and occurrences.
+Existing rows resolve to `payment` when they already contain an amount and to
+`task` otherwise; all new writes persist the explicit kind.
 
 ## Build and deployment
 

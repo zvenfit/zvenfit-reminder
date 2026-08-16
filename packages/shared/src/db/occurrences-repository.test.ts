@@ -168,6 +168,7 @@ describe("OccurrencesRepository.materialize", () => {
 
     expect(occurrence).toMatchObject({
       occurrenceId: "occurrence-a",
+      kind: "task",
       dueLocalDate: "2026-08-25",
       status: "pending",
       notificationState: "waiting",
@@ -182,6 +183,7 @@ describe("OccurrencesRepository.materialize", () => {
     expect(writeCall?.[0]).toContain("state = 'blocked'");
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(writeCall?.[1]?.$occurrence_id)).toBe("occurrence-a");
+    expect(decodeYdbValue(writeCall?.[1]?.$kind)).toBe("task");
     expect(decodeYdbValue(writeCall?.[1]?.$watcher_user_ids)).toBe("[10]");
     expect(decodeYdbValue(writeCall?.[1]?.$message_sync_required)).toBe(false);
     expect(decodeYdbValue(writeCall?.[1]?.$message_sync_retire_only)).toBe(false);

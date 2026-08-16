@@ -29,6 +29,7 @@ interface ApiWorkspace {
 interface ApiReminder {
   workspaceId: string;
   reminderId: string;
+  kind: "task" | "payment";
   title: string;
   description: string | null;
   actionUrl: string | null;
@@ -51,6 +52,7 @@ interface ApiOccurrence {
   workspaceId: string;
   occurrenceId: string;
   reminderId: string;
+  kind: "task" | "payment";
   dueAt: string;
   title: string;
   description: string | null;
@@ -104,6 +106,7 @@ function reminder(
   return {
     workspaceId,
     reminderId,
+    kind: "task",
     title,
     description: null,
     actionUrl: null,
@@ -133,6 +136,7 @@ function occurrence(
     workspaceId: "team",
     occurrenceId,
     reminderId: occurrenceId,
+    kind: "task",
     dueAt: "2026-08-14T12:00:00.000Z",
     title,
     description: null,
@@ -199,7 +203,7 @@ function createState(): ApiState {
     },
     occurrences: {
       team: [
-        occurrence("internet", "Оплатить интернет"),
+        occurrence("internet", "Оплатить интернет", { kind: "payment" }),
         occurrence("passport", "Забрать паспорт", { status: "overdue", assignment: { mode: "person", responsibleUserId: 20 } }),
       ],
       home: [],
@@ -435,7 +439,8 @@ test("recovers from an empty workspace response without leaving disabled control
   state.workspaces.push(teamWorkspace);
   await page.getByRole("button", { name: "Обновить" }).click();
 
-  await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveValue("team");
+  await expect(page.getByText(teamWorkspace.displayName, { exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toBeEnabled();
   expect(state.requests.filter((request) => request.path === "/api/workspaces").length)
     .toBeGreaterThan(initialWorkspaceRequests);
@@ -530,6 +535,34 @@ test("uses explicit 24-hour time fields", async ({ page }) => {
   await expect(page.getByText(/AM|PM/)).toHaveCount(0);
 });
 
+test("creates a payment with payment-specific fields and semantics", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  await page.getByRole("radio", { name: /Платёж/ }).click();
+  await expect(page.getByRole("textbox", { name: "Что нужно оплатить" })).toBeVisible();
+  await expect(page.getByRole("spinbutton", { name: /Сумма/ })).toHaveValue("");
+  await expect(page.getByRole("heading", { name: "Пока не оплачено" })).toBeVisible();
+
+  await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Домашний интернет");
+  await page.getByRole("spinbutton", { name: /Сумма/ }).fill("890.50");
+  await page.getByRole("textbox", { name: /Ссылка на оплату/ }).fill("https://example.com/pay");
+  await page.getByRole("button", { name: "Создать платёж" }).click();
+
+  expect(state.requests.find((item) =>
+    item.method === "POST" && item.path === "/api/reminders"))
+    .toMatchObject({
+      body: {
+        kind: "payment",
+        amountMinor: 89_050,
+        currency: "RUB",
+        actionUrl: "https://example.com/pay",
+        schedule: { frequency: "once" },
+      },
+    });
+});
+
 test("returns from the member roster without losing a reminder draft", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
@@ -588,7 +621,7 @@ test("snoozes, completes, and undoes an occurrence", async ({ page }) => {
 
   await card.getByRole("button", { name: "+1 час" }).click();
   await expect(page.getByText("Следующий сигнал — через час")).toBeVisible();
-  await card.getByRole("button", { name: "✓ Выполнено" }).click();
+  await card.getByRole("button", { name: "✓ Оплачено" }).click();
   await expect(page.getByText("Можно отменить в течение 10 минут")).toBeVisible();
   await expect(card).toHaveCount(0);
   await page.getByRole("button", { name: "Отменить" }).click();
@@ -602,7 +635,7 @@ test("hides Undo when its completion window expires", async ({ page }) => {
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
 
-  await card.getByRole("button", { name: "✓ Выполнено" }).click();
+  await card.getByRole("button", { name: "✓ Оплачено" }).click();
   await expect(page.getByRole("button", { name: "Отменить" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Отменить" })).toHaveCount(0, { timeout: 3000 });
 });
@@ -613,7 +646,7 @@ test("dismisses stale Undo after the server rejects it", async ({ page }) => {
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
 
-  await card.getByRole("button", { name: "✓ Выполнено" }).click();
+  await card.getByRole("button", { name: "✓ Оплачено" }).click();
   await page.getByRole("button", { name: "Отменить" }).click();
 
   await expect(page.getByRole("button", { name: "Отменить" })).toHaveCount(0);
@@ -655,6 +688,7 @@ test("pauses, resumes, and archives a reminder series", async ({ page }) => {
 test("edits the current and future definition of a reminder series", async ({ page }) => {
   const state = createState();
   const target = state.reminders.team.find((item) => item.reminderId === "meters")!;
+  target.kind = "payment";
   target.actionUrl = "https://example.com/context";
   target.amountMinor = 1250;
   target.currency = "USD";
@@ -670,7 +704,7 @@ test("edits the current and future definition of a reminder series", async ({ pa
 
   await row.getByRole("button", { name: "Изменить" }).click();
   await expect(page.getByRole("heading", { name: "Что изменить?" })).toBeVisible();
-  await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Передать новые показания");
+  await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Передать новые показания");
   await page.getByRole("button", { name: "Сохранить" }).click();
 
   await expect(page.getByText("Передать новые показания")).toBeVisible();
@@ -679,6 +713,7 @@ test("edits the current and future definition of a reminder series", async ({ pa
     .toMatchObject({
       workspaceId: "team",
       body: {
+        kind: "payment",
         title: "Передать новые показания",
         actionUrl: "https://example.com/context",
         currency: "USD",

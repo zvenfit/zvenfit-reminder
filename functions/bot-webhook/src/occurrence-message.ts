@@ -6,10 +6,15 @@ import {
 import { InlineKeyboard } from "grammy";
 import type { OccurrenceActionResult } from "./occurrence-actions.js";
 
-export function occurrenceKeyboard(occurrenceId: string): InlineKeyboard {
+export function occurrenceKeyboard(
+  occurrence: OccurrenceActionResult["occurrence"],
+): InlineKeyboard {
   return new InlineKeyboard()
-    .text("✅ Выполнил", occurrenceCallbackData("done", occurrenceId))
-    .text("⏰ +1 час", occurrenceCallbackData("snooze", occurrenceId));
+    .text(
+      occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
+      occurrenceCallbackData("done", occurrence.occurrenceId),
+    )
+    .text("⏰ +1 час", occurrenceCallbackData("snooze", occurrence.occurrenceId));
 }
 
 function formatOccurrenceInstant(instant: Date, timezone: string): string {
@@ -38,14 +43,14 @@ export function renderOccurrenceAction(
       ? formatOccurrenceInstant(occurrence.undoUntil, occurrence.timezone)
       : null;
     return {
-      text: `${base}\n\n✅ Выполнено: ${actorMention}${
+      text: `${base}\n\n✅ ${occurrence.kind === "payment" ? "Оплачено" : "Выполнено"}: ${actorMention}${
         completedAt ? `\nКогда: ${escapeHtml(completedAt)}` : ""
       }${undoUntil ? `\nОтменить можно до ${escapeHtml(undoUntil)}` : ""}`,
       keyboard: new InlineKeyboard().text(
-        "↩️ Отменить выполнение",
+        occurrence.kind === "payment" ? "↩️ Отменить оплату" : "↩️ Отменить выполнение",
         occurrenceCallbackData("undo", occurrence.occurrenceId),
       ),
-      callbackNotice: "Готово",
+      callbackNotice: occurrence.kind === "payment" ? "Оплачено" : "Готово",
     };
   }
   if (action === "snooze") {
@@ -54,13 +59,13 @@ export function renderOccurrenceAction(
       : "позже";
     return {
       text: `${base}\n\n⏰ Отложено: ${escapeHtml(nextAt)}\nИзменил: ${actorMention}`,
-      keyboard: occurrenceKeyboard(occurrence.occurrenceId),
+      keyboard: occurrenceKeyboard(occurrence),
       callbackNotice: "Напомню позже",
     };
   }
   return {
-    text: `${base}\n\n↩️ Выполнение отменено: ${actorMention}`,
-    keyboard: occurrenceKeyboard(occurrence.occurrenceId),
+    text: `${base}\n\n↩️ ${occurrence.kind === "payment" ? "Оплата отменена" : "Выполнение отменено"}: ${actorMention}`,
+    keyboard: occurrenceKeyboard(occurrence),
     callbackNotice: "Снова активно",
   };
 }

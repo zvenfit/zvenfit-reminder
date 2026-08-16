@@ -5,6 +5,7 @@ import {
   occurrenceNotificationStateSchema,
   occurrenceStatusSchema,
   reminderDraftSchema,
+  reminderKindSchema,
   reminderRuntimeStateSchema,
   reminderStatusSchema,
   reminderVisibilitySchema,
@@ -73,11 +74,13 @@ export function rowToReminder(
   watcherUserIds: number[] = [],
 ): ReminderDefinition {
   const escalationEnabled = Boolean(getField(data, "escalation_enabled"));
+  const storedAmount = getField(data, "amount_minor");
   const draft = reminderDraftSchema.parse({
+    kind: getField(data, "kind") ?? (storedAmount == null ? "task" : "payment"),
     title: getField(data, "title"),
     description: nullableString(getField(data, "description")),
     actionUrl: nullableString(getField(data, "action_url")),
-    amountMinor: nullableNumber(getField(data, "amount_minor")),
+    amountMinor: nullableNumber(storedAmount),
     currency: nullableString(getField(data, "currency")),
     visibility: getField(data, "visibility"),
     assignment:
@@ -142,6 +145,9 @@ export function rowToOccurrence(data: Record<string, unknown>): ReminderOccurren
             responsibleUserId: Number(getField(data, "responsible_user_id")),
           }
         : { mode: "anyone" },
+    kind: reminderKindSchema.parse(
+      getField(data, "kind") ?? (getField(data, "amount_minor") == null ? "task" : "payment"),
+    ),
     title: String(getField(data, "title")),
     description: nullableString(getField(data, "description")),
     actionUrl: nullableString(getField(data, "action_url")),
@@ -509,6 +515,7 @@ export class OccurrencesRepository {
           status: runtime.nextDueAt <= now ? "overdue" : "pending",
           notificationState: "waiting",
           assignment: reminder.assignment,
+          kind: reminder.kind,
           title: reminder.title,
           description: reminder.description,
           actionUrl: reminder.actionUrl,
@@ -555,6 +562,7 @@ export class OccurrencesRepository {
             DECLARE $notification_state AS Utf8;
             DECLARE $assignment_mode AS Utf8;
             DECLARE $responsible_user_id AS Int64?;
+            DECLARE $kind AS Utf8;
             DECLARE $title AS Utf8;
             DECLARE $description AS Utf8?;
             DECLARE $action_url AS Utf8?;
@@ -586,7 +594,7 @@ export class OccurrencesRepository {
               workspace_id, occurrence_id, reminder_id, reminder_version,
               due_at, due_local_date, all_day, reminder_start_at, status,
               notification_state, assignment_mode, responsible_user_id,
-              title, description, action_url, amount_minor, currency, visibility,
+              kind, title, description, action_url, amount_minor, currency, visibility,
               timezone, repeat_interval_minutes, ignore_quiet_hours,
               escalation_enabled, escalation_delay_minutes,
               escalation_repeat_minutes, watcher_user_ids, next_notification_at,
@@ -597,7 +605,7 @@ export class OccurrencesRepository {
               $workspace_id, $occurrence_id, $reminder_id, $reminder_version,
               $due_at, $due_local_date, $all_day, $reminder_start_at, $status,
               $notification_state, $assignment_mode, $responsible_user_id,
-              $title, $description, $action_url, $amount_minor, $currency, $visibility,
+              $kind, $title, $description, $action_url, $amount_minor, $currency, $visibility,
               $timezone, $repeat_interval_minutes, $ignore_quiet_hours,
               $escalation_enabled, $escalation_delay_minutes,
               $escalation_repeat_minutes, $watcher_user_ids, $next_notification_at,
@@ -634,6 +642,7 @@ export class OccurrencesRepository {
                 ? occurrence.assignment.responsibleUserId
                 : null,
             ),
+            $kind: TypedValues.utf8(occurrence.kind),
             $title: TypedValues.utf8(occurrence.title),
             $description: optionalUtf8(occurrence.description),
             $action_url: optionalUtf8(occurrence.actionUrl),

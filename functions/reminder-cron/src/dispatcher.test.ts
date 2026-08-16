@@ -40,6 +40,7 @@ function occurrence(): ReminderOccurrence {
     status: "pending",
     notificationState: "waiting",
     assignment: { mode: "person", responsibleUserId: 20 },
+    kind: "task",
     title: "Передать показания",
     description: null,
     actionUrl: null,

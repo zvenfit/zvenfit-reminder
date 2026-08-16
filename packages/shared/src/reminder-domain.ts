@@ -26,6 +26,9 @@ export const workspaceMemberDisplayNameUpdateSchema = z
 export const reminderVisibilitySchema = z.enum(["group", "private"]);
 export type ReminderVisibility = z.infer<typeof reminderVisibilitySchema>;
 
+export const reminderKindSchema = z.enum(["task", "payment"]);
+export type ReminderKind = z.infer<typeof reminderKindSchema>;
+
 export const reminderStatusSchema = z.enum(["active", "paused", "archived"]);
 export type ReminderStatus = z.infer<typeof reminderStatusSchema>;
 
@@ -241,6 +244,7 @@ const actionUrlSchema = z
 
 export const reminderDraftSchema = z
   .object({
+    kind: reminderKindSchema.optional(),
     title: z.string().trim().min(1).max(200),
     description: z.string().trim().max(2_000).nullable().default(null),
     actionUrl: actionUrlSchema.nullable().default(null),
@@ -295,7 +299,11 @@ export const reminderDraftSchema = z
         message: "The responsible person cannot also be a watcher",
       });
     }
-  });
+  })
+  .transform((value) => ({
+    ...value,
+    kind: value.kind ?? (value.amountMinor == null ? "task" as const : "payment" as const),
+  }));
 export type ReminderDraft = z.infer<typeof reminderDraftSchema>;
 
 export interface Workspace {
@@ -370,6 +378,7 @@ export interface ReminderOccurrence {
   status: OccurrenceStatus;
   notificationState: OccurrenceNotificationState;
   assignment: ReminderAssignment;
+  kind: ReminderKind;
   title: string;
   description: string | null;
   actionUrl: string | null;

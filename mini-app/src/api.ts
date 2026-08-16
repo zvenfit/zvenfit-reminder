@@ -1,6 +1,7 @@
 export type WorkspaceRole = "owner" | "organizer" | "member";
 export type ReminderStatus = "active" | "paused" | "archived";
 export type ReminderVisibility = "group" | "private";
+export type ReminderKind = "task" | "payment";
 
 export interface Workspace {
   workspaceId: string;
@@ -76,6 +77,7 @@ export type ScheduleSpec =
 export interface Reminder {
   workspaceId: string;
   reminderId: string;
+  kind: ReminderKind;
   title: string;
   description: string | null;
   actionUrl: string | null;
@@ -107,6 +109,7 @@ export interface ReminderOccurrence {
   workspaceId: string;
   occurrenceId: string;
   reminderId: string;
+  kind: ReminderKind;
   dueAt: string;
   title: string;
   description: string | null;
@@ -182,14 +185,14 @@ export function selectWorkspace(workspaceId: string): void {
 
 const mockReminders: Reminder[] = [
   {
-    workspaceId: "demo", reminderId: "utilities", title: "Передать показания счётчиков", description: null, actionUrl: null, amountMinor: null, currency: null,
+    workspaceId: "demo", reminderId: "utilities", kind: "task", title: "Передать показания счётчиков", description: null, actionUrl: null, amountMinor: null, currency: null,
     visibility: "group", creatorUserId: 10, assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [10],
     schedule: { version: 1, frequency: "monthly", startDate: "2026-01-01", timing: { kind: "timed", timeLocal: "19:00" }, interval: 1, day: { type: "dayOfMonth", value: 25, overflow: "lastDay" } },
     timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 1440, repeatIntervalMinutes: 360, ignoreQuietHours: false, escalation: { enabled: true, delayMinutes: 1440, repeatMinutes: 1440 } },
     status: "active", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   },
   {
-    workspaceId: "demo", reminderId: "training", title: "Записаться на тренировку", description: null, actionUrl: null, amountMinor: 250000, currency: "RUB",
+    workspaceId: "demo", reminderId: "training", kind: "payment", title: "Записаться на тренировку", description: null, actionUrl: null, amountMinor: 250000, currency: "RUB",
     visibility: "private", creatorUserId: 20, assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [],
     schedule: { version: 1, frequency: "weekly", startDate: "2026-01-01", timing: { kind: "timed", timeLocal: "12:00" }, interval: 1, weekdays: [1] },
     timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 0, repeatIntervalMinutes: 360, ignoreQuietHours: false, escalation: { enabled: false } },
@@ -200,12 +203,12 @@ const mockReminders: Reminder[] = [
 const mockOccurrences: ReminderOccurrence[] = [
   {
     workspaceId: "demo", occurrenceId: "passport", reminderId: "passport", dueAt: new Date(Date.now() - 18 * 60 * 60 * 1000).toISOString(),
-    title: "Забрать готовый паспорт", description: null, amountMinor: null, currency: null, visibility: "group",
+    kind: "task", title: "Забрать готовый паспорт", description: null, amountMinor: null, currency: null, visibility: "group",
     assignment: { mode: "person", responsibleUserId: 20 }, status: "overdue", timezone: "Europe/Moscow", nextNotificationAt: new Date().toISOString(), undoUntil: null,
   },
   {
     workspaceId: "demo", occurrenceId: "internet", reminderId: "internet", dueAt: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
-    title: "Оплатить домашний интернет", description: null, amountMinor: 89000, currency: "RUB", visibility: "group",
+    kind: "payment", title: "Оплатить домашний интернет", description: null, amountMinor: 89000, currency: "RUB", visibility: "group",
     assignment: { mode: "person", responsibleUserId: 10 }, status: "pending", timezone: "Europe/Moscow", nextNotificationAt: new Date().toISOString(), undoUntil: null,
   },
 ];

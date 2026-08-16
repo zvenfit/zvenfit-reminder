@@ -23,6 +23,7 @@ describe("reminderDraftSchema", () => {
   it("applies the product defaults", () => {
     const result = reminderDraftSchema.parse(minimalDraft);
 
+    expect(result.kind).toBe("task");
     expect(result.visibility).toBe("group");
     expect(result.description).toBeNull();
     expect(result.watcherUserIds).toEqual([]);
@@ -45,6 +46,16 @@ describe("reminderDraftSchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+
+  it("infers a payment for legacy clients that send money without a kind", () => {
+    const result = reminderDraftSchema.parse({
+      ...minimalDraft,
+      amountMinor: 89_000,
+      currency: "RUB",
+    });
+
+    expect(result.kind).toBe("payment");
   });
 
   it("rejects anyone assignment for a private reminder", () => {
@@ -77,6 +88,16 @@ describe("reminderDraftSchema", () => {
 
     expect(result.amountMinor).toBe(1_250_000);
     expect(result.currency).toBe("RUB");
+  });
+
+  it("preserves payments without a known amount", () => {
+    const result = reminderDraftSchema.parse({
+      ...minimalDraft,
+      kind: "payment",
+    });
+
+    expect(result.kind).toBe("payment");
+    expect(result.amountMinor).toBeNull();
   });
 
   it("rejects non-HTTP actions and invalid timezones", () => {

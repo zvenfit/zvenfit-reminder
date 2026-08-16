@@ -189,14 +189,17 @@ function createDependencies(config: AppConfig): DispatcherDependencies {
 
 function deliveryKeyboard(occurrence: ReminderOccurrence): InlineKeyboard {
   return new InlineKeyboard()
-    .text("✅ Выполнил", occurrenceCallbackData("done", occurrence.occurrenceId))
+    .text(
+      occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
+      occurrenceCallbackData("done", occurrence.occurrenceId),
+    )
     .text("⏰ +1 час", occurrenceCallbackData("snooze", occurrence.occurrenceId));
 }
 
 function messageSyncKeyboard(occurrence: ReminderOccurrence, now: Date): InlineKeyboard | null {
   if (occurrence.status === "completed" && occurrence.undoUntil && occurrence.undoUntil > now) {
     return new InlineKeyboard().text(
-      "↩️ Отменить выполнение",
+      occurrence.kind === "payment" ? "↩️ Отменить оплату" : "↩️ Отменить выполнение",
       occurrenceCallbackData("undo", occurrence.occurrenceId),
     );
   }
@@ -229,7 +232,7 @@ function messageSyncText(occurrence: ReminderOccurrence, now: Date): string {
     const completedAt = occurrence.completedAt
       ? formatOccurrenceInstant(occurrence.completedAt, occurrence.timezone)
       : null;
-    return `${base}\n\n✅ Выполнено: ${actor}${
+    return `${base}\n\n✅ ${occurrence.kind === "payment" ? "Оплачено" : "Выполнено"}: ${actor}${
       completedAt ? `\nКогда: ${escapeHtml(completedAt)}` : ""
     }`;
   }
