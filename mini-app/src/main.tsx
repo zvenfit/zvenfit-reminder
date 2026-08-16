@@ -597,7 +597,7 @@ function App() {
       await publishMemberEnrollment();
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
       setConfirmingEnrollment(false);
-      setNotice("Кнопка подключения опубликована в группе");
+      setNotice("Приглашение отправлено в группу");
       window.setTimeout(() => {
         if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
       }, 3200);
@@ -1065,7 +1065,7 @@ function App() {
               type="button"
               onClick={() => setConfirmingEnrollment(true)}
             >
-              Опубликовать кнопку в группе
+              Позвать
             </button>
           ) : (
             <div className="member-enrollment-confirm" role="alert">
@@ -1079,7 +1079,7 @@ function App() {
                   disabled={publishingEnrollment}
                   onClick={() => void publishEnrollment()}
                 >
-                  {publishingEnrollment ? "Публикую…" : "Да, опубликовать"}
+                  {publishingEnrollment ? "Отправляю…" : "Да, позвать"}
                 </button>
               </div>
             </div>

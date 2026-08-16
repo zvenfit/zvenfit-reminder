@@ -432,14 +432,14 @@ test("manages verified members and publishes self-enrollment to the selected gro
   await expect(page.getByRole("heading", { name: "Кто может отвечать" })).toBeVisible();
   await expect(page.getByRole("list", { name: "Подтверждённые участники" })).toContainText("Анна");
   await expect(page.getByRole("list", { name: "Подтверждённые участники" })).toContainText("Иван");
-  await page.getByRole("button", { name: "Опубликовать кнопку в группе" }).click();
+  await page.getByRole("button", { name: "Позвать" }).click();
   await expect(page.getByText("Отправить сообщение в «Команда»?")).toBeVisible();
-  await page.getByRole("button", { name: "Да, опубликовать" }).click();
+  await page.getByRole("button", { name: "Да, позвать" }).click();
 
   expect(state.requests.find((request) =>
     request.method === "POST" && request.path === "/api/members/publish-enrollment"))
     .toMatchObject({ workspaceId: "team" });
-  await expect(page.getByText("Кнопка подключения опубликована в группе")).toBeVisible();
+  await expect(page.getByText("Приглашение отправлено в группу")).toBeVisible();
 
   state.members.team.push({
     workspaceId: "team",
