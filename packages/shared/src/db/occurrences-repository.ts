@@ -348,7 +348,7 @@ export class OccurrencesRepository {
           DECLARE $workspace_id AS Utf8;
           DECLARE $actor_user_id AS Int64;
           DECLARE $limit AS Uint64;
-          SELECT occurrence.* FROM reminder_occurrences VIEW idx_occurrences_plan AS occurrence
+          SELECT occurrence.* FROM reminder_occurrences AS occurrence
           INNER JOIN reminders AS reminder
             ON occurrence.workspace_id = reminder.workspace_id
             AND occurrence.reminder_id = reminder.reminder_id

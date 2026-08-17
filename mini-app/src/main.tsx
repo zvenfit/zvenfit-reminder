@@ -517,6 +517,7 @@ function App() {
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [occurrences, setOccurrences] = useState<ReminderOccurrence[]>([]);
   const [historyOccurrences, setHistoryOccurrences] = useState<ReminderOccurrence[]>([]);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
   const [detailReturnView, setDetailReturnView] = useState<MainView>("home");
@@ -681,23 +682,32 @@ function App() {
     selectWorkspace(selectedId);
     setLoading(true);
     setError(null);
+    setHistoryError(null);
     try {
-      const [dashboardResponse, remindersResponse, membersResponse, historyResponse] = await Promise.all([
+      const [dashboardResult, remindersResult, membersResult, historyResult] = await Promise.allSettled([
         loadDashboard(),
         listReminders(),
         listMembers(),
         loadHistory(),
       ]);
+      if (dashboardResult.status === "rejected") throw dashboardResult.reason;
+      if (remindersResult.status === "rejected") throw remindersResult.reason;
+      if (membersResult.status === "rejected") throw membersResult.reason;
       if (
         generation !== refreshGenerationRef.current ||
         activeWorkspaceIdRef.current !== selectedId
       ) {
         return;
       }
-      setOccurrences(dashboardResponse.occurrences);
-      setReminders(remindersResponse.reminders);
-      setMembers(membersResponse.members);
-      setHistoryOccurrences(historyResponse.occurrences);
+      setOccurrences(dashboardResult.value.occurrences);
+      setReminders(remindersResult.value.reminders);
+      setMembers(membersResult.value.members);
+      if (historyResult.status === "fulfilled") {
+        setHistoryOccurrences(historyResult.value.occurrences);
+      } else {
+        setHistoryOccurrences([]);
+        setHistoryError("История временно недоступна. Остальные данные загружены.");
+      }
     } catch (requestError) {
       if (
         generation === refreshGenerationRef.current &&
@@ -774,6 +784,7 @@ function App() {
     setConfirmingEnrollment(false);
     setNotice(null);
     setError(null);
+    setHistoryError(null);
     setOccurrences([]);
     setHistoryOccurrences([]);
     setReminders([]);
@@ -1972,6 +1983,7 @@ function App() {
           </div>
         </section>
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {historyError ? <div className="error-banner" role="alert"><span>{historyError}</span><button className="sync-button" type="button" onClick={() => void refresh()}>Повторить</button></div> : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
         {loading ? <div className="history-list skeleton-list"><i /><i /><i /></div> : visibleHistory.length === 0 ? (
           <div className="quiet-state"><span className="quiet-pulse"><UiIcon name="history" /></span><div><b>История пока пуста</b><p>Завершённые и отменённые напоминания появятся здесь.</p></div></div>

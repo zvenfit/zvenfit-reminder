@@ -89,6 +89,7 @@ interface ApiState {
   }>;
   undoErrorCode?: "undo_expired" | "not_actionable";
   workspaceFailuresRemaining?: number;
+  historyFailuresRemaining?: number;
 }
 
 const now = "2026-08-14T09:00:00.000Z";
@@ -290,6 +291,10 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "pending" || item.status === "overdue") });
     }
     if (method === "GET" && path === "/api/history") {
+      if ((state.historyFailuresRemaining ?? 0) > 0) {
+        state.historyFailuresRemaining = (state.historyFailuresRemaining ?? 1) - 1;
+        return fulfill({ error: "History query failed", code: "history_unavailable" }, 500);
+      }
       return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "completed" || item.status === "cancelled") });
     }
     if (method === "POST" && path === "/api/reminders") {
@@ -460,6 +465,23 @@ test("keeps the first screen readable at the 320px Telegram width", async ({ pag
 
   await page.getByRole("button", { name: "План", exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("keeps tasks and members available when history temporarily fails", async ({ page }) => {
+  const state = createState();
+  // Vite's StrictMode runs the initial effect twice in E2E development mode.
+  state.historyFailuresRemaining = 2;
+  await openApp(page, state);
+
+  await expect(page.getByText("Забрать паспорт")).toBeVisible();
+  await expect(page.getByText("3 участника")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "История", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("История временно недоступна");
+  await page.getByRole("button", { name: "Повторить" }).click();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("История пока пуста")).toBeVisible();
 });
 
 test("recovers from an empty workspace response without leaving disabled controls", async ({ page }) => {

@@ -277,6 +277,8 @@ describe("OccurrencesRepository history", () => {
       .resolves.toEqual([]);
 
     const [query, params] = session.executeQuery.mock.calls[0] ?? [];
+    expect(query).toContain("FROM reminder_occurrences AS occurrence");
+    expect(query).not.toContain("VIEW idx_occurrences_plan");
     expect(query).toContain("occurrence.status IN ('completed', 'cancelled')");
     expect(query).toContain("occurrence.visibility = 'group'");
     expect(query).toContain("reminder.creator_user_id = $actor_user_id");
