@@ -89,6 +89,7 @@ interface ApiState {
   }>;
   undoErrorCode?: "undo_expired" | "not_actionable";
   workspaceFailuresRemaining?: number;
+  workspaceDelayMs?: number;
   historyFailuresRemaining?: number;
 }
 
@@ -247,6 +248,9 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
 
     const fulfill = (json: unknown, status = 200) => route.fulfill({ status, json });
     if (method === "GET" && path === "/api/workspaces") {
+      if ((state.workspaceDelayMs ?? 0) > 0) {
+        await new Promise((resolve) => setTimeout(resolve, state.workspaceDelayMs));
+      }
       if ((state.workspaceFailuresRemaining ?? 0) > 0) {
         state.workspaceFailuresRemaining = (state.workspaceFailuresRemaining ?? 1) - 1;
         return fulfill({ error: "Temporary failure", code: "temporary_failure" }, 503);
@@ -467,6 +471,36 @@ test("keeps the first screen readable at the 320px Telegram width", async ({ pag
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("shows the dashboard structure while the initial workspace is loading", async ({ page }) => {
+  const state = createState();
+  state.workspaceDelayMs = 500;
+  await installTelegramAndApi(page, state);
+
+  for (const scenario of [
+    { width: 320, theme: "light" as const, reducedMotion: "no-preference" as const },
+    { width: 320, theme: "dark" as const, reducedMotion: "no-preference" as const },
+    { width: 412, theme: "light" as const, reducedMotion: "no-preference" as const },
+    { width: 412, theme: "dark" as const, reducedMotion: "reduce" as const },
+  ]) {
+    await page.setViewportSize({ width: scenario.width, height: 700 });
+    await page.emulateMedia({
+      colorScheme: scenario.theme,
+      reducedMotion: scenario.reducedMotion,
+    });
+    await page.goto("/");
+
+    const loadingStatus = page.getByRole("status");
+    await expect(loadingStatus).toHaveText("Загружаем рабочее пространство");
+    await expect(page.locator(".initial-skeleton__workspace-copy")).toBeVisible();
+    await expect(page.locator(".skeleton-rail--initial > i")).toHaveCount(2);
+    await expect(page.locator(".initial-skeleton__navigation > i")).toHaveCount(4);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+
+    await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveValue("team");
+    await expect(loadingStatus).toHaveCount(0);
+  }
+});
+
 test("keeps tasks and members available when history temporarily fails", async ({ page }) => {
   const state = createState();
   // Vite's StrictMode runs the initial effect twice in E2E development mode.
@@ -478,8 +512,13 @@ test("keeps tasks and members available when history temporarily fails", async (
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   await page.getByRole("button", { name: "История", exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("История временно недоступна");
-  await page.getByRole("button", { name: "Повторить" }).click();
+  const historyAlert = page.getByRole("alert");
+  const retryAction = historyAlert.getByRole("button", { name: "Повторить" });
+  await expect(historyAlert).toContainText("История временно недоступна");
+  await expect(retryAction).toBeVisible();
+  expect(await historyAlert.evaluate((element) => Number.parseFloat(getComputedStyle(element).gap)))
+    .toBeGreaterThanOrEqual(12);
+  await retryAction.click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("История пока пуста")).toBeVisible();
 });

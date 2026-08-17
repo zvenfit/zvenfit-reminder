@@ -346,6 +346,66 @@ function WorkspaceSelect({
   );
 }
 
+function InitialDashboardSkeleton() {
+  return (
+    <main className="app app--home app--initial-loading" aria-busy="true">
+      <span className="sr-only" role="status">
+        Загружаем рабочее пространство
+      </span>
+      <header className="home-header">
+        <div className="brand-mark" aria-label="ZvenFit">
+          <span />
+          <b>ZvenFit</b>
+        </div>
+        <i className="initial-skeleton__date" aria-hidden="true" />
+      </header>
+
+      <div className="workspace-switcher" aria-hidden="true">
+        <span className="workspace-switcher__signal" />
+        <span className="initial-skeleton__workspace-copy"><i /><i /></span>
+      </div>
+
+      <div className="workspace-tools initial-skeleton__tools" aria-hidden="true">
+        {[0, 1].map((item) => (
+          <div className="workspace-settings-link" key={item}>
+            <i className="initial-skeleton__tool-icon" />
+            <span>
+              <i />
+              <i />
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <section className="home-intro">
+        <h1>Требует внимания</h1>
+        <div className="scope-switch initial-skeleton__scope" aria-hidden="true">
+          <i />
+          <i />
+        </div>
+      </section>
+
+      <section className="attention-section" aria-hidden="true">
+        <div className="section-heading">
+          <h2>Сейчас</h2>
+          <span />
+        </div>
+        <div className="rail skeleton-rail skeleton-rail--initial">
+          <i />
+          <i />
+        </div>
+      </section>
+
+      <nav className="bottom-navigation initial-skeleton__navigation" aria-hidden="true">
+        <i />
+        <i />
+        <i />
+        <i />
+      </nav>
+    </main>
+  );
+}
+
 function BottomNavigation({
   view,
   onChange,
@@ -530,6 +590,7 @@ function App() {
     defaultAllDayReminderTime: "09:00",
   });
   const [loading, setLoading] = useState(true);
+  const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
   const [saving, setSaving] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [memberSearch, setMemberSearch] = useState("");
@@ -702,6 +763,7 @@ function App() {
       setOccurrences(dashboardResult.value.occurrences);
       setReminders(remindersResult.value.reminders);
       setMembers(membersResult.value.members);
+      setHasLoadedDashboard(true);
       if (historyResult.status === "fulfilled") {
         setHistoryOccurrences(historyResult.value.occurrences);
       } else {
@@ -713,6 +775,7 @@ function App() {
         generation === refreshGenerationRef.current &&
         activeWorkspaceIdRef.current === selectedId
       ) {
+        setHasLoadedDashboard(true);
         setError(errorMessage(requestError));
       }
     } finally {
@@ -763,6 +826,7 @@ function App() {
 
   function retryWorkspaceLoad() {
     setError(null);
+    setHasLoadedDashboard(false);
     setWorkspaceLoadAttempt((attempt) => attempt + 1);
   }
 
@@ -785,6 +849,7 @@ function App() {
     setNotice(null);
     setError(null);
     setHistoryError(null);
+    setHasLoadedDashboard(false);
     setOccurrences([]);
     setHistoryOccurrences([]);
     setReminders([]);
@@ -1357,6 +1422,10 @@ function App() {
         </section>
       </main>
     );
+  }
+
+  if (loading && !hasLoadedDashboard) {
+    return <InitialDashboardSkeleton />;
   }
 
   if (workspaces.length === 0) {
@@ -1983,7 +2052,18 @@ function App() {
           </div>
         </section>
         {error ? <div className="error-banner" role="alert">{error}</div> : null}
-        {historyError ? <div className="error-banner" role="alert"><span>{historyError}</span><button className="sync-button" type="button" onClick={() => void refresh()}>Повторить</button></div> : null}
+        {historyError ? (
+          <div className="error-banner error-banner--actionable" role="alert">
+            <span>{historyError}</span>
+            <button
+              className="error-banner__action"
+              type="button"
+              onClick={() => void refresh()}
+            >
+              Повторить
+            </button>
+          </div>
+        ) : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
         {loading ? <div className="history-list skeleton-list"><i /><i /><i /></div> : visibleHistory.length === 0 ? (
           <div className="quiet-state"><span className="quiet-pulse"><UiIcon name="history" /></span><div><b>История пока пуста</b><p>Завершённые и отменённые напоминания появятся здесь.</p></div></div>

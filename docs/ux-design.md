@@ -345,9 +345,15 @@ all non-essential movement.
 - Empty Tasks: `Nothing needs attention. Create a reminder for the next thing
   you do not want to chase manually.`
 - Empty History: `Completed tasks will appear here.`
+- Initial and workspace-switch loading: preserve the final dashboard geometry
+  with a structural skeleton. Do not render temporary zero counts or empty
+  states before the critical dashboard data resolves. Skeleton motion may run
+  once on entry, then remains still.
 - Missing private chat: explain that the responsible person must open the bot,
   with an `Open bot` action.
 - Load failure: keep cached content if present and offer `Try again`.
+- Actionable error banners keep the message and retry control as separate,
+  spaced elements; an action is never appended inline to the error sentence.
 - Save failure: retain every entered field and identify the invalid or failed
   action.
 
