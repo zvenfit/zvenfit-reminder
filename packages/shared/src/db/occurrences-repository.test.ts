@@ -264,6 +264,29 @@ describe("OccurrencesRepository message synchronization", () => {
   });
 });
 
+describe("OccurrencesRepository history", () => {
+  it("keeps history workspace-scoped and preserves private visibility", async () => {
+    const session = {
+      executeQuery: vi.fn().mockResolvedValue({ resultSets: [resultSet([])] }),
+    };
+    const runSession: SessionRunner = async (operation) =>
+      operation(session as unknown as TableSession);
+    const repository = new OccurrencesRepository("", "", runSession);
+
+    await expect(repository.listHistoryForActor("workspace-a", 20, 40))
+      .resolves.toEqual([]);
+
+    const [query, params] = session.executeQuery.mock.calls[0] ?? [];
+    expect(query).toContain("occurrence.status IN ('completed', 'cancelled')");
+    expect(query).toContain("occurrence.visibility = 'group'");
+    expect(query).toContain("reminder.creator_user_id = $actor_user_id");
+    expect(query).toContain("occurrence.responsible_user_id = $actor_user_id");
+    expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
+    expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
+    expect(decodeYdbValue(params?.$limit)).toBe(40);
+  });
+});
+
 describe("OccurrencesRepository.listActionableForActor", () => {
   it("scopes the attention feed by workspace, actor, and visibility", async () => {
     const { repository, session } = repositoryDouble();

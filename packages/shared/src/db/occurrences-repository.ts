@@ -5,21 +5,31 @@ import {
   occurrenceNotificationStateSchema,
   occurrenceStatusSchema,
   reminderDraftSchema,
+  reminderDraftUpdateSchema,
   reminderKindSchema,
   reminderRuntimeStateSchema,
   reminderStatusSchema,
   reminderVisibilitySchema,
   type ReminderDefinition,
+  type ReminderDraftUpdate,
   type ReminderOccurrence,
   type ReminderRuntime,
 } from "../reminder-domain.js";
-import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
+import {
+  calculateFirstNotificationAt,
+  getNextScheduledDeadline,
+} from "../reminder-scheduling.js";
+import { createSessionRunner, TypedValues, Types, type SessionRunner } from "./client.js";
 import {
   DELIVERY_LOCK_TTL_MILLISECONDS,
   hasActiveDeliveryLock,
   prepareOccurrenceMutation,
 } from "./delivery-guard.js";
 import { withSerializableTransaction } from "./transaction.js";
+import {
+  InactiveWorkspaceMemberError,
+  PrivateChatUnavailableError,
+} from "./reminders-repository.js";
 import {
   getField,
   mapResultRows,
@@ -46,6 +56,20 @@ export interface OccurrenceMessageSyncCandidate {
 
 export interface OccurrenceMessageSyncClaim extends OccurrenceMessageSyncCandidate {
   syncKey: string;
+}
+
+export class OccurrenceUpdateForbiddenError extends Error {
+  constructor() {
+    super("Cannot update this occurrence");
+    this.name = "OccurrenceUpdateForbiddenError";
+  }
+}
+
+export class OccurrenceUpdateConflictError extends Error {
+  constructor(readonly reason: "not_actionable" | "not_current") {
+    super(`Cannot update occurrence: ${reason}`);
+    this.name = "OccurrenceUpdateConflictError";
+  }
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -308,6 +332,340 @@ export class OccurrencesRepository {
       );
       return mapResultRows(resultSets[0]).map(rowToOccurrence);
     });
+  }
+
+  async listHistoryForActor(
+    workspaceId: string,
+    actorUserId: number,
+    limit = 100,
+  ): Promise<ReminderOccurrence[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error("History limit must be an integer between 1 and 500");
+    }
+    return this.runSession(async (session) => {
+      const { resultSets } = await session.executeQuery(
+        `
+          DECLARE $workspace_id AS Utf8;
+          DECLARE $actor_user_id AS Int64;
+          DECLARE $limit AS Uint64;
+          SELECT occurrence.* FROM reminder_occurrences VIEW idx_occurrences_plan AS occurrence
+          INNER JOIN reminders AS reminder
+            ON occurrence.workspace_id = reminder.workspace_id
+            AND occurrence.reminder_id = reminder.reminder_id
+          WHERE occurrence.workspace_id = $workspace_id
+            AND occurrence.status IN ('completed', 'cancelled')
+            AND (
+              occurrence.visibility = 'group'
+              OR reminder.creator_user_id = $actor_user_id
+              OR occurrence.responsible_user_id = $actor_user_id
+            )
+          ORDER BY occurrence.workspace_id, occurrence.due_at DESC, occurrence.occurrence_id DESC
+          LIMIT $limit;
+        `,
+        {
+          $workspace_id: TypedValues.utf8(workspaceId),
+          $actor_user_id: TypedValues.int64(actorUserId),
+          $limit: TypedValues.uint64(limit),
+        },
+      );
+      return mapResultRows(resultSets[0]).map(rowToOccurrence);
+    });
+  }
+
+  async updateCurrentForActor(
+    workspaceId: string,
+    occurrenceId: string,
+    input: ReminderDraftUpdate,
+    actorUserId: number,
+    now: Date = new Date(),
+  ): Promise<ReminderOccurrence | null> {
+    const parsedInput = reminderDraftUpdateSchema.parse(input);
+    await this.runSession((session) =>
+      withSerializableTransaction(session, async (transaction) => {
+        const { resultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $occurrence_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+
+            SELECT status, quiet_hours_start, quiet_hours_end,
+              default_all_day_reminder_time
+            FROM workspaces WHERE workspace_id = $workspace_id LIMIT 1;
+
+            SELECT role, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id = $actor_user_id
+            LIMIT 1;
+
+            SELECT occurrence.*,
+              reminder.creator_user_id AS creator_user_id,
+              reminder.status AS reminder_status
+            FROM reminder_occurrences AS occurrence
+            INNER JOIN reminders AS reminder
+              ON reminder.workspace_id = occurrence.workspace_id
+              AND reminder.reminder_id = occurrence.reminder_id
+            WHERE occurrence.workspace_id = $workspace_id
+              AND occurrence.occurrence_id = $occurrence_id
+            LIMIT 1;
+
+            SELECT current_occurrence_id FROM reminder_runtime
+            WHERE workspace_id = $workspace_id
+              AND current_occurrence_id = $occurrence_id
+            LIMIT 1;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $occurrence_id: TypedValues.utf8(occurrenceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+          },
+        );
+        const workspaceRow = mapResultRows(resultSets[0])[0];
+        const actorRow = mapResultRows(resultSets[1])[0];
+        const occurrenceRow = mapResultRows(resultSets[2])[0];
+        const runtimeRow = mapResultRows(resultSets[3])[0];
+        if (!occurrenceRow) return;
+
+        const occurrence = rowToOccurrence(occurrenceRow);
+        const parsed = reminderDraftSchema.parse({
+          ...parsedInput,
+          kind: parsedInput.kind ?? occurrence.kind,
+        });
+        const actorIsManager = Boolean(
+          actorRow &&
+          getField(actorRow, "status") === "active" &&
+          ["owner", "organizer"].includes(String(getField(actorRow, "role"))),
+        );
+        const canEdit = Boolean(
+          workspaceRow &&
+          getField(workspaceRow, "status") === "active" &&
+          actorRow &&
+          getField(actorRow, "status") === "active" &&
+          getField(occurrenceRow, "reminder_status") === "active" &&
+          (occurrence.visibility === "group"
+            ? actorIsManager
+            : actorUserId === Number(getField(occurrenceRow, "creator_user_id")) ||
+              (occurrence.assignment.mode === "person" &&
+                occurrence.assignment.responsibleUserId === actorUserId)) &&
+          (parsed.visibility !== "group" || actorIsManager),
+        );
+        if (!canEdit) throw new OccurrenceUpdateForbiddenError();
+        if (!runtimeRow) throw new OccurrenceUpdateConflictError("not_current");
+        if (occurrence.status !== "pending" && occurrence.status !== "overdue") {
+          throw new OccurrenceUpdateConflictError("not_actionable");
+        }
+        await prepareOccurrenceMutation(
+          transaction,
+          workspaceId,
+          occurrenceRow,
+          occurrenceId,
+          now,
+        );
+
+        const requiredParticipantIds = new Set<number>(parsed.watcherUserIds);
+        if (parsed.assignment.mode === "person") {
+          requiredParticipantIds.add(parsed.assignment.responsibleUserId);
+        }
+        const participantIds = [...requiredParticipantIds].sort((left, right) => left - right);
+        const { resultSets: participantResultSets } = await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $participant_ids AS List<Int64>;
+            SELECT user_id, status FROM workspace_members
+            WHERE workspace_id = $workspace_id AND user_id IN $participant_ids;
+
+            SELECT user_id, private_chat_available FROM users
+            WHERE user_id IN $participant_ids;
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $participant_ids: TypedValues.list(Types.INT64, participantIds),
+          },
+        );
+        const activeUserIds = new Set(
+          mapResultRows(participantResultSets[0])
+            .filter((row) => getField(row, "status") === "active")
+            .map((row) => Number(getField(row, "user_id"))),
+        );
+        const inactiveUserIds = participantIds.filter((userId) => !activeUserIds.has(userId));
+        if (inactiveUserIds.length > 0) {
+          throw new InactiveWorkspaceMemberError(workspaceId, inactiveUserIds);
+        }
+        if (parsed.visibility === "private" && parsed.assignment.mode === "person") {
+          const responsibleUserId = parsed.assignment.responsibleUserId;
+          const responsibleUser = mapResultRows(participantResultSets[1]).find(
+            (row) => Number(getField(row, "user_id")) === responsibleUserId,
+          );
+          if (!responsibleUser || !Boolean(getField(responsibleUser, "private_chat_available"))) {
+            throw new PrivateChatUnavailableError(responsibleUserId);
+          }
+        }
+
+        const deadlineReference = DateTime.fromISO(
+          parsed.schedule.frequency === "once" ? parsed.schedule.date : occurrence.dueLocalDate,
+          { zone: parsed.timezone },
+        ).startOf("day").minus({ millisecond: 1 }).toJSDate();
+        const deadline = getNextScheduledDeadline(
+          parsed.schedule,
+          parsed.timezone,
+          deadlineReference,
+          { defaultAllDayReminderTime: String(getField(workspaceRow, "default_all_day_reminder_time")) },
+        );
+        if (!deadline) throw new OccurrenceUpdateConflictError("not_actionable");
+        const reminderStartAt = calculateFirstNotificationAt(
+          deadline,
+          parsed.notificationPolicy.leadMinutes,
+          parsed.timezone,
+          {
+            startLocal: String(getField(workspaceRow, "quiet_hours_start")),
+            endLocal: String(getField(workspaceRow, "quiet_hours_end")),
+          },
+          { ignoreQuietHours: parsed.notificationPolicy.ignoreQuietHours, notBefore: now },
+        );
+        const escalation = parsed.notificationPolicy.escalation;
+
+        if (deadline.dueAt.getTime() !== occurrence.dueAt.getTime()) {
+          await transaction.executeQuery(
+            `
+              DECLARE $workspace_id AS Utf8;
+              DECLARE $reminder_id AS Utf8;
+              DECLARE $occurrence_id AS Utf8;
+              DECLARE $old_due_at AS Timestamp;
+              DECLARE $new_due_at AS Timestamp;
+              DECLARE $now AS Timestamp;
+              DELETE FROM reminder_occurrence_slots
+              WHERE workspace_id = $workspace_id
+                AND reminder_id = $reminder_id
+                AND due_at = $old_due_at
+                AND occurrence_id = $occurrence_id;
+              INSERT INTO reminder_occurrence_slots (
+                workspace_id, reminder_id, due_at, occurrence_id, created_at
+              ) VALUES ($workspace_id, $reminder_id, $new_due_at, $occurrence_id, $now);
+            `,
+            {
+              $workspace_id: TypedValues.utf8(workspaceId),
+              $reminder_id: TypedValues.utf8(occurrence.reminderId),
+              $occurrence_id: TypedValues.utf8(occurrenceId),
+              $old_due_at: timestampValue(occurrence.dueAt),
+              $new_due_at: timestampValue(deadline.dueAt),
+              $now: timestampValue(now),
+            },
+          );
+        }
+
+        await transaction.executeQuery(
+          `
+            DECLARE $workspace_id AS Utf8;
+            DECLARE $occurrence_id AS Utf8;
+            DECLARE $actor_user_id AS Int64;
+            DECLARE $kind AS Utf8;
+            DECLARE $title AS Utf8;
+            DECLARE $description AS Utf8?;
+            DECLARE $action_url AS Utf8?;
+            DECLARE $amount_minor AS Int64?;
+            DECLARE $currency AS Utf8?;
+            DECLARE $visibility AS Utf8;
+            DECLARE $assignment_mode AS Utf8;
+            DECLARE $responsible_user_id AS Int64?;
+            DECLARE $due_at AS Timestamp;
+            DECLARE $due_local_date AS Utf8;
+            DECLARE $all_day AS Bool;
+            DECLARE $reminder_start_at AS Timestamp;
+            DECLARE $status AS Utf8;
+            DECLARE $timezone AS Utf8;
+            DECLARE $repeat_interval_minutes AS Uint32;
+            DECLARE $ignore_quiet_hours AS Bool;
+            DECLARE $escalation_enabled AS Bool;
+            DECLARE $escalation_delay_minutes AS Uint32?;
+            DECLARE $escalation_repeat_minutes AS Uint32?;
+            DECLARE $watcher_user_ids AS JsonDocument;
+            DECLARE $now AS Timestamp;
+            DECLARE $event_id AS Utf8;
+            DECLARE $payload AS JsonDocument;
+            DECLARE $revision_increment AS Uint64;
+
+            UPDATE reminder_occurrences SET
+              state_revision = state_revision + $revision_increment,
+              delivery_lock_key = NULL,
+              delivery_locked_at = NULL,
+              kind = $kind,
+              title = $title,
+              description = $description,
+              action_url = $action_url,
+              amount_minor = $amount_minor,
+              currency = $currency,
+              visibility = $visibility,
+              assignment_mode = $assignment_mode,
+              responsible_user_id = $responsible_user_id,
+              due_at = $due_at,
+              due_local_date = $due_local_date,
+              all_day = $all_day,
+              reminder_start_at = $reminder_start_at,
+              status = $status,
+              timezone = $timezone,
+              repeat_interval_minutes = $repeat_interval_minutes,
+              ignore_quiet_hours = $ignore_quiet_hours,
+              escalation_enabled = $escalation_enabled,
+              escalation_delay_minutes = $escalation_delay_minutes,
+              escalation_repeat_minutes = $escalation_repeat_minutes,
+              watcher_user_ids = $watcher_user_ids,
+              next_notification_at = $reminder_start_at,
+              notification_sequence = 0,
+              snoozed_by = NULL,
+              snoozed_at = NULL,
+              snooze_until = NULL,
+              message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
+              updated_at = $now
+            WHERE workspace_id = $workspace_id
+              AND occurrence_id = $occurrence_id
+              AND status IN ('pending', 'overdue');
+
+            INSERT INTO audit_events (
+              workspace_id, entity_id, occurred_at, event_id, entity_type,
+              event_type, actor_user_id, payload
+            ) VALUES (
+              $workspace_id, $occurrence_id, $now, $event_id, 'occurrence',
+              'occurrence.updated', $actor_user_id, $payload
+            );
+          `,
+          {
+            $workspace_id: TypedValues.utf8(workspaceId),
+            $occurrence_id: TypedValues.utf8(occurrenceId),
+            $actor_user_id: TypedValues.int64(actorUserId),
+            $kind: TypedValues.utf8(parsed.kind),
+            $title: TypedValues.utf8(parsed.title),
+            $description: optionalUtf8(parsed.description),
+            $action_url: optionalUtf8(parsed.actionUrl),
+            $amount_minor: optionalInt64(parsed.amountMinor),
+            $currency: optionalUtf8(parsed.currency),
+            $visibility: TypedValues.utf8(parsed.visibility),
+            $assignment_mode: TypedValues.utf8(parsed.assignment.mode),
+            $responsible_user_id: optionalInt64(
+              parsed.assignment.mode === "person" ? parsed.assignment.responsibleUserId : null,
+            ),
+            $due_at: timestampValue(deadline.dueAt),
+            $due_local_date: TypedValues.utf8(deadline.dueLocalDate),
+            $all_day: TypedValues.bool(deadline.allDay),
+            $reminder_start_at: timestampValue(reminderStartAt),
+            $status: TypedValues.utf8(deadline.dueAt <= now ? "overdue" : "pending"),
+            $timezone: TypedValues.utf8(parsed.timezone),
+            $repeat_interval_minutes: TypedValues.uint32(parsed.notificationPolicy.repeatIntervalMinutes),
+            $ignore_quiet_hours: TypedValues.bool(parsed.notificationPolicy.ignoreQuietHours),
+            $escalation_enabled: TypedValues.bool(escalation.enabled),
+            $escalation_delay_minutes: optionalUint32(escalation.enabled ? escalation.delayMinutes : null),
+            $escalation_repeat_minutes: optionalUint32(escalation.enabled ? escalation.repeatMinutes : null),
+            $watcher_user_ids: TypedValues.jsonDocument(JSON.stringify(parsed.watcherUserIds)),
+            $now: timestampValue(now),
+            $event_id: TypedValues.utf8(randomUUID()),
+            $revision_increment: TypedValues.uint64(1),
+            $payload: TypedValues.jsonDocument(JSON.stringify({
+              scope: "occurrence",
+              previousDueAt: occurrence.dueAt.toISOString(),
+              dueAt: deadline.dueAt.toISOString(),
+            })),
+          },
+        );
+      }),
+    );
+    return this.getById(workspaceId, occurrenceId);
   }
 
   async listMessageSyncCandidates(

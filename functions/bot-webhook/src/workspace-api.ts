@@ -2,6 +2,8 @@ import {
   DeliveryInProgressError,
   InactiveWorkspaceMemberError,
   OccurrenceNotActionableError,
+  OccurrenceUpdateConflictError,
+  OccurrenceUpdateForbiddenError,
   OccurrencesRepository,
   PrivateChatUnavailableError,
   ReminderCreateForbiddenError,
@@ -60,7 +62,10 @@ export interface WorkspaceApiDependencies {
     RemindersRepository,
     "listForActor" | "create" | "update" | "reassign" | "changeLifecycle"
   >;
-  occurrences: Pick<OccurrencesRepository, "listActionableForActor">;
+  occurrences: Pick<
+    OccurrencesRepository,
+    "listActionableForActor" | "listHistoryForActor" | "updateCurrentForActor"
+  >;
   occurrenceActions: {
     execute(input: OccurrenceActionInput): Promise<OccurrenceActionResult>;
   };
@@ -87,6 +92,7 @@ function isWorkspaceRoute(method: string, path: string): boolean {
     (method === "GET" && path === "/api/workspaces") ||
     (method === "GET" && (
       path === "/api/dashboard" ||
+      path === "/api/history" ||
       path === "/api/reminders" ||
       path === "/api/members" ||
       /^\/api\/members\/\d+\/avatar$/.test(path)
@@ -102,6 +108,7 @@ function isWorkspaceRoute(method: string, path: string): boolean {
     (method === "PATCH" && (
       path === "/api/workspace/settings" ||
       /^\/api\/reminders\/[^/]+$/.test(path) ||
+      /^\/api\/occurrences\/[^/]+$/.test(path) ||
       /^\/api\/members\/\d+\/display-name$/.test(path) ||
       /^\/api\/members\/\d+\/role$/.test(path)
     ))
@@ -243,9 +250,96 @@ export async function handleWorkspaceApi(
     return jsonResponse(200, { occurrences });
   }
 
+  if (method === "GET" && path === "/api/history") {
+    const occurrences = await dependencies.occurrences.listHistoryForActor(
+      workspace.workspaceId,
+      actor.userId,
+    );
+    return jsonResponse(200, { occurrences });
+  }
+
   if (method === "GET" && path === "/api/members") {
     const members = await dependencies.members.listProfiles(workspace.workspaceId);
     return jsonResponse(200, { members });
+  }
+
+  const occurrenceUpdateMatch = path.match(/^\/api\/occurrences\/([^/]+)$/);
+  if (method === "PATCH" && occurrenceUpdateMatch) {
+    let body: unknown;
+    try {
+      body = JSON.parse(event.body ?? "{}");
+    } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return jsonResponse(400, { error: "Invalid occurrence", code: "validation_failed" });
+    }
+    const {
+      dueLocalDate,
+      timing,
+      ...draftBody
+    } = body as Record<string, unknown>;
+    const parsedDraft = reminderDraftUpdateSchema.safeParse({
+      ...draftBody,
+      schedule: {
+        version: 1,
+        frequency: "once",
+        date: dueLocalDate,
+        timing,
+      },
+    });
+    if (!parsedDraft.success) {
+      return jsonResponse(400, {
+        error: "Invalid occurrence",
+        code: "validation_failed",
+        issues: parsedDraft.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+    }
+    try {
+      const occurrence = await dependencies.occurrences.updateCurrentForActor(
+        workspace.workspaceId,
+        decodeURIComponent(occurrenceUpdateMatch[1]),
+        parsedDraft.data,
+        actor.userId,
+      );
+      return occurrence
+        ? jsonResponse(200, { occurrence })
+        : jsonResponse(404, { error: "Reminder occurrence not found", code: "not_found" });
+    } catch (error) {
+      if (error instanceof DeliveryInProgressError) {
+        return jsonResponse(409, {
+          error: "A notification is being sent; retry in a moment",
+          code: "delivery_in_progress",
+        });
+      }
+      if (error instanceof OccurrenceUpdateForbiddenError) {
+        return jsonResponse(403, { error: "Cannot edit this occurrence", code: "forbidden" });
+      }
+      if (error instanceof OccurrenceUpdateConflictError) {
+        return jsonResponse(409, {
+          error: "This occurrence can no longer be edited",
+          code: "update_conflict",
+        });
+      }
+      if (error instanceof PrivateChatUnavailableError) {
+        return jsonResponse(409, {
+          error: "Responsible person must start the bot first",
+          code: "private_chat_required",
+          userId: error.userId,
+        });
+      }
+      if (error instanceof InactiveWorkspaceMemberError) {
+        return jsonResponse(409, {
+          error: "Every participant must be an active workspace member",
+          code: "inactive_participant",
+          userIds: error.userIds,
+        });
+      }
+      throw error;
+    }
   }
 
   const memberAvatarMatch = path.match(/^\/api\/members\/(\d+)\/avatar$/);

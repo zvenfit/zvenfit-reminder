@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { StrictMode, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   ApiError,
@@ -10,11 +10,13 @@ import {
   listMembers,
   listReminders,
   loadDashboard,
+  loadHistory,
   publishMemberEnrollment,
   reassignReminder,
   snoozeOccurrence,
   transferWorkspaceOwnership,
   undoOccurrenceCompletion,
+  updateOccurrence,
   updateReminder,
   updateMemberDisplayName,
   updateMemberRole,
@@ -26,9 +28,11 @@ import {
   type ReminderKind,
   type ReminderOccurrence,
   type ScheduleSpec,
+  type UpdateOccurrenceBody,
   type WorkspaceMember,
   type Workspace,
 } from "./api";
+import { formatScheduleDate, upcomingScheduleDates } from "./schedule-preview";
 import {
   buildTimezoneOptions,
   describeTimezone,
@@ -37,11 +41,17 @@ import {
 } from "./timezones";
 import { isLocalTime24, Time24Field } from "./time-24-field";
 import { MemberAvatar, PersonSelect } from "./person-select";
+import { UiIcon } from "./ui-icon";
+import "@fontsource-variable/onest/wght.css";
+import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/600.css";
 import "./styles.css";
 
-type View = "home" | "create" | "settings" | "members";
+type MainView = "home" | "plan" | "history";
+type View = MainView | "detail" | "create" | "settings" | "members";
 type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
+type DetailTarget = { kind: "occurrence" | "reminder"; id: string };
 
 interface ReminderFormState {
   kind: ReminderKind;
@@ -99,6 +109,24 @@ const WEEKDAYS = [
   { value: 6, label: "Сб" },
   { value: 7, label: "Вс" },
 ];
+
+function handleRovingControlKey(event: KeyboardEvent<HTMLElement>): void {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  const controls = Array.from(
+    event.currentTarget.querySelectorAll<HTMLButtonElement>("button[role='radio'], button[role='tab']"),
+  ).filter((control) => !control.disabled);
+  const current = (event.target as HTMLElement).closest<HTMLButtonElement>("button[role='radio'], button[role='tab']");
+  const index = current ? controls.indexOf(current) : -1;
+  if (index < 0 || controls.length === 0) return;
+  event.preventDefault();
+  const nextIndex = event.key === "Home"
+    ? 0
+    : event.key === "End"
+      ? controls.length - 1
+      : (index + (event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1) + controls.length) % controls.length;
+  controls[nextIndex]?.focus();
+  controls[nextIndex]?.click();
+}
 
 function localDate(daysFromToday = 0): string {
   const date = new Date();
@@ -231,14 +259,135 @@ function formatAmount(amountMinor: number | null, currency: string | null): stri
   }).format(amountMinor / 100);
 }
 
+function normalizeRussianDateLabel(value: string): string {
+  return value.replace(/\s+г\./gu, "").replace(/,\s*/gu, " · ");
+}
+
 function formatDue(occurrence: ReminderOccurrence): string {
-  return new Intl.DateTimeFormat("ru-RU", {
+  return normalizeRussianDateLabel(new Intl.DateTimeFormat("ru-RU", {
     day: "numeric",
     month: "short",
     hour: "2-digit",
     minute: "2-digit",
     timeZone: occurrence.timezone,
-  }).format(new Date(occurrence.dueAt));
+  }).format(new Date(occurrence.dueAt)));
+}
+
+function formatMoment(value: string, timezone: string, withYear = false): string {
+  return normalizeRussianDateLabel(new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "short",
+    ...(withYear ? { year: "numeric" as const } : {}),
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: timezone,
+  }).format(new Date(value)));
+}
+
+function occurrenceLocalDeadline(occurrence: ReminderOccurrence): { date: string; time: string } {
+  const values = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone: occurrence.timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(occurrence.dueAt)).map((part) => [part.type, part.value]));
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    time: `${values.hour}:${values.minute}`,
+  };
+}
+
+function relativeDuration(value: string, now = Date.now()): string {
+  const minutes = Math.max(0, Math.round(Math.abs(new Date(value).getTime() - now) / 60_000));
+  if (minutes < 60) return `${Math.max(1, minutes)} мин`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} ч`;
+  const days = Math.round(hours / 24);
+  return `${days} дн`;
+}
+
+function occurrenceStatusLabel(occurrence: ReminderOccurrence): string {
+  if (occurrence.status === "completed") return occurrence.kind === "payment" ? "Оплачено" : "Выполнено";
+  if (occurrence.status === "cancelled") return "Отменено";
+  if (occurrence.status === "overdue") return `Просрочено на ${relativeDuration(occurrence.dueAt)}`;
+  if (occurrence.status === "scheduled") return "Запланировано";
+  return "Ожидает выполнения";
+}
+
+function WorkspaceSelect({
+  workspaces,
+  value,
+  onChange,
+  compact = false,
+}: {
+  workspaces: Workspace[];
+  value: string;
+  onChange: (workspaceId: string) => void;
+  compact?: boolean;
+}) {
+  return (
+    <span className={`workspace-select workspace-select--${compact ? "compact" : "home"}`}>
+      <select
+        aria-label="Выбранная группа"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {workspaces.map((workspace) => (
+          <option value={workspace.workspaceId} key={workspace.workspaceId}>
+            {workspace.displayName}
+          </option>
+        ))}
+      </select>
+      <UiIcon name="chevron-down" />
+    </span>
+  );
+}
+
+function BottomNavigation({
+  view,
+  onChange,
+  onCreate,
+  createDisabled = false,
+}: {
+  view: MainView;
+  onChange: (view: MainView) => void;
+  onCreate: () => void;
+  createDisabled?: boolean;
+}) {
+  const items: Array<{ view: MainView; label: string; icon: "target" | "calendar" | "history" }> = [
+    { view: "home", label: "Задачи", icon: "target" },
+    { view: "plan", label: "План", icon: "calendar" },
+    { view: "history", label: "История", icon: "history" },
+  ];
+  return (
+    <nav className="bottom-navigation" aria-label="Основные разделы">
+      {items.map((item) => (
+        <button
+          className={view === item.view ? "is-selected" : ""}
+          type="button"
+          aria-current={view === item.view ? "page" : undefined}
+          onClick={() => onChange(item.view)}
+          key={item.view}
+        >
+          <UiIcon name={item.icon} />
+          <span>{item.label}</span>
+        </button>
+      ))}
+      <button
+        className="bottom-navigation__create"
+        type="button"
+        aria-label="Новое напоминание"
+        disabled={createDisabled}
+        onClick={onCreate}
+      >
+        <UiIcon name="plus" />
+        <span>Новое</span>
+      </button>
+    </nav>
+  );
 }
 
 function scheduleLabel(schedule: ScheduleSpec): string {
@@ -263,6 +412,33 @@ function scheduleLabel(schedule: ScheduleSpec): string {
     case "yearly":
       return `Ежегодно · ${schedule.day}.${String(schedule.month).padStart(2, "0")} · ${time}`;
   }
+}
+
+function formSchedulePreview(form: ReminderFormState): string {
+  try {
+    return scheduleLabel(buildSchedule(form));
+  } catch {
+    return "Заполните дату и время";
+  }
+}
+
+function formUpcomingDates(form: ReminderFormState, timezone: string): string[] {
+  try {
+    return upcomingScheduleDates(buildSchedule(form), timezone, 3);
+  } catch {
+    return [];
+  }
+}
+
+function repeatPreviewLabel(minutes: string): string {
+  const labels: Record<string, string> = {
+    "60": "каждый час",
+    "180": "каждые 3 часа",
+    "360": "каждые 6 часов",
+    "720": "каждые 12 часов",
+    "1440": "раз в день",
+  };
+  return labels[minutes] ?? "по выбранному ритму";
 }
 
 function buildSchedule(form: ReminderFormState): ScheduleSpec {
@@ -310,6 +486,9 @@ function buildSchedule(form: ReminderFormState): ScheduleSpec {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.code === "undo_expired") {
+    return "Отменить выполнение уже нельзя: прошло 10 минут.";
+  }
   if (error instanceof ApiError && error.code === "private_chat_required") {
     return "Ответственный ещё не открыл личный чат с ботом. Попросите его отправить боту /start.";
   }
@@ -327,15 +506,21 @@ function errorMessage(error: unknown): string {
 
 function App() {
   const previewMode = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
+  const botUsername = import.meta.env.VITE_BOT_USERNAME ?? "zvenfit_reminder_bot";
+  const botUrl = `https://t.me/${botUsername}?start=panel`;
   const [telegramAuthMissing] = useState(() => !previewMode && !getInitData());
   const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [view, setView] = useState<View>("home");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
-  const [scope, setScope] = useState<Scope>("mine");
+  const [scope, setScope] = useState<Scope>("group");
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [occurrences, setOccurrences] = useState<ReminderOccurrence[]>([]);
+  const [historyOccurrences, setHistoryOccurrences] = useState<ReminderOccurrence[]>([]);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
+  const [detailReturnView, setDetailReturnView] = useState<MainView>("home");
+  const [archiveTarget, setArchiveTarget] = useState<Reminder | null>(null);
   const [form, setForm] = useState<ReminderFormState>(() => emptyForm());
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>({
     timezone: DEFAULT_TIMEZONE,
@@ -362,6 +547,11 @@ function App() {
   const [reassigningReminderId, setReassigningReminderId] = useState<string | null>(null);
   const [managingReminderId, setManagingReminderId] = useState<string | null>(null);
   const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
+  const [editingOccurrenceId, setEditingOccurrenceId] = useState<string | null>(null);
+  const [editScope, setEditScope] = useState<"occurrence" | "series">("series");
+  const [occurrenceDate, setOccurrenceDate] = useState(localDate());
+  const [occurrenceTime, setOccurrenceTime] = useState("09:00");
+  const [occurrenceAllDay, setOccurrenceAllDay] = useState(false);
   const [reassignment, setReassignment] = useState<Record<string, string>>({});
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
@@ -440,6 +630,45 @@ function App() {
     [actorId, reminders, scope],
   );
 
+  const visibleHistory = useMemo(
+    () => historyOccurrences.filter((occurrence) => {
+      if (scope === "group" || !actorId) return true;
+      return (
+        occurrence.assignment.mode === "anyone" ||
+        occurrence.assignment.responsibleUserId === actorId ||
+        reminderMap.get(occurrence.reminderId)?.creatorUserId === actorId
+      );
+    }),
+    [actorId, historyOccurrences, reminderMap, scope],
+  );
+
+  const planDates = useMemo(() => new Map(visibleReminders.map((reminder) => [
+    reminder.reminderId,
+    upcomingScheduleDates(reminder.schedule, reminder.timezone, 3),
+  ])), [visibleReminders]);
+
+  function switchMainView(nextView: MainView) {
+    setView(nextView);
+    setError(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openOccurrenceDetail(occurrenceId: string, returnView: MainView = "home") {
+    setDetailTarget({ kind: "occurrence", id: occurrenceId });
+    setDetailReturnView(returnView);
+    setError(null);
+    setView("detail");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openReminderDetail(reminderId: string, returnView: MainView = "plan") {
+    setDetailTarget({ kind: "reminder", id: reminderId });
+    setDetailReturnView(returnView);
+    setError(null);
+    setView("detail");
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   async function refresh(selectedId = workspaceId) {
     if (!selectedId) {
       setLoading(false);
@@ -453,10 +682,11 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const [dashboardResponse, remindersResponse, membersResponse] = await Promise.all([
+      const [dashboardResponse, remindersResponse, membersResponse, historyResponse] = await Promise.all([
         loadDashboard(),
         listReminders(),
         listMembers(),
+        loadHistory(),
       ]);
       if (
         generation !== refreshGenerationRef.current ||
@@ -467,6 +697,7 @@ function App() {
       setOccurrences(dashboardResponse.occurrences);
       setReminders(remindersResponse.reminders);
       setMembers(membersResponse.members);
+      setHistoryOccurrences(historyResponse.occurrences);
     } catch (requestError) {
       if (
         generation === refreshGenerationRef.current &&
@@ -504,6 +735,7 @@ function App() {
           activeWorkspaceIdRef.current = null;
           setWorkspaceId(null);
           setOccurrences([]);
+          setHistoryOccurrences([]);
           setReminders([]);
           setMembers([]);
           setLoading(false);
@@ -529,6 +761,8 @@ function App() {
     setWorkspaceId(nextWorkspaceId);
     window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId);
     setView("home");
+    setDetailTarget(null);
+    setArchiveTarget(null);
     setUndoableOccurrence(null);
     setActingOccurrenceId(null);
     setReassigningReminderId(null);
@@ -541,6 +775,7 @@ function App() {
     setNotice(null);
     setError(null);
     setOccurrences([]);
+    setHistoryOccurrences([]);
     setReminders([]);
     setMembers([]);
     await refresh(nextWorkspaceId);
@@ -560,14 +795,24 @@ function App() {
     }
     setForm(nextForm);
     setEditingReminderId(null);
+    setEditingOccurrenceId(null);
+    setEditScope("series");
     setError(null);
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function openEdit(reminder: Reminder) {
+  function openEdit(reminder: Reminder, occurrence?: ReminderOccurrence) {
     setForm(reminderForm(reminder));
     setEditingReminderId(reminder.reminderId);
+    setEditingOccurrenceId(occurrence?.occurrenceId ?? null);
+    setEditScope(occurrence ? "occurrence" : "series");
+    if (occurrence) {
+      const localDeadline = occurrenceLocalDeadline(occurrence);
+      setOccurrenceDate(localDeadline.date);
+      setOccurrenceTime(localDeadline.time);
+      setOccurrenceAllDay(false);
+    }
     setError(null);
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -760,15 +1005,38 @@ function App() {
     };
 
     try {
-      if (editingReminderId) {
+      if (editingReminderId && editingOccurrenceId && editScope === "occurrence") {
+        const occurrencePayload: UpdateOccurrenceBody = {
+          kind: payload.kind,
+          title: payload.title,
+          description: payload.description,
+          actionUrl: payload.actionUrl,
+          amountMinor: payload.amountMinor,
+          currency: payload.currency,
+          visibility: payload.visibility,
+          assignment: payload.assignment,
+          watcherUserIds: payload.watcherUserIds,
+          timezone: payload.timezone,
+          notificationPolicy: payload.notificationPolicy,
+          dueLocalDate: occurrenceDate,
+          timing: occurrenceAllDay ? { kind: "allDay" } : { kind: "timed", timeLocal: occurrenceTime },
+        };
+        await updateOccurrence(editingOccurrenceId, occurrencePayload);
+        setNotice("Изменён только этот срок");
+        setDetailTarget({ kind: "occurrence", id: editingOccurrenceId });
+        setDetailReturnView("home");
+        window.setTimeout(() => setNotice(null), 2600);
+      } else if (editingReminderId) {
         await updateReminder(editingReminderId, payload);
-        setNotice("Изменения сохранены для следующих повторов");
+        setNotice("Изменения сохранены для текущего и следующих повторов");
         window.setTimeout(() => setNotice(null), 2600);
       } else {
         await createReminder(payload);
       }
       setEditingReminderId(null);
-      setView("home");
+      setEditingOccurrenceId(null);
+      setEditScope("series");
+      setView(editingOccurrenceId && editScope === "occurrence" ? "detail" : "plan");
       await refresh();
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -780,6 +1048,7 @@ function App() {
   async function actOnOccurrence(
     occurrenceId: string,
     action: "complete" | "snooze",
+    snoozeMinutes = 60,
   ) {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
@@ -792,14 +1061,24 @@ function App() {
         setOccurrences((current) =>
           current.filter((occurrence) => occurrence.occurrenceId !== occurrenceId),
         );
+        setHistoryOccurrences((current) => [
+          occurrence,
+          ...current.filter((item) => item.occurrenceId !== occurrenceId),
+        ]);
         setUndoableOccurrence(occurrence);
       } else {
-        const { occurrence } = await snoozeOccurrence(occurrenceId, 60);
+        const { occurrence } = await snoozeOccurrence(occurrenceId, snoozeMinutes);
         if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
         setOccurrences((current) =>
           current.map((item) => (item.occurrenceId === occurrenceId ? occurrence : item)),
         );
-        setNotice("Следующий сигнал — через час");
+        setNotice(snoozeMinutes === 60
+          ? "Следующий сигнал — через час"
+          : snoozeMinutes === 360
+            ? "Следующий сигнал — вечером"
+            : snoozeMinutes === 1440
+              ? "Следующий сигнал — завтра"
+              : `Следующий сигнал — через ${relativeDuration(occurrence.nextNotificationAt ?? occurrence.dueAt)}`);
       }
       window.setTimeout(() => {
         if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
@@ -830,6 +1109,9 @@ function App() {
         [...current, occurrence].sort(
           (left, right) => new Date(left.dueAt).getTime() - new Date(right.dueAt).getTime(),
         ),
+      );
+      setHistoryOccurrences((current) =>
+        current.filter((item) => item.occurrenceId !== occurrence.occurrenceId),
       );
       setUndoableOccurrence(null);
       setNotice("Выполнение отменено");
@@ -936,14 +1218,14 @@ function App() {
     try {
       const { reminder } = await reassignReminder(reminderId, responsibleUserId);
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
-      await refresh(actionWorkspaceId);
-      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setReminders((current) => current.map((item) => item.reminderId === reminderId ? reminder : item));
       setNotice(reminder.status === "active"
         ? "Ответственный изменён, напоминание снова активно"
         : "Ответственный изменён");
       window.setTimeout(() => {
         if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
       }, 2600);
+      void refresh(actionWorkspaceId);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
         setError(errorMessage(requestError));
@@ -959,22 +1241,19 @@ function App() {
     reminder: Reminder,
     action: "pause" | "resume" | "archive",
   ) {
-    if (action === "archive" && !window.confirm("Завершить серию? История сохранится, новые уведомления не появятся.")) {
-      return;
-    }
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setManagingReminderId(reminder.reminderId);
     setError(null);
     try {
-      await changeReminderLifecycle(reminder.reminderId, action);
+      const { reminder: updated } = await changeReminderLifecycle(reminder.reminderId, action);
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
-      await refresh(actionWorkspaceId);
-      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setReminders((current) => current.map((item) => item.reminderId === reminder.reminderId ? updated : item));
       setNotice(action === "pause" ? "Серия приостановлена" : action === "resume" ? "Серия продолжена" : "Серия завершена");
       window.setTimeout(() => {
         if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
       }, 2600);
+      void refresh(actionWorkspaceId);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
         setError(errorMessage(requestError));
@@ -991,6 +1270,52 @@ function App() {
   const selectedWorkspaceTimezone = selectedWorkspace
     ? describeTimezone(selectedWorkspace.timezone, timezoneReference)
     : null;
+  const archiveDialog = archiveTarget ? (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.currentTarget === event.target) setArchiveTarget(null);
+    }}>
+      <section
+        className="confirm-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="archive-dialog-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setArchiveTarget(null);
+            return;
+          }
+          if (event.key !== "Tab") return;
+          const controls = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+          const currentIndex = controls.indexOf(document.activeElement as HTMLButtonElement);
+          const nextIndex = event.shiftKey
+            ? (currentIndex - 1 + controls.length) % controls.length
+            : (currentIndex + 1) % controls.length;
+          event.preventDefault();
+          controls[nextIndex]?.focus();
+        }}
+      >
+        <p className="eyebrow">Завершить серию</p>
+        <h2 id="archive-dialog-title">Архивировать «{archiveTarget.title}»?</h2>
+        <p>Новые уведомления больше не появятся. Выполненные и отменённые повторы останутся в истории.</p>
+        <div className="confirm-dialog__actions">
+          <button autoFocus type="button" onClick={() => setArchiveTarget(null)}>Оставить активной</button>
+          <button
+            className="danger-action"
+            type="button"
+            disabled={managingReminderId === archiveTarget.reminderId}
+            onClick={() => void (async () => {
+              await manageReminder(archiveTarget, "archive");
+              setArchiveTarget(null);
+              setView("plan");
+            })()}
+          >
+            {managingReminderId === archiveTarget.reminderId ? "Архивирую…" : "Архивировать"}
+          </button>
+        </div>
+      </section>
+    </div>
+  ) : null;
 
   if (telegramAuthMissing) {
     return (
@@ -1000,7 +1325,7 @@ function App() {
         </header>
         <section className="launch-error" role="alert">
           <div className="launch-error__status">
-            <span className="launch-error__mark" aria-hidden="true">↻</span>
+            <span className="launch-error__mark" aria-hidden="true"><UiIcon name="refresh" /></span>
             <p className="eyebrow">Панель не загрузилась</p>
           </div>
           <h1>Попробуйте обновить</h1>
@@ -1008,11 +1333,15 @@ function App() {
             Telegram не передал данные для входа. Обычно достаточно обновить панель.
           </p>
           <button className="recovery-action" type="button" onClick={() => window.location.reload()}>
-            <span aria-hidden="true">↻</span>
+            <span aria-hidden="true"><UiIcon name="refresh" /></span>
             Обновить
           </button>
+          <a className="recovery-secondary" href={botUrl} target="_blank" rel="noreferrer">
+            Открыть чат с ботом
+            <UiIcon name="arrow-right" />
+          </a>
           <small className="recovery-hint">
-            Если не поможет, вернитесь в чат с ботом и откройте панель ещё раз.
+            В чате нажмите «Открыть панель» — Telegram передаст новую сессию автоматически.
           </small>
         </section>
       </main>
@@ -1027,7 +1356,7 @@ function App() {
         </header>
         <section className="launch-error workspace-recovery" role="status" aria-busy={loading}>
           <div className="launch-error__status">
-            <span className="launch-error__mark" aria-hidden="true">{loading ? "···" : "↻"}</span>
+            <span className="launch-error__mark" aria-hidden="true">{loading ? "···" : <UiIcon name="refresh" />}</span>
             <p className="eyebrow">
               {loading ? "Проверяем доступ" : error ? "Не удалось загрузить" : "Группа не найдена"}
             </p>
@@ -1047,9 +1376,13 @@ function App() {
           {!loading ? (
             <div className="workspace-recovery__actions">
               <button className="recovery-action" type="button" onClick={retryWorkspaceLoad}>
-                <span aria-hidden="true">↻</span>
+                <span aria-hidden="true"><UiIcon name="refresh" /></span>
                 Обновить
               </button>
+              <a className="recovery-secondary" href={botUrl} target="_blank" rel="noreferrer">
+                Открыть чат с ботом
+                <UiIcon name="arrow-right" />
+              </a>
             </div>
           ) : null}
         </section>
@@ -1087,7 +1420,7 @@ function App() {
 
         <section className="member-roster-panel">
           <label className="member-search">
-            <span aria-hidden="true">⌕</span>
+            <span aria-hidden="true"><UiIcon name="search" /></span>
             <input
               type="search"
               aria-label="Найти участника"
@@ -1125,7 +1458,7 @@ function App() {
                             ? setEditingMemberUserId(null)
                             : editMemberDisplayName(member)}
                         >
-                          <span aria-hidden="true">✎</span>
+                          <span aria-hidden="true"><UiIcon name="edit" /></span>
                         </button>
                       ) : null}
                     </span>
@@ -1205,7 +1538,7 @@ function App() {
         </section>
 
         <section className="member-enrollment-panel">
-          <span className="member-enrollment-panel__signal" aria-hidden="true">＋</span>
+          <span className="member-enrollment-panel__signal" aria-hidden="true"><UiIcon name="plus" /></span>
           <div>
             <p className="eyebrow">Подключение</p>
             <h2>Позвать остальных</h2>
@@ -1255,7 +1588,14 @@ function App() {
     return (
       <main className="app app--form app--settings">
         <header className="topbar">
-          <BackButton onClick={() => setView("home")} />
+          <BackButton onClick={() => {
+            if (editingOccurrenceId) {
+              setDetailTarget({ kind: "occurrence", id: editingOccurrenceId });
+              setView("detail");
+            } else {
+              setView("plan");
+            }
+          }} />
           <span className="utility-label">{selectedWorkspace.displayName}</span>
         </header>
 
@@ -1298,7 +1638,7 @@ function App() {
             <label className="field timezone-field">
               <span>Город или часовой пояс</span>
               <span className="timezone-input-wrap">
-                <span className="timezone-input-wrap__mark" aria-hidden="true">⌖</span>
+                <span className="timezone-input-wrap__mark" aria-hidden="true"><UiIcon name="location" /></span>
                 <input
                   list="timezone-options"
                   required
@@ -1337,7 +1677,7 @@ function App() {
                 aria-pressed={settingsForm.timezone === deviceTimezone}
                 onClick={() => setSettingsForm({ ...settingsForm, timezone: deviceTimezone })}
               >
-                <span className="timezone-device__icon" aria-hidden="true">◎</span>
+                <span className="timezone-device__icon" aria-hidden="true"><UiIcon name="target" /></span>
                 <span>
                   <b>Время устройства</b>
                   <small>{deviceTimezonePresentation.city} · {deviceTimezonePresentation.offset}</small>
@@ -1434,13 +1774,251 @@ function App() {
     );
   }
 
+  if (view === "detail" && detailTarget) {
+    const occurrence = detailTarget.kind === "occurrence"
+      ? [...occurrences, ...historyOccurrences, ...(undoableOccurrence ? [undoableOccurrence] : [])]
+        .find((item) => item.occurrenceId === detailTarget.id)
+      : undefined;
+    const reminder = detailTarget.kind === "reminder"
+      ? reminderMap.get(detailTarget.id)
+      : occurrence ? reminderMap.get(occurrence.reminderId) : undefined;
+    const detailTimezone = occurrence?.timezone ?? reminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow";
+    const responsibleUserId = occurrence?.assignment.mode === "person"
+      ? occurrence.assignment.responsibleUserId
+      : reminder?.assignment.mode === "person" ? reminder.assignment.responsibleUserId : undefined;
+    const responsible = responsibleUserId ? memberMap.get(responsibleUserId) : undefined;
+    const amount = formatAmount(
+      occurrence?.amountMinor ?? reminder?.amountMinor ?? null,
+      occurrence?.currency ?? reminder?.currency ?? null,
+    );
+    const isManager = actor?.role === "owner" || actor?.role === "organizer";
+    const isResponsible = responsibleUserId === actorId;
+    const isCreator = reminder?.creatorUserId === actorId;
+    const canManageReminder = Boolean(reminder && (
+      reminder.visibility === "group" ? isManager : isCreator || isResponsible
+    ));
+    const canAct = Boolean(occurrence && (
+      occurrence.visibility === "private"
+        ? isCreator || isResponsible
+        : isCreator || isManager || isResponsible || occurrence.assignment.mode === "anyone"
+    ));
+    const canSnooze = Boolean(occurrence && (
+      occurrence.visibility === "private" ? isCreator || isResponsible : isCreator || isManager || isResponsible
+    ));
+    const nextDates = reminder ? upcomingScheduleDates(reminder.schedule, reminder.timezone, 3) : [];
+    const timeline = occurrence ? [
+      occurrence.createdAt ? {
+        label: "Напоминание создано",
+        value: formatMoment(occurrence.createdAt, detailTimezone, true),
+      } : null,
+      occurrence.snoozedAt ? {
+        label: "Сигнал отложен",
+        value: `${formatMoment(occurrence.snoozedAt, detailTimezone, true)}${occurrence.snoozeUntil ? ` · до ${formatMoment(occurrence.snoozeUntil, detailTimezone)}` : ""}`,
+      } : null,
+      occurrence.completedAt ? {
+        label: occurrence.kind === "payment" ? "Оплату отметил" : "Выполнение отметил",
+        value: `${occurrence.completedByDisplayName ?? memberName(occurrence.completedBy ? memberMap.get(occurrence.completedBy) : undefined)} · ${formatMoment(occurrence.completedAt, detailTimezone, true)}`,
+      } : null,
+      occurrence.cancelledAt ? {
+        label: "Повтор отменён",
+        value: `${occurrence.cancelledBy ? memberName(memberMap.get(occurrence.cancelledBy)) : "Участник"} · ${formatMoment(occurrence.cancelledAt, detailTimezone, true)}`,
+      } : null,
+    ].filter((item): item is { label: string; value: string } => Boolean(item)) : [];
+
+    if (!occurrence && !reminder) {
+      return (
+        <main className="app app--detail">
+          <header className="topbar"><BackButton onClick={() => switchMainView(detailReturnView)} /><span className="utility-label">Детали</span></header>
+          <section className="detail-empty"><h1>Напоминание уже недоступно</h1><p>Вернитесь к списку и обновите данные.</p></section>
+        </main>
+      );
+    }
+
+    return (
+      <main className="app app--detail">
+        <header className="topbar">
+          <BackButton onClick={() => switchMainView(detailReturnView)} />
+          <span className="utility-label">{selectedWorkspace?.displayName ?? "Детали"}</span>
+        </header>
+
+        <section className="detail-hero">
+          <div className="detail-hero__status">
+            <span className={`detail-state detail-state--${occurrence?.status ?? reminder?.status}`}>
+              {occurrence ? occurrenceStatusLabel(occurrence) : reminder?.status === "paused" ? "На паузе" : "Серия активна"}
+            </span>
+            <span className="visibility-badge">{(occurrence?.visibility ?? reminder?.visibility) === "private" ? "личное" : "группа"}</span>
+          </div>
+          <h1>{occurrence?.title ?? reminder?.title}</h1>
+          {(occurrence?.description ?? reminder?.description) ? <p>{occurrence?.description ?? reminder?.description}</p> : null}
+          {amount ? <b className="detail-amount">{amount}</b> : null}
+          {(occurrence?.actionUrl ?? reminder?.actionUrl) ? (
+            <a className="detail-link" href={occurrence?.actionUrl ?? reminder?.actionUrl ?? undefined} target="_blank" rel="noreferrer">
+              Открыть связанную страницу <UiIcon name="arrow-right" />
+            </a>
+          ) : null}
+        </section>
+
+        <section className="detail-facts" aria-label="Параметры напоминания">
+          {occurrence ? (
+            <div><span>Срок</span><b>{formatMoment(occurrence.dueAt, detailTimezone, true)}</b><small>{occurrence.status === "overdue" ? `Просрочено на ${relativeDuration(occurrence.dueAt)}` : occurrence.status === "pending" ? `Через ${relativeDuration(occurrence.dueAt)}` : occurrenceStatusLabel(occurrence)}</small></div>
+          ) : null}
+          {reminder ? <div><span>Ритм</span><b>{scheduleLabel(reminder.schedule)}</b><small>{reminder.status === "paused" ? "Новые сигналы приостановлены" : "Повторяется автоматически"}</small></div> : null}
+          <div><span>Ответственный</span><b>{responsibleUserId ? memberName(responsible) : "Любой участник"}</b><small>{responsible?.username ? `@${responsible.username}` : responsibleUserId ? "Участник группы" : "Кто отметит первым"}</small></div>
+          {occurrence?.nextNotificationAt && occurrence.status !== "completed" && occurrence.status !== "cancelled" ? (
+            <div><span>Следующий сигнал</span><b>Через {relativeDuration(occurrence.nextNotificationAt)}</b><small>{formatMoment(occurrence.nextNotificationAt, detailTimezone, true)}</small></div>
+          ) : reminder ? (
+            <div><span>Повтор сигнала</span><b>Каждые {relativeDuration(new Date(Date.now() + reminder.notificationPolicy.repeatIntervalMinutes * 60_000).toISOString())}</b><small>{reminder.notificationPolicy.ignoreQuietHours ? "Даже в тихие часы" : "С учётом тихих часов"}</small></div>
+          ) : null}
+        </section>
+
+        {occurrence && (occurrence.status === "pending" || occurrence.status === "overdue") && (canAct || canSnooze) ? (
+          <section className="detail-actions" aria-label="Действия с напоминанием">
+            {canAct ? <button className="primary-action" type="button" disabled={actingOccurrenceId === occurrence.occurrenceId} onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}>
+              {occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение"}
+            </button> : null}
+            {canSnooze ? <div className="detail-snooze"><span>Напомнить позже</span><div>
+              <button type="button" onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze", 60)}>Через час</button>
+              <button type="button" onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze", 360)}>Вечером</button>
+              <button type="button" onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze", 1440)}>Завтра</button>
+            </div></div> : null}
+          </section>
+        ) : null}
+
+        {reminder && nextDates.length > 0 ? (
+          <section className="detail-section">
+            <p className="eyebrow">Ближайшие сроки</p>
+            <div className="upcoming-dates upcoming-dates--large">
+              {nextDates.map((date, index) => <span key={date}><small>{index === 0 ? "следующий" : `+${index}`}</small><b>{formatScheduleDate(date)}</b></span>)}
+            </div>
+          </section>
+        ) : null}
+
+        {timeline.length > 0 ? (
+          <section className="detail-section">
+            <p className="eyebrow">История этого повтора</p>
+            <ol className="event-timeline">
+              {timeline.map((event) => <li key={`${event.label}-${event.value}`}><span /><div><b>{event.label}</b><small>{event.value}</small></div></li>)}
+            </ol>
+            {occurrence?.cancellationReason ? <p className="cancellation-note">Причина: {occurrence.cancellationReason}</p> : null}
+          </section>
+        ) : null}
+
+        {reminder && canManageReminder ? (
+          <section className="detail-management">
+            <button type="button" onClick={() => openEdit(reminder, occurrence)}>Изменить</button>
+            {reminder.status !== "archived" ? <button type="button" disabled={managingReminderId === reminder.reminderId} onClick={() => void manageReminder(reminder, reminder.status === "paused" ? "resume" : "pause")}>{reminder.status === "paused" ? "Продолжить" : "Поставить на паузу"}</button> : null}
+            {reminder.status !== "archived" ? <button className="danger-link" type="button" onClick={() => setArchiveTarget(reminder)}>Архивировать</button> : null}
+          </section>
+        ) : null}
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
+        {archiveDialog}
+      </main>
+    );
+  }
+
+  if (view === "plan") {
+    return (
+      <main className="app app--main-view app--plan">
+        <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>{workspaces.length > 1 ? <WorkspaceSelect compact workspaces={workspaces} value={workspaceId ?? ""} onChange={(nextWorkspaceId) => void changeWorkspace(nextWorkspaceId)} /> : <span className="utility-label">{selectedWorkspace?.displayName}</span>}</header>
+        <section className="main-view-intro">
+          <div><p className="eyebrow">Будущие сроки</p><h1>План</h1><p>Серии и три ближайших повтора — без завершённых задач.</p></div>
+          <div className="scope-switch" role="tablist" aria-label="Область плана" onKeyDown={handleRovingControlKey}>
+            <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
+            <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
+          </div>
+        </section>
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
+        {loading ? <div className="plan-list skeleton-list"><i /><i /><i /></div> : visibleReminders.length === 0 ? (
+          <button className="empty-plan" onClick={openCreate}><b>План пока пуст</b><span>Добавьте разовый срок или повторяющуюся серию.</span></button>
+        ) : (
+          <section className="plan-list plan-list--primary" aria-label="Запланированные серии">
+            {visibleReminders.map((reminder) => {
+              const responsible = reminder.assignment.mode === "person" ? memberMap.get(reminder.assignment.responsibleUserId) : undefined;
+              const missingResponsible = reminder.assignment.mode === "person" && !responsible;
+              const dates = planDates.get(reminder.reminderId) ?? [];
+              return (
+                <article className={`plan-row plan-row--${reminder.status}`} key={reminder.reminderId}>
+                  <button className="plan-row__open" type="button" onClick={() => openReminderDetail(reminder.reminderId)}>
+                    <span className="plan-date" aria-hidden="true"><UiIcon name={reminder.schedule.frequency === "once" ? "once" : "repeat"} /></span>
+                    <span className="plan-copy"><span className="plan-copy__title"><b>{reminder.title}</b><i className={`status-dot status-dot--${reminder.status}`} /></span><span>{scheduleLabel(reminder.schedule)}</span><small>{reminder.assignment.mode === "anyone" ? "Любой участник" : memberName(responsible)}</small></span>
+                    <UiIcon name="arrow-right" />
+                  </button>
+                  {dates.length > 0 ? <div className="upcoming-dates" aria-label="Три ближайших срока">{dates.map((date, index) => <span key={date} className={index === 0 ? "is-next" : ""}>{formatScheduleDate(date, true)}</span>)}</div> : <p className="plan-ended">Будущих сроков нет</p>}
+                  {reminder.status === "paused" && reminder.assignment.mode === "person" && missingResponsible && (actor?.role === "owner" || actor?.role === "organizer") ? (
+                    <div className="reassign-row"><span>Ответственный вышел — выберите нового</span><select aria-label={`Новый ответственный: ${reminder.title}`} value={reassignment[reminder.reminderId] ?? ""} onChange={(event) => setReassignment((current) => ({ ...current, [reminder.reminderId]: event.target.value }))}><option value="">Выбрать участника</option>{members.map((member) => <option key={member.userId} value={member.userId}>{member.displayName}</option>)}</select><button type="button" disabled={reassigningReminderId === reminder.reminderId} onClick={() => void submitReassignment(reminder.reminderId)}>{reassigningReminderId === reminder.reminderId ? "Сохраняю…" : "Переназначить"}</button></div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </section>
+        )}
+        <BottomNavigation view="plan" onChange={switchMainView} onCreate={openCreate} createDisabled={!workspaceId} />
+        {archiveDialog}
+      </main>
+    );
+  }
+
+  if (view === "history") {
+    return (
+      <main className="app app--main-view app--history">
+        <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>{workspaces.length > 1 ? <WorkspaceSelect compact workspaces={workspaces} value={workspaceId ?? ""} onChange={(nextWorkspaceId) => void changeWorkspace(nextWorkspaceId)} /> : <span className="utility-label">{selectedWorkspace?.displayName}</span>}</header>
+        <section className="main-view-intro">
+          <div><p className="eyebrow">Журнал действий</p><h1>История</h1><p>Что завершили или отменили, кто это сделал и когда.</p></div>
+          <div className="scope-switch" role="tablist" aria-label="Область истории" onKeyDown={handleRovingControlKey}>
+            <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
+            <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
+          </div>
+        </section>
+        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
+        {loading ? <div className="history-list skeleton-list"><i /><i /><i /></div> : visibleHistory.length === 0 ? (
+          <div className="quiet-state"><span className="quiet-pulse"><UiIcon name="history" /></span><div><b>История пока пуста</b><p>Завершённые и отменённые напоминания появятся здесь.</p></div></div>
+        ) : (
+          <section className="history-list" aria-label="История напоминаний">
+            {visibleHistory.map((occurrence) => {
+              const responsible = occurrence.assignment.mode === "person" ? memberMap.get(occurrence.assignment.responsibleUserId) : undefined;
+              const actorName = occurrence.status === "completed"
+                ? occurrence.completedByDisplayName ?? (occurrence.completedBy ? memberName(memberMap.get(occurrence.completedBy)) : "Участник")
+                : occurrence.cancelledBy ? memberName(memberMap.get(occurrence.cancelledBy)) : "Участник";
+              const actionAt = occurrence.completedAt ?? occurrence.cancelledAt ?? occurrence.updatedAt ?? occurrence.dueAt;
+              return (
+                <button className="history-row" type="button" onClick={() => openOccurrenceDetail(occurrence.occurrenceId, "history")} key={occurrence.occurrenceId}>
+                  <span className={`history-row__mark history-row__mark--${occurrence.status}`}><UiIcon name={occurrence.status === "completed" ? "check" : "history"} /></span>
+                  <span className="history-row__copy"><b>{occurrence.title}</b><span>{occurrenceStatusLabel(occurrence)} · {actorName}</span><small>{formatMoment(actionAt, occurrence.timezone, true)} · {occurrence.assignment.mode === "anyone" ? "Любой участник" : memberName(responsible)}</small></span>
+                  <UiIcon name="arrow-right" />
+                </button>
+              );
+            })}
+          </section>
+        )}
+        <BottomNavigation view="history" onChange={switchMainView} onCreate={openCreate} createDisabled={!workspaceId} />
+      </main>
+    );
+  }
+
   if (view === "create") {
     const selectedResponsible = memberMap.get(Number(form.responsibleUserId));
     const canAssignGroup = actor?.role === "owner" || actor?.role === "organizer";
+    const previewResponsible = form.assignmentMode === "anyone"
+      ? "Может выполнить любой участник"
+      : selectedResponsible ? `Ответственный — ${memberName(selectedResponsible)}` : "Выберите ответственного";
+    const previewTimezone = reminders.find((reminder) => reminder.reminderId === editingReminderId)?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow";
+    const previewDates = editingOccurrenceId && editScope === "occurrence"
+      ? [occurrenceDate]
+      : formUpcomingDates(form, previewTimezone);
     return (
       <main className="app app--form">
         <header className="topbar">
-          <BackButton onClick={() => setView("home")} />
+          <BackButton onClick={() => {
+            if (editingOccurrenceId) {
+              setDetailTarget({ kind: "occurrence", id: editingOccurrenceId });
+              setView("detail");
+            } else {
+              setView("plan");
+            }
+          }} />
           <span className="utility-label">
             {editingReminderId ? "Редактирование" : selectedWorkspace?.displayName ?? "Новое"}
           </span>
@@ -1448,15 +2026,27 @@ function App() {
 
         <section className="form-intro">
           <p className="eyebrow">{editingReminderId
-            ? "Текущее и будущие"
+            ? editScope === "occurrence" ? "Один срок" : "Серия"
             : form.kind === "payment" ? "Платёж" : "Поручение"}</p>
           <h1>{editingReminderId ? "Что изменить?" : "О чём не дать забыть?"}</h1>
           <p>{editingReminderId
-            ? "Новые параметры применятся к текущему незавершённому напоминанию и следующим повторам. История не изменится."
+            ? editScope === "occurrence"
+              ? "Изменится только открытый сейчас срок. Ритм серии и следующие повторы останутся прежними."
+              : "Новые параметры применятся к текущему незавершённому напоминанию и следующим повторам. История не изменится."
             : form.kind === "payment"
               ? "Бот будет возвращать напоминание, пока ответственный не отметит оплату."
               : "Бот будет возвращать напоминание, пока ответственный не отметит выполнение."}</p>
         </section>
+
+        {editingOccurrenceId ? (
+          <section className="edit-scope" aria-labelledby="edit-scope-title">
+            <div><p className="eyebrow">Область изменений</p><h2 id="edit-scope-title">Что именно изменить?</h2></div>
+            <div className="edit-scope__options" role="radiogroup" aria-label="Область редактирования" onKeyDown={handleRovingControlKey}>
+              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} onClick={() => setEditScope("occurrence")}><b>Только этот срок</b><small>{formatScheduleDate(occurrenceDate)}</small></button>
+              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} onClick={() => setEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
+            </div>
+          </section>
+        ) : null}
 
         <form
           className="reminder-form"
@@ -1468,7 +2058,7 @@ function App() {
           <section className="form-panel form-panel--primary">
             <div className="kind-field">
               <span>Что создаём</span>
-              <div className="kind-switch" role="radiogroup" aria-label="Тип напоминания">
+              <div className="kind-switch" role="radiogroup" aria-label="Тип напоминания" onKeyDown={handleRovingControlKey}>
                 <button
                   aria-checked={form.kind === "task"}
                   className={form.kind === "task" ? "kind-option is-selected" : "kind-option"}
@@ -1476,7 +2066,7 @@ function App() {
                   type="button"
                   onClick={() => setForm({ ...form, kind: "task" })}
                 >
-                  <span className="kind-option__mark" aria-hidden="true">✓</span>
+                  <span className="kind-option__mark" aria-hidden="true"><UiIcon name="check" /></span>
                   <span><b>Поручение</b><small>Сделать и отметить</small></span>
                 </button>
                 <button
@@ -1486,7 +2076,7 @@ function App() {
                   type="button"
                   onClick={() => setForm({ ...form, kind: "payment" })}
                 >
-                  <span className="kind-option__mark" aria-hidden="true">₽</span>
+                  <span className="kind-option__mark" aria-hidden="true"><UiIcon name="payment" /></span>
                   <span><b>Платёж</b><small>Оплатить к сроку</small></span>
                 </button>
               </div>
@@ -1504,46 +2094,51 @@ function App() {
                 required
               />
             </label>
-            {form.kind === "payment" ? (
-              <label className="field field--amount">
-                <span>Сумма <small>можно добавить позже</small></span>
-                <span className="amount-input">
-                  <input
-                    inputMode="decimal"
-                    min="0"
-                    step="0.01"
-                    type="number"
-                    placeholder="0"
-                    value={form.amountRub}
-                    onChange={(event) => setForm({ ...form, amountRub: event.target.value })}
+            <details className="additional-fields">
+              <summary>Дополнительные настройки</summary>
+              <div className="additional-fields__body">
+                {form.kind === "payment" ? (
+                  <label className="field field--amount">
+                    <span>Сумма <small>можно добавить позже</small></span>
+                    <span className="amount-input">
+                      <input
+                        inputMode="decimal"
+                        min="0"
+                        step="0.01"
+                        type="number"
+                        placeholder="0"
+                        value={form.amountRub}
+                        onChange={(event) => setForm({ ...form, amountRub: event.target.value })}
+                      />
+                      <b>{form.currency === "RUB" ? "₽" : form.currency}</b>
+                    </span>
+                  </label>
+                ) : null}
+                <label className="field">
+                  <span>{form.kind === "payment" ? "Получатель или детали" : "Детали"} <small>необязательно</small></span>
+                  <textarea
+                    rows={3}
+                    maxLength={2000}
+                    placeholder={form.kind === "payment"
+                      ? "Реквизиты, назначение или комментарий"
+                      : "Инструкция или контекст"}
+                    value={form.description}
+                    onChange={(event) => setForm({ ...form, description: event.target.value })}
                   />
-                  <b>{form.currency === "RUB" ? "₽" : form.currency}</b>
-                </span>
-              </label>
-            ) : null}
-            <label className="field">
-              <span>{form.kind === "payment" ? "Получатель или детали" : "Детали"} <small>необязательно</small></span>
-              <textarea
-                rows={3}
-                maxLength={2000}
-                placeholder={form.kind === "payment"
-                  ? "Реквизиты, назначение или комментарий"
-                  : "Инструкция или контекст"}
-                value={form.description}
-                onChange={(event) => setForm({ ...form, description: event.target.value })}
-              />
-            </label>
-            <label className="field">
-              <span>{form.kind === "payment" ? "Ссылка на оплату" : "Ссылка"} <small>необязательно</small></span>
-              <input
-                inputMode="url"
-                maxLength={2048}
-                placeholder={form.kind === "payment" ? "https://…" : "Материалы или страница с деталями"}
-                type="url"
-                value={form.actionUrl}
-                onChange={(event) => setForm({ ...form, actionUrl: event.target.value })}
-              />
-            </label>
+                </label>
+                <label className="field">
+                  <span>{form.kind === "payment" ? "Ссылка на оплату" : "Ссылка"} <small>необязательно</small></span>
+                  <input
+                    inputMode="url"
+                    maxLength={2048}
+                    placeholder={form.kind === "payment" ? "https://…" : "Материалы или страница с деталями"}
+                    type="url"
+                    value={form.actionUrl}
+                    onChange={(event) => setForm({ ...form, actionUrl: event.target.value })}
+                  />
+                </label>
+              </div>
+            </details>
           </section>
 
           <section className="form-panel">
@@ -1563,24 +2158,28 @@ function App() {
               ) : null}
             </div>
 
-            <div className="choice-grid choice-grid--visibility" role="radiogroup" aria-label="Видимость">
+            <div className="choice-grid choice-grid--visibility" role="radiogroup" aria-label="Видимость" onKeyDown={handleRovingControlKey}>
               <button
+                aria-checked={form.visibility === "group"}
                 className={form.visibility === "group" ? "choice-card is-selected" : "choice-card"}
+                role="radio"
                 type="button"
                 disabled={!canAssignGroup}
                 onClick={() => setForm({ ...form, visibility: "group" })}
               >
-                <span className="choice-icon">◎</span>
+                <span className="choice-icon"><UiIcon name="group" /></span>
                 <span><b>Групповое</b><small>Видно всей группе</small></span>
               </button>
               <button
+                aria-checked={form.visibility === "private"}
                 className={form.visibility === "private" ? "choice-card is-selected" : "choice-card"}
+                role="radio"
                 type="button"
                 onClick={() =>
                   setForm({ ...form, visibility: "private", assignmentMode: "person", watcherUserIds: [] })
                 }
               >
-                <span className="choice-icon">◐</span>
+                <span className="choice-icon"><UiIcon name="private" /></span>
                 <span><b>Личное</b><small>Только участникам</small></span>
               </button>
             </div>
@@ -1630,10 +2229,21 @@ function App() {
             ) : null}
           </section>
 
+          {editingOccurrenceId && editScope === "occurrence" ? (
+            <section className="form-panel">
+              <p className="eyebrow">Срок этого повтора</p>
+              <h2>Когда он должен быть выполнен</h2>
+              <div className="schedule-grid">
+                <label className="field"><span>Дата</span><input type="date" value={occurrenceDate} onChange={(event) => setOccurrenceDate(event.target.value)} required /></label>
+                <label className="toggle-row field--wide"><span><b>Весь день</b><small>Без точного времени</small></span><input type="checkbox" checked={occurrenceAllDay} onChange={(event) => setOccurrenceAllDay(event.target.checked)} /></label>
+                {!occurrenceAllDay ? <label className="field field--wide"><span>Время</span><Time24Field label="Время" required value={occurrenceTime} onChange={setOccurrenceTime} /></label> : null}
+              </div>
+            </section>
+          ) : (
           <section className="form-panel">
             <p className="eyebrow">Ритм</p>
             <h2>Когда напоминать</h2>
-            <div className="frequency-strip" role="radiogroup" aria-label="Повторение">
+            <div className="frequency-strip" role="radiogroup" aria-label="Повторение" onKeyDown={handleRovingControlKey}>
               {([
                 ["once", "Один раз"],
                 ["daily", "Ежедневно"],
@@ -1642,8 +2252,10 @@ function App() {
                 ["yearly", "По годам"],
               ] as Array<[Frequency, string]>).map(([value, label]) => (
                 <button
+                  aria-checked={form.frequency === value}
                   className={form.frequency === value ? "frequency-chip is-selected" : "frequency-chip"}
                   key={value}
+                  role="radio"
                   type="button"
                   onClick={() => setForm({ ...form, frequency: value })}
                 >
@@ -1678,6 +2290,7 @@ function App() {
                   <div className="weekday-row">
                     {WEEKDAYS.map((weekday) => (
                       <button
+                        aria-pressed={form.weekdays.includes(weekday.value)}
                         className={form.weekdays.includes(weekday.value) ? "weekday is-selected" : "weekday"}
                         key={weekday.value}
                         type="button"
@@ -1748,6 +2361,7 @@ function App() {
               ) : null}
             </div>
           </section>
+          )}
 
           <section className="form-panel">
             <p className="eyebrow">Повторные сигналы</p>
@@ -1781,6 +2395,17 @@ function App() {
 
           {error ? <div className="error-banner" role="alert">{error}</div> : null}
 
+          <section className="form-preview" aria-label="Предпросмотр напоминания">
+            <p className="eyebrow">Как это будет работать</p>
+            <h2>{form.title.trim() || "Название напоминания"}</h2>
+            <p>{previewResponsible}. {editingOccurrenceId && editScope === "occurrence" ? `${formatScheduleDate(occurrenceDate)} · ${occurrenceAllDay ? "весь день" : occurrenceTime}` : formSchedulePreview(form)}.</p>
+            <small>Если не отметить {form.kind === "payment" ? "оплату" : "выполнение"}, бот напомнит {repeatPreviewLabel(form.repeatIntervalMinutes)}.</small>
+            {previewDates.length > 0 ? <div className="form-preview__dates" aria-label="Ближайшие даты">{previewDates.map((date, index) => <span className={index === 0 ? "is-next" : ""} key={date}>{formatScheduleDate(date, true)}</span>)}</div> : null}
+            {form.frequency === "monthly" && !form.monthlyLastDay && Number(form.monthlyDay) > 28 ? (
+              <small className="form-preview__note">Если такого числа в месяце нет, срок переносится на последний день.</small>
+            ) : null}
+          </section>
+
           <div className="form-submit-bar">
             <div>
               <small>{form.visibility === "group" ? "Увидит группа" : "Личное"}</small>
@@ -1792,7 +2417,7 @@ function App() {
               {saving
                 ? "Сохраняю…"
                 : editingReminderId
-                  ? "Сохранить"
+                  ? editScope === "occurrence" ? "Сохранить этот срок" : "Сохранить серию"
                   : form.kind === "payment" ? "Создать платёж" : "Создать поручение"}
             </button>
           </div>
@@ -1805,7 +2430,7 @@ function App() {
     weekday: "long",
     day: "numeric",
     month: "long",
-  }).format(new Date());
+  }).format(new Date()).replace(/,\s*/gu, " · ");
   return (
     <main className="app app--home">
       <header className="home-header">
@@ -1818,49 +2443,42 @@ function App() {
         <span className="workspace-switcher__copy">
           <small>Группа</small>
           {workspaces.length > 1 ? (
-            <select
-              aria-label="Выбранная группа"
+            <WorkspaceSelect
+              workspaces={workspaces}
               value={workspaceId ?? ""}
-              onChange={(event) => void changeWorkspace(event.target.value)}
-            >
-              {workspaces.map((workspace) => (
-                <option key={workspace.workspaceId} value={workspace.workspaceId}>
-                  {workspace.displayName}
-                </option>
-              ))}
-            </select>
+              onChange={(nextWorkspaceId) => void changeWorkspace(nextWorkspaceId)}
+            />
           ) : <b>{selectedWorkspace?.displayName ?? "Группа не выбрана"}</b>}
         </span>
-        {workspaces.length > 1 ? <span className="workspace-switcher__hint">сменить</span> : null}
       </label>
 
       {selectedWorkspace?.role === "owner" || selectedWorkspace?.role === "organizer" ? (
         <div className="workspace-tools">
           <button className="workspace-settings-link" type="button" onClick={openSettings}>
-            <span aria-hidden="true">◴</span>
-            <span><b>Ритм группы</b><small>{selectedWorkspace.quietHoursStart}–{selectedWorkspace.quietHoursEnd} · {selectedWorkspaceTimezone?.city ?? selectedWorkspace.timezone}</small></span>
-            <span aria-hidden="true">→</span>
+            <span className="workspace-tool-icon"><UiIcon name="clock" /></span>
+            <span><b>Ритм группы</b><small>{selectedWorkspace.quietHoursStart}–{selectedWorkspace.quietHoursEnd}</small></span>
+            <UiIcon name="arrow-right" />
           </button>
           <button
             className="workspace-settings-link workspace-members-link"
             type="button"
             onClick={() => openMembers("home")}
           >
-            <span aria-hidden="true">◎</span>
+            <span className="workspace-tool-icon"><UiIcon name="members" /></span>
             <span>
               <b>Участники</b>
-              <small>{members.length} подтверждено</small>
+              <small>{members.length} {members.length === 1 ? "участник" : "участника"}</small>
             </span>
-            <span aria-hidden="true">→</span>
+            <UiIcon name="arrow-right" />
           </button>
         </div>
       ) : null}
 
       <section className="home-intro">
         <h1>Требует внимания</h1>
-        <div className="scope-switch" role="tablist" aria-label="Область напоминаний">
-          <button className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab">Мои</button>
-          <button className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab">Вся группа</button>
+        <div className="scope-switch" role="tablist" aria-label="Область напоминаний" onKeyDown={handleRovingControlKey}>
+          <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
+          <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
         </div>
       </section>
 
@@ -1888,7 +2506,7 @@ function App() {
           <div className="rail skeleton-rail"><i /><i /><i /></div>
         ) : visibleOccurrences.length === 0 ? (
           <div className="quiet-state">
-            <span className="quiet-pulse">✓</span>
+            <span className="quiet-pulse"><UiIcon name="check" /></span>
             <div><b>Сейчас тихо</b><p>Ничего не ждёт немедленного действия.</p></div>
           </div>
         ) : (
@@ -1913,7 +2531,7 @@ function App() {
                 <article className={`rail-item rail-item--${occurrence.status}`} key={occurrence.occurrenceId}>
                   <span className="rail-node" />
                   <div className="rail-time">
-                    <b>{occurrence.status === "overdue" ? "просрочено" : formatDue(occurrence)}</b>
+                    <b>{occurrence.status === "overdue" ? `−${relativeDuration(occurrence.dueAt)}` : formatDue(occurrence)}</b>
                     {occurrence.status === "overdue" ? <small>{formatDue(occurrence)}</small> : null}
                   </div>
                   <div className="rail-card">
@@ -1921,8 +2539,9 @@ function App() {
                       <span className="visibility-badge">{occurrence.visibility === "private" ? "личное" : "группа"}</span>
                       {amount ? <b className="amount-label">{amount}</b> : null}
                     </div>
-                    <h3>{occurrence.title}</h3>
+                    <button className="rail-card__title" type="button" onClick={() => openOccurrenceDetail(occurrence.occurrenceId)}>{occurrence.title}<UiIcon name="arrow-right" /></button>
                     <p>{occurrence.assignment.mode === "anyone" ? "Может выполнить любой" : `Ответственный · ${memberName(responsible)}`}</p>
+                    {occurrence.nextNotificationAt ? <small className="rail-signal">Следующий сигнал через {relativeDuration(occurrence.nextNotificationAt)} · {formatMoment(occurrence.nextNotificationAt, occurrence.timezone)}</small> : null}
                     {canComplete || canSnooze ? <div className="rail-actions">
                       {canComplete ? <button
                         className="rail-action rail-action--complete"
@@ -1930,15 +2549,16 @@ function App() {
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
                         onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}
                       >
-                        ✓ {occurrence.kind === "payment" ? "Оплачено" : "Выполнено"}
+                        {occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение"}
                       </button> : null}
                       {canSnooze ? <button
                         className="rail-action"
                         type="button"
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
+                        aria-label="Напомнить через час"
                         onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze")}
                       >
-                        +1 час
+                        Через час
                       </button> : null}
                     </div> : null}
                   </div>
@@ -1949,109 +2569,15 @@ function App() {
         )}
       </section>
 
-      <section className="plans-section">
-        <div className="section-heading">
-          <h2>Дальше по плану</h2>
-          <span>{visibleReminders.length}</span>
-        </div>
-        {!loading && visibleReminders.length === 0 ? (
-          <button className="empty-plan" onClick={openCreate}>
-            <b>Добавить первое напоминание</b>
-            <span>Разовое или повторяющееся — бот проследит за выполнением.</span>
-          </button>
-        ) : (
-          <div className="plan-list">
-            {visibleReminders.map((reminder) => {
-              const responsible = reminder.assignment.mode === "person"
-                ? memberMap.get(reminder.assignment.responsibleUserId)
-                : undefined;
-              const missingResponsible = reminder.assignment.mode === "person" && !responsible;
-              const canManageReminder = reminder.visibility === "group"
-                ? actor?.role === "owner" || actor?.role === "organizer"
-                : reminder.creatorUserId === actorId ||
-                  (reminder.assignment.mode === "person" && reminder.assignment.responsibleUserId === actorId);
-              return (
-                <article className={`plan-row plan-row--${reminder.status}`} key={reminder.reminderId}>
-                  <div className="plan-date" aria-hidden="true">
-                    <span>{reminder.schedule.frequency === "once" ? "→" : "↻"}</span>
-                  </div>
-                  <div className="plan-copy">
-                    <h3>{reminder.title}</h3>
-                    <p>{scheduleLabel(reminder.schedule)}</p>
-                    <small>{reminder.assignment.mode === "anyone" ? "Любой участник" : memberName(responsible)}</small>
-                  </div>
-                  <span className={`status-dot status-dot--${reminder.status}`} />
-                  {canManageReminder ? (
-                    <div className="series-actions" aria-label={`Управление серией: ${reminder.title}`}>
-                      <button
-                        type="button"
-                        disabled={managingReminderId === reminder.reminderId}
-                        onClick={() => openEdit(reminder)}
-                      >
-                        Изменить
-                      </button>
-                      <button
-                        type="button"
-                        disabled={
-                          managingReminderId === reminder.reminderId ||
-                          (reminder.status === "paused" && missingResponsible)
-                        }
-                        onClick={() => void manageReminder(
-                          reminder,
-                          reminder.status === "paused" ? "resume" : "pause",
-                        )}
-                      >
-                        {reminder.status === "paused" ? "Продолжить" : "Пауза"}
-                      </button>
-                      <button
-                        className="series-actions__archive"
-                        type="button"
-                        disabled={managingReminderId === reminder.reminderId}
-                        onClick={() => void manageReminder(reminder, "archive")}
-                      >
-                        Завершить
-                      </button>
-                    </div>
-                  ) : null}
-                  {reminder.status === "paused" && reminder.assignment.mode === "person" &&
-                  missingResponsible &&
-                  (actor?.role === "owner" || actor?.role === "organizer") ? (
-                    <div className="reassign-row">
-                      <span>Ответственный вышел — выберите нового</span>
-                      <select
-                        aria-label={`Новый ответственный: ${reminder.title}`}
-                        value={reassignment[reminder.reminderId] ?? ""}
-                        onChange={(event) => setReassignment((current) => ({
-                          ...current,
-                          [reminder.reminderId]: event.target.value,
-                        }))}
-                      >
-                        <option value="">Выбрать участника</option>
-                        {members.map((member) => (
-                          <option key={member.userId} value={member.userId}>
-                            {member.displayName}
-                          </option>
-                        ))}
-                      </select>
-                      <button
-                        type="button"
-                        disabled={reassigningReminderId === reminder.reminderId}
-                        onClick={() => void submitReassignment(reminder.reminderId)}
-                      >
-                        {reassigningReminderId === reminder.reminderId ? "Сохраняю…" : "Переназначить"}
-                      </button>
-                    </div>
-                  ) : null}
-                </article>
-              );
-            })}
-          </div>
-        )}
+      <section className="home-plan-teaser">
+        <button type="button" onClick={() => switchMainView("plan")}>
+          <span><small>План</small><b>{visibleReminders.length > 0 ? `Серий в работе: ${visibleReminders.length}` : "Пока пусто"}</b></span>
+          <span>{visibleReminders[0] ? `Ближайшее · ${(planDates.get(visibleReminders[0].reminderId) ?? []).map((date) => formatScheduleDate(date, true)).slice(0, 1).join("")}` : "Добавить напоминание"}</span>
+          <UiIcon name="arrow-right" />
+        </button>
       </section>
 
-      <button className="floating-create" disabled={!workspaceId} onClick={openCreate}>
-        <span aria-hidden="true">＋</span> Новое напоминание
-      </button>
+      <BottomNavigation view="home" onChange={switchMainView} onCreate={openCreate} createDisabled={!workspaceId} />
     </main>
   );
 }

@@ -106,6 +106,15 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     },
     occurrences: {
       listActionableForActor: vi.fn().mockResolvedValue([]),
+      listHistoryForActor: vi.fn().mockResolvedValue([]),
+      updateCurrentForActor: vi.fn().mockImplementation(
+        async (_workspaceId, occurrenceId, draft) => ({
+          ...draft,
+          workspaceId: "workspace-a",
+          occurrenceId,
+          status: "pending",
+        }),
+      ),
     },
     occurrenceActions: {
       execute: vi.fn().mockResolvedValue({
@@ -336,6 +345,71 @@ describe("handleWorkspaceApi", () => {
     expect(response?.statusCode).toBe(200);
     expect(deps.occurrences.listActionableForActor).toHaveBeenCalledWith(
       "workspace-a",
+      20,
+    );
+  });
+
+  it("returns the actor's completed and cancelled occurrence history", async () => {
+    const deps = dependencies();
+    const response = await handleWorkspaceApi(
+      { httpMethod: "GET", path: "/api/history", headers: workspaceHeaders },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.occurrences.listHistoryForActor).toHaveBeenCalledWith(
+      "workspace-a",
+      20,
+    );
+  });
+
+  it("edits only the selected current occurrence with a one-off deadline", async () => {
+    const deps = dependencies(actor("organizer"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/occurrences/occurrence-a",
+        headers: workspaceHeaders,
+        body: JSON.stringify({
+          title: "Сделать сегодня",
+          description: null,
+          actionUrl: null,
+          amountMinor: null,
+          currency: null,
+          visibility: "group",
+          assignment: { mode: "person", responsibleUserId: 20 },
+          watcherUserIds: [],
+          dueLocalDate: "2026-08-25",
+          timing: { kind: "timed", timeLocal: "20:30" },
+          timezone: "Europe/Moscow",
+          notificationPolicy: {
+            leadMinutes: 0,
+            repeatIntervalMinutes: 360,
+            ignoreQuietHours: false,
+            escalation: { enabled: false },
+          },
+        }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.occurrences.updateCurrentForActor).toHaveBeenCalledWith(
+      "workspace-a",
+      "occurrence-a",
+      expect.objectContaining({
+        title: "Сделать сегодня",
+        schedule: {
+          version: 1,
+          frequency: "once",
+          date: "2026-08-25",
+          timing: { kind: "timed", timeLocal: "20:30" },
+        },
+      }),
       20,
     );
   });

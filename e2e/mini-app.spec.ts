@@ -60,10 +60,19 @@ interface ApiOccurrence {
   currency: string | null;
   visibility: "group" | "private";
   assignment: { mode: "person"; responsibleUserId: number } | { mode: "anyone" };
-  status: "pending" | "overdue" | "completed";
+  status: "pending" | "overdue" | "completed" | "cancelled";
   timezone: string;
   nextNotificationAt: string | null;
   undoUntil: string | null;
+  actionUrl?: string | null;
+  completedBy?: number | null;
+  completedByDisplayName?: string | null;
+  completedAt?: string | null;
+  cancelledBy?: number | null;
+  cancellationReason?: string | null;
+  cancelledAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface ApiState {
@@ -278,7 +287,10 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ reminders: state.reminders[selected] });
     }
     if (method === "GET" && path === "/api/dashboard") {
-      return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status !== "completed") });
+      return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "pending" || item.status === "overdue") });
+    }
+    if (method === "GET" && path === "/api/history") {
+      return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "completed" || item.status === "cancelled") });
     }
     if (method === "POST" && path === "/api/reminders") {
       const created = reminder(selected, `created-${state.reminders[selected].length}`, String(body?.title), {
@@ -337,6 +349,9 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       if (actionMatch[2] === "complete") {
         item.status = "completed";
         item.undoUntil ??= new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        item.completedBy = 10;
+        item.completedByDisplayName = "Анна";
+        item.completedAt = new Date().toISOString();
       }
       if (actionMatch[2] === "undo-completion" && state.undoErrorCode) {
         return fulfill({ error: "Undo window expired", code: state.undoErrorCode }, 409);
@@ -346,6 +361,13 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
         item.undoUntil = null;
       }
       if (actionMatch[2] === "snooze") item.nextNotificationAt = "2026-08-14T10:00:00.000Z";
+      return fulfill({ occurrence: item });
+    }
+    const occurrenceUpdateMatch = path.match(/^\/api\/occurrences\/([^/]+)$/);
+    if (method === "PATCH" && occurrenceUpdateMatch) {
+      const item = state.occurrences[selected].find((candidate) => candidate.occurrenceId === occurrenceUpdateMatch[1]);
+      if (!item) return fulfill({ error: "Not found" }, 404);
+      Object.assign(item, body, { updatedAt: new Date().toISOString() });
       return fulfill({ occurrence: item });
     }
     return fulfill({ error: `Unhandled E2E route: ${method} ${path}` }, 501);
@@ -392,8 +414,10 @@ test("isolates data when switching between groups", async ({ page }) => {
   const createButton = page.getByRole("button", { name: "Новое напоминание" });
   await expect(createButton).toBeEnabled();
   expect(await createButton.evaluate((element) => getComputedStyle(element).cursor)).toBe("pointer");
+  await page.getByRole("button", { name: "План", exact: true }).click();
   await expect(page.getByText("Передать показания")).toBeVisible();
   await page.getByRole("combobox", { name: "Выбранная группа" }).selectOption("home");
+  await page.getByRole("button", { name: "План", exact: true }).click();
   await expect(page.getByText("Полить цветы")).toBeVisible();
   await expect(page.getByText("Передать показания")).toHaveCount(0);
   expect(state.requests.filter((item) => item.path !== "/api/workspaces").at(-1)?.workspaceId)
@@ -413,10 +437,29 @@ test("shows a Telegram launch recovery screen without calling the API", async ({
 
   await expect(page.getByRole("alert")).toContainText("Попробуйте обновить");
   await expect(page.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  await expect(page.getByRole("link", { name: /Открыть чат с ботом/ }))
+    .toHaveAttribute("href", "https://t.me/zvenfit_reminder_bot?start=panel");
   await expect(page.getByRole("button", { name: /Закрыть/ })).toHaveCount(0);
   await expect(page.getByText("Missing X-Telegram-Init-Data")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
   expect(apiRequests).toBe(0);
+});
+
+test("keeps the first screen readable at the 320px Telegram width", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.setViewportSize({ width: 320, height: 700 });
+
+  await expect(page.getByRole("heading", { name: "Требует внимания" })).toBeVisible();
+  const headingSize = await page.getByRole("heading", { name: "Требует внимания" })
+    .evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+  expect(headingSize).toBeLessThanOrEqual(22);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const headerBox = await page.locator(".home-header").boundingBox();
+  expect(headerBox?.width ?? 321).toBeLessThanOrEqual(288);
+
+  await page.getByRole("button", { name: "План", exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
 test("recovers from an empty workspace response without leaving disabled controls", async ({ page }) => {
@@ -542,6 +585,7 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
 
   await page.getByRole("radio", { name: /Платёж/ }).click();
   await expect(page.getByRole("textbox", { name: "Что нужно оплатить" })).toBeVisible();
+  await page.getByText("Дополнительные настройки", { exact: true }).click();
   await expect(page.getByRole("spinbutton", { name: /Сумма/ })).toHaveValue("");
   await expect(page.getByRole("heading", { name: "Пока не оплачено" })).toBeVisible();
 
@@ -597,13 +641,40 @@ test("shows Telegram-style avatars in the participant selector", async ({ page }
     .toBe(true);
 });
 
+test("supports arrow-key navigation in tabs, radio groups, and the participant selector", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+
+  const mine = page.getByRole("tab", { name: "Моя лента" });
+  const group = page.getByRole("tab", { name: "Вся группа" });
+  await mine.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(group).toBeFocused();
+  await expect(group).toHaveAttribute("aria-selected", "true");
+
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  const task = page.getByRole("radio", { name: /Поручение/ });
+  const payment = page.getByRole("radio", { name: /Платёж/ });
+  await task.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(payment).toBeFocused();
+  await expect(payment).toHaveAttribute("aria-checked", "true");
+
+  const selector = page.getByRole("button", { name: "Ответственный" });
+  await selector.focus();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("option").first()).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(selector).toBeFocused();
+});
+
 test("lets a member create only a personal reminder for themselves", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
   await page.getByRole("combobox", { name: "Выбранная группа" }).selectOption("home");
   await page.getByRole("button", { name: "Новое напоминание" }).click();
 
-  await expect(page.getByRole("button", { name: /Групповое/ })).toBeDisabled();
+  await expect(page.getByRole("radio", { name: /Групповое/ })).toBeDisabled();
   await expect(page.locator(".choice-card.is-selected")).toContainText("Личное");
   await expect(page.getByRole("button", { name: "Ответственный" })).toContainText("Анна");
 
@@ -619,13 +690,89 @@ test("snoozes, completes, and undoes an occurrence", async ({ page }) => {
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
 
-  await card.getByRole("button", { name: "+1 час" }).click();
+  await card.getByRole("button", { name: "Напомнить через час" }).click();
   await expect(page.getByText("Следующий сигнал — через час")).toBeVisible();
-  await card.getByRole("button", { name: "✓ Оплачено" }).click();
+  await card.getByRole("button", { name: "Отметить оплату" }).click();
   await expect(page.getByText("Можно отменить в течение 10 минут")).toBeVisible();
   await expect(card).toHaveCount(0);
   await page.getByRole("button", { name: "Отменить" }).click();
   await expect(page.getByText("Оплатить интернет")).toBeVisible();
+});
+
+test("opens one calm detail screen with deadline, next signal, and actions", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+
+  await page.getByRole("tab", { name: "Вся группа" }).click();
+  await page.getByRole("button", { name: /Забрать паспорт/ }).click();
+
+  await expect(page.getByRole("heading", { name: "Забрать паспорт" })).toBeVisible();
+  await expect(page.getByText(/Просрочено на/).first()).toBeVisible();
+  await expect(page.getByText("Следующий сигнал", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Отметить выполнение" })).toBeVisible();
+});
+
+test("shows three concrete future dates for a recurring plan", async ({ page }) => {
+  const state = createState();
+  const target = state.reminders.team.find((item) => item.reminderId === "meters")!;
+  target.schedule = {
+    version: 1,
+    frequency: "monthly",
+    startDate: "2026-01-01",
+    timing: { kind: "timed", timeLocal: "19:00" },
+    interval: 1,
+    day: { type: "dayOfMonth", value: 25, overflow: "lastDay" },
+  };
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: "План", exact: true }).click();
+  const row = page.getByRole("article").filter({ hasText: "Передать показания" });
+  await expect(row.getByLabel("Три ближайших срока").locator("span")).toHaveCount(3);
+  await row.getByRole("button", { name: /Передать показания/ }).click();
+  await expect(page.getByText("Ближайшие сроки", { exact: true })).toBeVisible();
+});
+
+test("edits only one current occurrence without changing the series", async ({ page }) => {
+  const state = createState();
+  const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
+  item.reminderId = "meters";
+  item.title = "Передать показания сейчас";
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Передать показания сейчас/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  await expect(page.getByRole("radio", { name: /Только этот срок/ })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("heading", { name: "Когда он должен быть выполнен" })).toBeVisible();
+  await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Передать показания сегодня");
+  await page.getByRole("button", { name: "Сохранить этот срок" }).click();
+
+  expect(state.requests.find((request) =>
+    request.method === "PATCH" && request.path === "/api/occurrences/internet"))
+    .toMatchObject({ body: { title: "Передать показания сегодня", dueLocalDate: expect.any(String) } });
+  expect(state.reminders.team.find((reminder) => reminder.reminderId === "meters")?.title)
+    .toBe("Передать показания");
+});
+
+test("keeps completed and cancelled facts in an auditable history", async ({ page }) => {
+  const state = createState();
+  state.occurrences.team.push(occurrence("meters-july", "Передать показания", {
+    reminderId: "meters",
+    status: "completed",
+    completedBy: 20,
+    completedByDisplayName: "Иван",
+    completedAt: "2026-08-12T10:30:00.000Z",
+    createdAt: "2026-08-10T10:00:00.000Z",
+    updatedAt: "2026-08-12T10:30:00.000Z",
+  }));
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: "История", exact: true }).click();
+  const history = page.getByRole("button", { name: /Передать показания.*Выполнено.*Иван/ });
+  await expect(history).toBeVisible();
+  await history.click();
+  await expect(page.getByText("История этого повтора", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Выполнение отметил/)).toBeVisible();
+  await expect(page.getByText(/Иван/).last()).toBeVisible();
 });
 
 test("hides Undo when its completion window expires", async ({ page }) => {
@@ -635,7 +782,7 @@ test("hides Undo when its completion window expires", async ({ page }) => {
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
 
-  await card.getByRole("button", { name: "✓ Оплачено" }).click();
+  await card.getByRole("button", { name: "Отметить оплату" }).click();
   await expect(page.getByRole("button", { name: "Отменить" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Отменить" })).toHaveCount(0, { timeout: 3000 });
 });
@@ -646,16 +793,17 @@ test("dismisses stale Undo after the server rejects it", async ({ page }) => {
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
 
-  await card.getByRole("button", { name: "✓ Оплачено" }).click();
+  await card.getByRole("button", { name: "Отметить оплату" }).click();
   await page.getByRole("button", { name: "Отменить" }).click();
 
   await expect(page.getByRole("button", { name: "Отменить" })).toHaveCount(0);
-  await expect(page.getByRole("alert")).toContainText("Undo window expired");
+  await expect(page.getByRole("alert")).toContainText("Отменить выполнение уже нельзя: прошло 10 минут.");
 });
 
 test("reassigns a paused reminder and manages organizer access", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
+  await page.getByRole("button", { name: "План", exact: true }).click();
   await page.getByRole("tab", { name: "Вся группа" }).click();
 
   const paused = page.getByRole("article").filter({ hasText: "Заказать воду" });
@@ -664,6 +812,7 @@ test("reassigns a paused reminder and manages organizer access", async ({ page }
   await expect(page.getByText("Ответственный изменён, напоминание снова активно")).toBeVisible();
   await expect(paused.getByText("Ответственный вышел")).toHaveCount(0);
 
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
   await page.getByRole("button", { name: /Участники/ }).click();
   await page.getByRole("combobox", { name: "Роль: Иван" }).selectOption("organizer");
   await expect(page.getByText("Доступ организатора выдан")).toBeVisible();
@@ -672,15 +821,18 @@ test("reassigns a paused reminder and manages organizer access", async ({ page }
 test("pauses, resumes, and archives a reminder series", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
+  await page.getByRole("button", { name: "План", exact: true }).click();
   await page.getByRole("tab", { name: "Вся группа" }).click();
   const row = page.getByRole("article").filter({ hasText: "Передать показания" });
 
-  await row.getByRole("button", { name: "Пауза" }).click();
+  await row.getByRole("button", { name: /Передать показания/ }).click();
+  await page.getByRole("button", { name: "Поставить на паузу" }).click();
   await expect(page.getByText("Серия приостановлена")).toBeVisible();
-  await row.getByRole("button", { name: "Продолжить" }).click();
+  await page.getByRole("button", { name: "Продолжить" }).click();
   await expect(page.getByText("Серия продолжена")).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
-  await row.getByRole("button", { name: "Завершить" }).click();
+  await page.getByRole("button", { name: "Архивировать" }).click();
+  await expect(page.getByRole("alertdialog")).toContainText("останутся в истории");
+  await page.getByRole("alertdialog").getByRole("button", { name: "Архивировать" }).click();
   await expect(page.getByText("Серия завершена")).toBeVisible();
   await expect(row).toHaveCount(0);
 });
@@ -699,13 +851,15 @@ test("edits the current and future definition of a reminder series", async ({ pa
     escalation: { enabled: false },
   };
   await openApp(page, state);
+  await page.getByRole("button", { name: "План", exact: true }).click();
   await page.getByRole("tab", { name: "Вся группа" }).click();
   const row = page.getByRole("article").filter({ hasText: "Передать показания" });
 
-  await row.getByRole("button", { name: "Изменить" }).click();
+  await row.getByRole("button", { name: /Передать показания/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
   await expect(page.getByRole("heading", { name: "Что изменить?" })).toBeVisible();
   await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Передать новые показания");
-  await page.getByRole("button", { name: "Сохранить" }).click();
+  await page.getByRole("button", { name: "Сохранить серию" }).click();
 
   await expect(page.getByText("Передать новые показания")).toBeVisible();
   expect(state.requests.find((item) =>
@@ -732,8 +886,8 @@ test("keeps the creator actions after the creator becomes an ordinary member", a
   await openApp(page, state);
 
   const card = page.getByRole("article").filter({ hasText: "Передать показания" }).first();
-  await expect(card.getByRole("button", { name: "✓ Выполнено" })).toBeVisible();
-  await expect(card.getByRole("button", { name: "+1 час" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Отметить выполнение" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Напомнить через час" })).toBeVisible();
 });
 
 test("does not offer occurrence actions to an unrelated ordinary member", async ({ page }) => {
@@ -747,8 +901,8 @@ test("does not offer occurrence actions to an unrelated ordinary member", async 
   await page.getByRole("tab", { name: "Вся группа" }).click();
   const card = page.getByRole("article").filter({ hasText: "Чужое поручение" });
 
-  await expect(card.getByRole("button", { name: "✓ Выполнено" })).toHaveCount(0);
-  await expect(card.getByRole("button", { name: "+1 час" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Отметить выполнение" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Напомнить через час" })).toHaveCount(0);
 });
 
 test("updates group rhythm and confirms ownership transfer", async ({ page }) => {
@@ -786,7 +940,7 @@ test("warns before assigning a personal reminder to a user without a private cha
   const state = createState();
   await openApp(page, state);
   await page.getByRole("button", { name: "Новое напоминание" }).click();
-  await page.getByRole("button", { name: /Личное/ }).click();
+  await page.getByRole("radio", { name: /Личное/ }).click();
   await page.getByRole("button", { name: "Ответственный" }).click();
   await page.getByRole("option", { name: /Я/ }).click();
   await expect(page.getByText(/Я сначала отправил боту \/start/)).toBeVisible();

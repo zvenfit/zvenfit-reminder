@@ -113,6 +113,7 @@ export interface ReminderOccurrence {
   dueAt: string;
   title: string;
   description: string | null;
+  actionUrl?: string | null;
   amountMinor: number | null;
   currency: string | null;
   visibility: ReminderVisibility;
@@ -123,6 +124,17 @@ export interface ReminderOccurrence {
   timezone: string;
   nextNotificationAt: string | null;
   undoUntil: string | null;
+  snoozedBy?: number | null;
+  snoozedAt?: string | null;
+  snoozeUntil?: string | null;
+  completedBy?: number | null;
+  completedByDisplayName?: string | null;
+  completedAt?: string | null;
+  cancelledBy?: number | null;
+  cancellationReason?: string | null;
+  cancelledAt?: string | null;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export type CreateReminderBody = Omit<
@@ -135,6 +147,11 @@ export type CreateReminderBody = Omit<
   | "createdAt"
   | "updatedAt"
 >;
+
+export type UpdateOccurrenceBody = Omit<CreateReminderBody, "schedule"> & {
+  dueLocalDate: string;
+  timing: DeadlineTiming;
+};
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
 const MOCK_MODE = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
@@ -198,18 +215,48 @@ const mockReminders: Reminder[] = [
     timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 0, repeatIntervalMinutes: 360, ignoreQuietHours: false, escalation: { enabled: false } },
     status: "active", version: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   },
+  {
+    workspaceId: "demo", reminderId: "passport", kind: "task", title: "Забрать готовый паспорт", description: "Взять старый паспорт и расписку из МФЦ.", actionUrl: "https://example.com/passport", amountMinor: null, currency: null,
+    visibility: "group", creatorUserId: 10, assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [10],
+    schedule: { version: 1, frequency: "once", date: "2026-08-16", timing: { kind: "timed", timeLocal: "18:00" } },
+    timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 60, repeatIntervalMinutes: 180, ignoreQuietHours: false, escalation: { enabled: false } },
+    status: "archived", version: 1, createdAt: new Date(Date.now() - 8 * 86_400_000).toISOString(), updatedAt: new Date().toISOString(),
+  },
+  {
+    workspaceId: "demo", reminderId: "internet", kind: "payment", title: "Оплатить домашний интернет", description: "Лицевой счёт 408-21. Оплатить до отключения.", actionUrl: "https://example.com/pay", amountMinor: 89000, currency: "RUB",
+    visibility: "group", creatorUserId: 10, assignment: { mode: "person", responsibleUserId: 10 }, watcherUserIds: [],
+    schedule: { version: 1, frequency: "monthly", startDate: "2026-01-01", timing: { kind: "timed", timeLocal: "19:00" }, interval: 1, day: { type: "dayOfMonth", value: 17, overflow: "lastDay" } },
+    timezone: "Europe/Moscow", notificationPolicy: { leadMinutes: 1440, repeatIntervalMinutes: 360, ignoreQuietHours: false, escalation: { enabled: false } },
+    status: "archived", version: 2, createdAt: new Date(Date.now() - 90 * 86_400_000).toISOString(), updatedAt: new Date().toISOString(),
+  },
 ];
 
 const mockOccurrences: ReminderOccurrence[] = [
   {
     workspaceId: "demo", occurrenceId: "passport", reminderId: "passport", dueAt: new Date(Date.now() - 18 * 60 * 60 * 1000).toISOString(),
-    kind: "task", title: "Забрать готовый паспорт", description: null, amountMinor: null, currency: null, visibility: "group",
-    assignment: { mode: "person", responsibleUserId: 20 }, status: "overdue", timezone: "Europe/Moscow", nextNotificationAt: new Date().toISOString(), undoUntil: null,
+    kind: "task", title: "Забрать готовый паспорт", description: "Взять старый паспорт и расписку из МФЦ.", actionUrl: "https://example.com/passport", amountMinor: null, currency: null, visibility: "group",
+    assignment: { mode: "person", responsibleUserId: 20 }, status: "overdue", timezone: "Europe/Moscow", nextNotificationAt: new Date(Date.now() + 42 * 60 * 1000).toISOString(), undoUntil: null,
+    createdAt: new Date(Date.now() - 8 * 86_400_000).toISOString(), updatedAt: new Date().toISOString(),
   },
   {
     workspaceId: "demo", occurrenceId: "internet", reminderId: "internet", dueAt: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
-    kind: "payment", title: "Оплатить домашний интернет", description: null, amountMinor: 89000, currency: "RUB", visibility: "group",
-    assignment: { mode: "person", responsibleUserId: 10 }, status: "pending", timezone: "Europe/Moscow", nextNotificationAt: new Date().toISOString(), undoUntil: null,
+    kind: "payment", title: "Оплатить домашний интернет", description: "Лицевой счёт 408-21. Оплатить до отключения.", actionUrl: "https://example.com/pay", amountMinor: 89000, currency: "RUB", visibility: "group",
+    assignment: { mode: "person", responsibleUserId: 10 }, status: "pending", timezone: "Europe/Moscow", nextNotificationAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(), undoUntil: null,
+    createdAt: new Date(Date.now() - 30 * 86_400_000).toISOString(), updatedAt: new Date().toISOString(),
+  },
+  {
+    workspaceId: "demo", occurrenceId: "utilities-july", reminderId: "utilities", dueAt: new Date(Date.now() - 23 * 86_400_000).toISOString(),
+    kind: "task", title: "Передать показания счётчиков", description: null, actionUrl: null, amountMinor: null, currency: null, visibility: "group",
+    assignment: { mode: "person", responsibleUserId: 20 }, status: "completed", timezone: "Europe/Moscow", nextNotificationAt: null, undoUntil: null,
+    completedBy: 20, completedByDisplayName: "Иван", completedAt: new Date(Date.now() - 22 * 86_400_000).toISOString(),
+    createdAt: new Date(Date.now() - 31 * 86_400_000).toISOString(), updatedAt: new Date(Date.now() - 22 * 86_400_000).toISOString(),
+  },
+  {
+    workspaceId: "demo", occurrenceId: "water-cancelled", reminderId: "water", dueAt: new Date(Date.now() - 5 * 86_400_000).toISOString(),
+    kind: "payment", title: "Заказать воду в офис", description: "Две бутыли по 19 литров.", actionUrl: null, amountMinor: 180000, currency: "RUB", visibility: "group",
+    assignment: { mode: "anyone" }, status: "cancelled", timezone: "Europe/Moscow", nextNotificationAt: null, undoUntil: null,
+    cancelledBy: 10, cancellationReason: "Поставщик перенёс доставку", cancelledAt: new Date(Date.now() - 4 * 86_400_000).toISOString(),
+    createdAt: new Date(Date.now() - 10 * 86_400_000).toISOString(), updatedAt: new Date(Date.now() - 4 * 86_400_000).toISOString(),
   },
 ];
 
@@ -265,6 +312,17 @@ export function loadDashboard(): Promise<{ occurrences: ReminderOccurrence[] }> 
     });
   }
   return api("/api/dashboard");
+}
+
+export function loadHistory(): Promise<{ occurrences: ReminderOccurrence[] }> {
+  if (MOCK_MODE) {
+    return Promise.resolve({
+      occurrences: inSelectedWorkspace(mockOccurrences)
+        .filter((occurrence) => occurrence.status === "completed" || occurrence.status === "cancelled")
+        .sort((left, right) => new Date(right.updatedAt ?? right.dueAt).getTime() - new Date(left.updatedAt ?? left.dueAt).getTime()),
+    });
+  }
+  return api("/api/history");
 }
 
 export function listReminders(): Promise<{ reminders: Reminder[] }> {
@@ -363,6 +421,36 @@ export function updateReminder(
     return Promise.resolve({ reminder });
   }
   return api(`/api/reminders/${encodeURIComponent(reminderId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function updateOccurrence(
+  occurrenceId: string,
+  body: UpdateOccurrenceBody,
+): Promise<{ occurrence: ReminderOccurrence }> {
+  if (MOCK_MODE) {
+    const occurrence = mockOccurrences.find((item) =>
+      item.workspaceId === selectedWorkspaceId && item.occurrenceId === occurrenceId)!;
+    const localTime = body.timing.kind === "timed" ? body.timing.timeLocal : "12:00";
+    Object.assign(occurrence, {
+      kind: body.kind,
+      title: body.title,
+      description: body.description,
+      actionUrl: body.actionUrl,
+      amountMinor: body.amountMinor,
+      currency: body.currency,
+      visibility: body.visibility,
+      assignment: body.assignment,
+      timezone: body.timezone,
+      dueAt: new Date(`${body.dueLocalDate}T${localTime}:00`).toISOString(),
+      nextNotificationAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    return Promise.resolve({ occurrence });
+  }
+  return api(`/api/occurrences/${encodeURIComponent(occurrenceId)}`, {
     method: "PATCH",
     body: JSON.stringify(body),
   });

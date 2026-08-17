@@ -7,6 +7,7 @@ import {
 } from "react";
 import { getMemberAvatar, type WorkspaceMember } from "./api";
 import { avatarInitials, isSafeAvatarDataUrl } from "./avatar-utils";
+import { UiIcon } from "./ui-icon";
 
 function avatarHue(userId: number): CSSProperties {
   return { "--avatar-hue": String(Math.abs(userId * 47) % 360) } as CSSProperties;
@@ -44,7 +45,7 @@ export function MemberAvatar({ member, size = "regular" }: {
 function AnyoneAvatar({ size = "regular" }: { size?: "small" | "regular" }) {
   return (
     <span className={`member-avatar member-avatar--${size} member-avatar--anyone`} aria-hidden="true">
-      <span>◎</span>
+      <span><UiIcon name="target" /></span>
     </span>
   );
 }
@@ -64,6 +65,7 @@ export function PersonSelect({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const selectedMember = members.find((member) => String(member.userId) === value);
   const selectedAnyone = includeAnyone && value === "anyone";
 
@@ -79,26 +81,53 @@ export function PersonSelect({
   function choose(nextValue: string): void {
     onChange(nextValue);
     setOpen(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       setOpen(true);
+      requestAnimationFrame(() => {
+        const options = rootRef.current?.querySelectorAll<HTMLButtonElement>("button[role='option']");
+        const target = event.key === "ArrowUp" ? options?.[options.length - 1] : options?.[0];
+        target?.focus();
+      });
     }
     if (event.key === "Escape") setOpen(false);
+  }
+
+  function handleOptionKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const current = (event.target as HTMLElement).closest<HTMLButtonElement>("button[role='option']");
+    if (!current) return;
+    const options = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button[role='option']"));
+    const index = options.indexOf(current);
+    if (index < 0) return;
+    event.preventDefault();
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? options.length - 1
+        : (index + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+    options[nextIndex]?.focus();
   }
 
   return (
     <div
       className={open ? "person-select is-open" : "person-select"}
       ref={rootRef}
-      onKeyDown={(event) => {
-        if (event.key === "Escape") setOpen(false);
-      }}
+      onKeyDown={handleOptionKeyDown}
     >
       <button
         className="person-select__trigger"
+        ref={triggerRef}
         type="button"
         aria-label="Ответственный"
         aria-haspopup="listbox"
@@ -123,7 +152,7 @@ export function PersonSelect({
                 ? `Telegram: ${selectedMember.telegramDisplayName}`
                 : selectedMember?.username ? `@${selectedMember.username}` : "Участник группы"}</small>
         </span>
-        <span className="person-select__chevron" aria-hidden="true">⌄</span>
+        <span className="person-select__chevron" aria-hidden="true"><UiIcon name="chevron-down" /></span>
       </button>
 
       {open ? (
@@ -138,7 +167,7 @@ export function PersonSelect({
             >
               <AnyoneAvatar />
               <span><b>Может выполнить любой</b><small>Вся группа</small></span>
-              {selectedAnyone ? <span className="person-select__check" aria-hidden="true">✓</span> : null}
+              {selectedAnyone ? <span className="person-select__check" aria-hidden="true"><UiIcon name="check" /></span> : null}
             </button>
           ) : null}
           {members.map((member) => {
@@ -159,7 +188,7 @@ export function PersonSelect({
                     ? `Telegram: ${member.telegramDisplayName}`
                     : member.username ? `@${member.username}` : "Участник группы"}</small>
                 </span>
-                {selected ? <span className="person-select__check" aria-hidden="true">✓</span> : null}
+                {selected ? <span className="person-select__check" aria-hidden="true"><UiIcon name="check" /></span> : null}
               </button>
             );
           })}

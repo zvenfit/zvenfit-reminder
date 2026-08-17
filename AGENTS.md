@@ -73,3 +73,14 @@
 - Treat `.github/workflows/ci.yml` pushes to `main` as production deploys.
 - Do not silently change the YDB schema. Document migrations and make them safe
   for already provisioned databases.
+
+## Mini App design discipline
+
+- `docs/ux-design.md` is the source of truth for the approved Quiet Pulse design
+  contract. Preserve its invariants when changing `mini-app/**`.
+- Do not add a new font, icon language, radius, shadow, semantic color, or UI
+  primitive without first updating the design contract with the reason.
+- Check material UI changes at 320px and 412px in light and dark themes, including
+  short Telegram viewports, safe areas, focus states, and content overlap.
+- Keep `npm run check` and the Playwright Mini App suite passing when UI labels,
+  semantics, or interactions change.

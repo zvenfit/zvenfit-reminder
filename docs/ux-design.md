@@ -11,19 +11,127 @@ mobile agenda for commitments, not an administrative dashboard.
 The main screen has one job: answer "what needs attention now?" within a few
 seconds.
 
+## Approved design contract
+
+Approved: 17 August 2026. This section is the source of truth for Mini App UI
+changes. It records decisions that should not drift during routine feature
+work. Product behavior remains governed by [product-spec.md](product-spec.md).
+
+### Invariants
+
+1. **Quiet agenda, not a control panel.** Content and urgency outrank workspace
+   administration and decoration.
+2. **The attention rail is the signature.** Only the nearest relevant item may
+   use the strongest surface. Later items remain visually quieter and preserve
+   chronological continuity.
+3. **One typographic voice.** Onest is used for interface copy; IBM Plex Mono is
+   reserved for times, dates, amounts, and live numeric data. Do not introduce
+   another interface family or use monospace as decoration.
+4. **One component grammar.** Controls use a 12px radius, panels use 16px, and
+   circles are reserved for avatars, rail nodes, and status markers. Pills are
+   reserved for compact filters and statuses.
+5. **Semantic color is stable.** Pulse means primary action or next signal;
+   Coral means overdue or destructive; Done means completed; Amber means
+   approaching deadline or paused. Never use these colors as arbitrary accents.
+6. **Actions read as actions.** Labels use active, explicit language such as
+   `Отметить выполнение`, `Напомнить через час`, and `Архивировать`. A pending
+   action must not resemble a completed-state badge.
+7. **Mobile content is never covered.** Floating and sticky controls must not
+   obscure tasks or fields at 320px width, short Telegram viewports, or with the
+   software keyboard open.
+
+### Component and type scale
+
+| Role | Contract |
+| --- | --- |
+| Caption and numeric data | 12px; IBM Plex Mono only when the value is data |
+| Field label | 12px Onest, semibold |
+| Body and control | 14px Onest |
+| Compact and attention item title | 16px Onest, semibold or bold |
+| Section title | 18px Onest, bold |
+| Page title | 26px Onest, bold; 28px only on viewports from 680px |
+| Standard control | minimum 44px high |
+| Primary action | minimum 48px high |
+| Icon | one consistent outline SVG style; do not use OS-dependent Unicode glyphs |
+
+Use one border and spacing hierarchy before adding shadows. Shadows are allowed
+only for genuinely elevated or signature surfaces. Prefer whitespace and rules
+to nested cards.
+
+The mobile type scale is deliberately capped at 26px. A title must never force
+essential context or the first useful action below the initial viewport merely
+to create visual drama. Supporting copy must not drop below 12px.
+
+### Change protocol
+
+- Preserve these invariants during ordinary feature work.
+- If a product requirement conflicts with the contract, update this document
+  first and record the reason; do not introduce a silent exception in CSS.
+- Reuse or extend existing tokens and components before adding a new visual
+  primitive.
+- Review every material UI change at 320px and 412px in light and dark themes.
+- Verify visible focus, reduced motion, 44×44px targets, semantic state text,
+  safe-area behavior, and absence of horizontal overflow.
+- Run `npm run check` and the Mini App Playwright suite before handoff.
+
+Decision record: the August 2026 unification retained Quiet Pulse, the attention
+rail, and the semantic palette; it removed competing system fonts, decorative
+monospace, mixed Unicode icons, inconsistent radii, undersized controls, and
+content-covering mobile actions.
+
+### Maturity pass: 17 August 2026
+
+The second August iteration closed the remaining structural gaps without
+changing the Quiet Pulse signature:
+
+- the main screen now contains only current actionable occurrences and a quiet
+  link into the plan;
+- `Tasks`, `Plan`, and `History` are persistent primary destinations;
+- an occurrence and its series share one detail grammar for state, deadline,
+  responsible person, next signal, related link, amount, schedule, and audit
+  facts;
+- recurring schedules show three concrete future local dates in both the form
+  preview and Plan;
+- editing an active recurring occurrence explicitly chooses `Only this
+  occurrence` or `This and future`; the former uses an occurrence-scoped API and
+  audit event and does not mutate the series definition;
+- archive uses an accessible in-product confirmation dialog; native browser
+  confirmation is not part of the UI grammar;
+- launch recovery offers both refresh and a direct deep link to the bot;
+- the attention rail names relative overdue time and the next notification.
+
+This iteration was verified with group owner, ordinary member, unrelated
+member, private reminder, recurring series, reassignment, completion/undo,
+history, launch recovery, and narrow-viewport scenarios. The permanent browser
+suite covers mobile and desktop Chromium; the design review also covers 320px
+and 412px light/dark captures.
+
 ## Information architecture
 
 Primary navigation:
 
-- **Tasks**: overdue, today, upcoming, and paused work.
-- **Plan**: compact week visualization and later dates.
-- **History**: completed, cancelled, snoozed, reassigned, and reopened work.
+- **Tasks**: current pending and overdue occurrences that can be seen by the
+  actor. It is the only primary view with completion and quick snooze actions.
+- **Plan**: active and paused reminder definitions with their next three
+  concrete dates. Series management lives in the detail view, keeping the list
+  scannable.
+- **History**: completed and cancelled occurrences. Each row opens immutable
+  occurrence facts, including actor and timestamp; later reopen remains an
+  explicit product transition rather than an implicit row action.
 - **Settings**: workspace, roles, quiet hours, calendar subscription, and
   personal preferences; accessed from the profile control rather than occupying
   a primary bottom tab.
 
-Group reminders are the default scope. `Mine / All` filters are available on
-Tasks and Plan.
+Group reminders are the default scope. `Моя лента / Вся группа` filters are
+available on Tasks, Plan, and History. `Моя лента` means assigned to the
+actor, completable by anyone, or created by the actor; it does not imply private
+visibility.
+
+Typography stays deliberately compact: working-section headings such as
+`Требует внимания` are 20px, primary page titles are 26px on mobile and 28px on
+wide screens, and no ordinary product screen uses landing-page hero sizing.
+The workspace selector has its own compact control geometry and chevron; generic
+form-field heights and native select arrows must not leak into navigation.
 
 ## Main screen
 
@@ -64,18 +172,16 @@ are rows separated by spacing and rules, avoiding generic "card soup."
 
 ## Plan view
 
-The default planning horizon is one week, optimized for a narrow Telegram Mini
-App viewport.
+The default Plan view is a vertical series ledger. Every row names the human
+recurrence rule, responsible person, state, and up to three concrete local
+dates. This is more legible than a compressed week strip when series have
+monthly or yearly cadence, while still answering “what are the next actual
+dates?” without opening the form.
 
-```text
-13 Wed     14 Thu      15 Fri      16 Sat
-            ● 10:00     ● 09:00
-            Lab tests   Internet
-            Sergey      Anna
-```
-
-Selecting a date opens its agenda below the week strip. A month grid may be
-added later, but it is not the default mobile view.
+Selecting the row opens shared details. Edit, pause/resume, reassignment, and
+archive remain secondary controls below the dates. A calendar grid is not a
+default mobile primitive and may be added only for a demonstrated planning
+need.
 
 ## Creation flow
 
@@ -136,9 +242,10 @@ The detail screen prioritizes:
 
 Destructive or administrative actions stay out of the primary thumb zone.
 
-For recurring reminders, editing prompts for `Only this occurrence` or `This
-and future occurrences`. Completed history is visually read-only unless an
-organizer deliberately selects `Reopen`.
+For an active recurring occurrence, editing prompts for `Only this occurrence`
+or `This and future occurrences`. Plan-level edit starts directly in series
+scope because no single occurrence was selected. Completed history is visually
+read-only unless a later product transition deliberately exposes `Reopen`.
 
 ## Telegram copy and controls
 

@@ -250,8 +250,8 @@ Editing an active occurrence offers two scopes:
 - **Only this occurrence** changes its deadline, responsible person, content,
   or notification policy without changing the series.
 - **This and future occurrences** updates the reminder definition and the
-  current incomplete occurrence. This is the currently implemented edit mode;
-  completed history is unchanged. If the schedule changes, the current
+  current incomplete occurrence. Both edit scopes are implemented; completed
+  history is unchanged. If the series schedule changes, the current
   occurrence and its uniqueness slot move atomically; content-only edits keep
   the existing deadline. Editing and pausing are temporarily unavailable during
   the ten-minute completion undo window.
