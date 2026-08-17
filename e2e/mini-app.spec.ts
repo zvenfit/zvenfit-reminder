@@ -90,7 +90,10 @@ interface ApiState {
   undoErrorCode?: "undo_expired" | "not_actionable";
   workspaceFailuresRemaining?: number;
   workspaceDelayMs?: number;
+  dashboardFailuresRemaining?: number;
+  memberFailuresRemaining?: number;
   historyFailuresRemaining?: number;
+  createFailuresRemaining?: number;
 }
 
 const now = "2026-08-14T09:00:00.000Z";
@@ -261,6 +264,10 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ error: "Workspace not found", code: "not_found" }, 404);
     }
     if (method === "GET" && path === "/api/members") {
+      if ((state.memberFailuresRemaining ?? 0) > 0) {
+        state.memberFailuresRemaining = (state.memberFailuresRemaining ?? 1) - 1;
+        return fulfill({ error: "Temporary failure", code: "temporary_failure" }, 503);
+      }
       return fulfill({ members: state.members[selected] });
     }
     if (method === "GET" && /^\/api\/members\/\d+\/avatar$/.test(path)) {
@@ -292,6 +299,10 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ reminders: state.reminders[selected] });
     }
     if (method === "GET" && path === "/api/dashboard") {
+      if ((state.dashboardFailuresRemaining ?? 0) > 0) {
+        state.dashboardFailuresRemaining = (state.dashboardFailuresRemaining ?? 1) - 1;
+        return fulfill({ error: "Temporary failure", code: "temporary_failure" }, 503);
+      }
       return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "pending" || item.status === "overdue") });
     }
     if (method === "GET" && path === "/api/history") {
@@ -302,6 +313,10 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "completed" || item.status === "cancelled") });
     }
     if (method === "POST" && path === "/api/reminders") {
+      if ((state.createFailuresRemaining ?? 0) > 0) {
+        state.createFailuresRemaining = (state.createFailuresRemaining ?? 1) - 1;
+        return fulfill({ error: "Temporary failure", code: "temporary_failure" }, 503);
+      }
       const created = reminder(selected, `created-${state.reminders[selected].length}`, String(body?.title), {
         ...(body as Partial<ApiReminder>),
         workspaceId: selected,
@@ -501,6 +516,38 @@ test("shows the dashboard structure while the initial workspace is loading", asy
   }
 });
 
+test("retries a failed dashboard load from the contextual error", async ({ page }) => {
+  const state = createState();
+  // Vite's StrictMode runs the initial effect twice in E2E development mode.
+  state.dashboardFailuresRemaining = 2;
+  await installTelegramAndApi(page, state);
+
+  await page.goto("/");
+
+  const requestAlert = page.getByRole("alert");
+  await expect(requestAlert).toContainText("Задачи временно не загрузились");
+  await expect(page.getByText("3 участника")).toBeVisible();
+  await expect(page.getByText("Сейчас тихо")).toHaveCount(0);
+  const retryAction = requestAlert.getByRole("button", { name: "Загрузить данные" });
+  await expect(retryAction).toBeVisible();
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  const retryColors = await retryAction.evaluate((button) => {
+    const icon = button.querySelector(".ui-icon");
+    return {
+      button: getComputedStyle(button).color,
+      icon: icon ? getComputedStyle(icon).color : "missing",
+      stroke: icon ? getComputedStyle(icon).stroke : "missing",
+    };
+  });
+  expect(retryColors.icon).toBe(retryColors.button);
+  expect(retryColors.stroke).toBe(retryColors.button);
+  await retryAction.click();
+
+  await expect(page.getByText("Забрать паспорт")).toBeVisible();
+  await expect(requestAlert).toHaveCount(0);
+});
+
 test("keeps tasks and members available when history temporarily fails", async ({ page }) => {
   const state = createState();
   // Vite's StrictMode runs the initial effect twice in E2E development mode.
@@ -513,7 +560,7 @@ test("keeps tasks and members available when history temporarily fails", async (
 
   await page.getByRole("button", { name: "История", exact: true }).click();
   const historyAlert = page.getByRole("alert");
-  const retryAction = historyAlert.getByRole("button", { name: "Повторить" });
+  const retryAction = historyAlert.getByRole("button", { name: "Загрузить историю" });
   await expect(historyAlert).toContainText("История временно недоступна");
   await expect(retryAction).toBeVisible();
   expect(await historyAlert.evaluate((element) => Number.parseFloat(getComputedStyle(element).gap)))
@@ -601,6 +648,24 @@ test("manages verified members and publishes self-enrollment to the selected gro
   await expect(page.getByText("Новых участников: 1")).toBeVisible();
 });
 
+test("retries a failed member refresh without leaving the roster", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: /Участники/ }).click();
+  state.memberFailuresRemaining = 1;
+
+  await page.getByRole("button", { name: "Обновить", exact: true }).click();
+
+  const requestAlert = page.getByRole("alert");
+  await expect(requestAlert).toContainText("Сервис временно не отвечает");
+  await expect(page.getByRole("list", { name: "Подтверждённые участники" }))
+    .toContainText("Анна");
+  await requestAlert.getByRole("button", { name: "Обновить список" }).click();
+
+  await expect(requestAlert).toHaveCount(0);
+  await expect(page.getByText("Список уже актуален")).toBeVisible();
+});
+
 test("renames a member only inside the selected workspace and keeps the Telegram identity", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
@@ -666,6 +731,28 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
         schedule: { frequency: "once" },
       },
     });
+});
+
+test("keeps a reminder draft for a deliberate retry after a failed create", async ({ page }) => {
+  const state = createState();
+  state.createFailuresRemaining = 1;
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const title = page.getByRole("textbox", { name: "Что нужно сделать" });
+  const createAction = page.getByRole("button", { name: "Создать поручение" });
+  await title.fill("Заказать корм коту");
+  await createAction.click();
+
+  const requestAlert = page.getByRole("alert");
+  await expect(requestAlert).toContainText("Сервис временно не отвечает");
+  await expect(requestAlert.getByRole("button")).toHaveCount(0);
+  await expect(title).toHaveValue("Заказать корм коту");
+  await expect(createAction).toBeEnabled();
+
+  await createAction.click();
+  await expect(page.getByText("Заказать корм коту")).toBeVisible();
+  await expect(requestAlert).toHaveCount(0);
 });
 
 test("returns from the member roster without losing a reminder draft", async ({ page }) => {

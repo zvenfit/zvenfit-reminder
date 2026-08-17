@@ -354,6 +354,15 @@ all non-essential movement.
 - Load failure: keep cached content if present and offer `Try again`.
 - Actionable error banners keep the message and retry control as separate,
   spaced elements; an action is never appended inline to the error sentence.
+- Read failures use an explicit contextual verb such as `Load data`, `Load
+  history`, or `Refresh list`; a successful retry removes the banner without
+  moving the user to another screen.
+- Partial reads keep fulfilled or previously cached resources usable. A missing
+  resource shows `not loaded` and an em dash instead of a false zero, empty
+  plan, or `nothing needs attention` state.
+- Write failures retain the draft and the original action but are not replayed
+  automatically. A lost response may hide a successful write, so a generic
+  retry must never risk duplicate reminders, messages, or state transitions.
 - Save failure: retain every entered field and identify the invalid or failed
   action.
 

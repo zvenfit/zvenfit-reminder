@@ -561,7 +561,59 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.code === "telegram_unavailable") {
     return "Не удалось опубликовать кнопку в группе. Попробуйте ещё раз через минуту.";
   }
+  if (error instanceof ApiError && error.status === 429) {
+    return "Слишком много запросов. Подождите немного и попробуйте ещё раз.";
+  }
+  if (error instanceof ApiError && error.status >= 500) {
+    return "Сервис временно не отвечает. Попробуйте ещё раз.";
+  }
+  if (error instanceof TypeError) {
+    return "Не удалось связаться с сервисом. Проверьте интернет и попробуйте ещё раз.";
+  }
   return error instanceof Error ? error.message : "Что-то пошло не так";
+}
+
+interface ErrorRecovery {
+  label: string;
+  onRetry: () => void;
+}
+
+type DashboardResource = "tasks" | "plan" | "members";
+
+function dashboardFailureMessage(resources: DashboardResource[]): string {
+  if (resources.length > 1) {
+    return "Часть данных временно не загрузилась. Остальные разделы доступны.";
+  }
+  if (resources[0] === "tasks") {
+    return "Задачи временно не загрузились. План и участники доступны.";
+  }
+  if (resources[0] === "plan") {
+    return "План временно не загрузился. Задачи и участники доступны.";
+  }
+  return "Участники временно не загрузились. Задачи и план доступны.";
+}
+
+function RequestErrorBanner({
+  message,
+  recovery,
+}: {
+  message: string;
+  recovery?: ErrorRecovery | null;
+}) {
+  return (
+    <div
+      className={`error-banner${recovery ? " error-banner--actionable" : ""}`}
+      role="alert"
+    >
+      <span>{message}</span>
+      {recovery ? (
+        <button className="error-banner__action" type="button" onClick={recovery.onRetry}>
+          <UiIcon name="refresh" />
+          <span>{recovery.label}</span>
+        </button>
+      ) : null}
+    </div>
+  );
 }
 
 function App() {
@@ -578,6 +630,9 @@ function App() {
   const [occurrences, setOccurrences] = useState<ReminderOccurrence[]>([]);
   const [historyOccurrences, setHistoryOccurrences] = useState<ReminderOccurrence[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [dashboardLoadError, setDashboardLoadError] = useState<string | null>(null);
+  const [loadedDashboardResources, setLoadedDashboardResources] = useState<DashboardResource[]>([]);
+  const [failedDashboardResources, setFailedDashboardResources] = useState<DashboardResource[]>([]);
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
   const [detailReturnView, setDetailReturnView] = useState<MainView>("home");
@@ -618,6 +673,7 @@ function App() {
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
+  const [errorRecovery, setErrorRecovery] = useState<ErrorRecovery | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
   const timezoneReference = useMemo(() => new Date(), []);
@@ -709,16 +765,26 @@ function App() {
     upcomingScheduleDates(reminder.schedule, reminder.timezone, 3),
   ])), [visibleReminders]);
 
+  function clearError() {
+    setError(null);
+    setErrorRecovery(null);
+  }
+
+  function showError(value: unknown, recovery: ErrorRecovery | null = null) {
+    setError(typeof value === "string" ? value : errorMessage(value));
+    setErrorRecovery(recovery);
+  }
+
   function switchMainView(nextView: MainView) {
     setView(nextView);
-    setError(null);
+    clearError();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function openOccurrenceDetail(occurrenceId: string, returnView: MainView = "home") {
     setDetailTarget({ kind: "occurrence", id: occurrenceId });
     setDetailReturnView(returnView);
-    setError(null);
+    clearError();
     setView("detail");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -726,7 +792,7 @@ function App() {
   function openReminderDetail(reminderId: string, returnView: MainView = "plan") {
     setDetailTarget({ kind: "reminder", id: reminderId });
     setDetailReturnView(returnView);
-    setError(null);
+    clearError();
     setView("detail");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -742,8 +808,9 @@ function App() {
     const generation = ++refreshGenerationRef.current;
     selectWorkspace(selectedId);
     setLoading(true);
-    setError(null);
+    clearError();
     setHistoryError(null);
+    setDashboardLoadError(null);
     try {
       const [dashboardResult, remindersResult, membersResult, historyResult] = await Promise.allSettled([
         loadDashboard(),
@@ -751,18 +818,45 @@ function App() {
         listMembers(),
         loadHistory(),
       ]);
-      if (dashboardResult.status === "rejected") throw dashboardResult.reason;
-      if (remindersResult.status === "rejected") throw remindersResult.reason;
-      if (membersResult.status === "rejected") throw membersResult.reason;
       if (
         generation !== refreshGenerationRef.current ||
         activeWorkspaceIdRef.current !== selectedId
       ) {
         return;
       }
-      setOccurrences(dashboardResult.value.occurrences);
-      setReminders(remindersResult.value.reminders);
-      setMembers(membersResult.value.members);
+
+      const loadedResources: DashboardResource[] = [];
+      const failedResources: DashboardResource[] = [];
+      if (dashboardResult.status === "fulfilled") {
+        setOccurrences(dashboardResult.value.occurrences);
+        loadedResources.push("tasks");
+      } else {
+        failedResources.push("tasks");
+      }
+      if (remindersResult.status === "fulfilled") {
+        setReminders(remindersResult.value.reminders);
+        loadedResources.push("plan");
+      } else {
+        failedResources.push("plan");
+      }
+      if (membersResult.status === "fulfilled") {
+        setMembers(membersResult.value.members);
+        loadedResources.push("members");
+      } else {
+        failedResources.push("members");
+      }
+      setLoadedDashboardResources((current) => [
+        ...new Set([...current, ...loadedResources]),
+      ]);
+      setFailedDashboardResources(failedResources);
+      const unavailableResources = failedResources.filter(
+        (resource) => !loadedDashboardResources.includes(resource),
+      );
+      setDashboardLoadError(failedResources.length === 0
+        ? null
+        : unavailableResources.length === 0
+          ? "Не удалось обновить данные. Показываем последнюю загруженную версию."
+          : dashboardFailureMessage(unavailableResources));
       setHasLoadedDashboard(true);
       if (historyResult.status === "fulfilled") {
         setHistoryOccurrences(historyResult.value.occurrences);
@@ -775,8 +869,9 @@ function App() {
         generation === refreshGenerationRef.current &&
         activeWorkspaceIdRef.current === selectedId
       ) {
+        setFailedDashboardResources(["tasks", "plan", "members"]);
+        setDashboardLoadError(errorMessage(requestError));
         setHasLoadedDashboard(true);
-        setError(errorMessage(requestError));
       }
     } finally {
       if (
@@ -797,7 +892,7 @@ function App() {
     }
     void (async () => {
       setLoading(true);
-      setError(null);
+      clearError();
       try {
         const response = await listWorkspaces();
         setWorkspaces(response.workspaces);
@@ -807,6 +902,9 @@ function App() {
         if (!initial) {
           activeWorkspaceIdRef.current = null;
           setWorkspaceId(null);
+          setDashboardLoadError(null);
+          setLoadedDashboardResources([]);
+          setFailedDashboardResources([]);
           setOccurrences([]);
           setHistoryOccurrences([]);
           setReminders([]);
@@ -818,14 +916,17 @@ function App() {
         setWorkspaceId(initial.workspaceId);
         await refresh(initial.workspaceId);
       } catch (requestError) {
-        setError(errorMessage(requestError));
+        showError(requestError);
         setLoading(false);
       }
     })();
   }, [telegramAuthMissing, workspaceLoadAttempt]);
 
   function retryWorkspaceLoad() {
-    setError(null);
+    clearError();
+    setDashboardLoadError(null);
+    setLoadedDashboardResources([]);
+    setFailedDashboardResources([]);
     setHasLoadedDashboard(false);
     setWorkspaceLoadAttempt((attempt) => attempt + 1);
   }
@@ -847,8 +948,11 @@ function App() {
     setMemberSearch("");
     setConfirmingEnrollment(false);
     setNotice(null);
-    setError(null);
+    clearError();
     setHistoryError(null);
+    setDashboardLoadError(null);
+    setLoadedDashboardResources([]);
+    setFailedDashboardResources([]);
     setHasLoadedDashboard(false);
     setOccurrences([]);
     setHistoryOccurrences([]);
@@ -859,7 +963,7 @@ function App() {
 
   function openCreate() {
     if (!workspaceId) {
-      setError("Сначала подключите группу командой /setup.");
+      showError("Сначала подключите группу командой /setup.");
       return;
     }
     const defaultResponsible = actorId ?? members[0]?.userId;
@@ -873,7 +977,7 @@ function App() {
     setEditingReminderId(null);
     setEditingOccurrenceId(null);
     setEditScope("series");
-    setError(null);
+    clearError();
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -889,7 +993,7 @@ function App() {
       setOccurrenceTime(localDeadline.time);
       setOccurrenceAllDay(false);
     }
-    setError(null);
+    clearError();
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -900,7 +1004,7 @@ function App() {
     setSettingsForm(workspaceSettings(workspace));
     setOwnershipTarget("");
     setConfirmingOwnership(false);
-    setError(null);
+    clearError();
     setView("settings");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -913,7 +1017,7 @@ function App() {
     setEditingMemberUserId(null);
     setMemberDisplayNameDraft("");
     setConfirmingEnrollment(false);
-    setError(null);
+    clearError();
     setNotice(null);
     setView("members");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -924,7 +1028,7 @@ function App() {
     if (!actionWorkspaceId) return;
     const knownUserIds = new Set(members.map((member) => member.userId));
     setRefreshingMembers(true);
-    setError(null);
+    clearError();
     try {
       const response = await listMembers();
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
@@ -936,7 +1040,10 @@ function App() {
       }, 2600);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError, {
+          label: "Обновить список",
+          onRetry: () => void refreshMemberRoster(),
+        });
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -949,7 +1056,7 @@ function App() {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setPublishingEnrollment(true);
-    setError(null);
+    clearError();
     try {
       await publishMemberEnrollment();
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
@@ -960,7 +1067,7 @@ function App() {
       }, 3200);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -971,7 +1078,7 @@ function App() {
 
   async function saveWorkspaceSettings() {
     setSettingsSaving(true);
-    setError(null);
+    clearError();
     try {
       const { workspace } = await updateWorkspaceSettings(settingsForm);
       setWorkspaces((current) => current.map((item) =>
@@ -980,7 +1087,7 @@ function App() {
       setNotice("Ритм группы обновлён");
       window.setTimeout(() => setNotice(null), 2600);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      showError(requestError);
     } finally {
       setSettingsSaving(false);
     }
@@ -989,11 +1096,11 @@ function App() {
   async function confirmOwnershipTransfer() {
     const targetUserId = Number(ownershipTarget);
     if (!targetUserId) {
-      setError("Выберите нового владельца.");
+      showError("Выберите нового владельца.");
       return;
     }
     setTransferringOwnership(true);
-    setError(null);
+    clearError();
     try {
       const { workspace } = await transferWorkspaceOwnership(targetUserId);
       setWorkspaces((current) => current.map((item) =>
@@ -1011,7 +1118,7 @@ function App() {
       setNotice("Владелец группы изменён");
       window.setTimeout(() => setNotice(null), 2600);
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      showError(requestError);
     } finally {
       setTransferringOwnership(false);
     }
@@ -1038,15 +1145,15 @@ function App() {
   async function submitReminder() {
     if (!form.title.trim()) return;
     if (form.assignmentMode === "person" && !form.responsibleUserId) {
-      setError("Выберите ответственного.");
+      showError("Выберите ответственного.");
       return;
     }
     if (form.frequency === "weekly" && form.weekdays.length === 0) {
-      setError("Выберите хотя бы один день недели.");
+      showError("Выберите хотя бы один день недели.");
       return;
     }
     setSaving(true);
-    setError(null);
+    clearError();
     const amount = form.amountRub.trim() ? Math.round(Number(form.amountRub) * 100) : null;
     const responsibleUserId = Number(form.responsibleUserId);
     const editingReminder = reminders.find((reminder) =>
@@ -1115,7 +1222,7 @@ function App() {
       setView(editingOccurrenceId && editScope === "occurrence" ? "detail" : "plan");
       await refresh();
     } catch (requestError) {
-      setError(errorMessage(requestError));
+      showError(requestError);
     } finally {
       setSaving(false);
     }
@@ -1129,7 +1236,7 @@ function App() {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setActingOccurrenceId(occurrenceId);
-    setError(null);
+    clearError();
     try {
       if (action === "complete") {
         const { occurrence } = await completeOccurrence(occurrenceId);
@@ -1161,7 +1268,7 @@ function App() {
       }, 2600);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1175,7 +1282,7 @@ function App() {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setActingOccurrenceId(undoableOccurrence.occurrenceId);
-    setError(null);
+    clearError();
     try {
       const { occurrence } = await undoOccurrenceCompletion(
         undoableOccurrence.occurrenceId,
@@ -1202,7 +1309,7 @@ function App() {
         ) {
           setUndoableOccurrence(null);
         }
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1218,7 +1325,7 @@ function App() {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setUpdatingRoleUserId(userId);
-    setError(null);
+    clearError();
     try {
       const { member } = await updateMemberRole(userId, role);
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
@@ -1231,7 +1338,7 @@ function App() {
       }, 2600);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1243,7 +1350,7 @@ function App() {
   function editMemberDisplayName(member: WorkspaceMember) {
     setEditingMemberUserId(member.userId);
     setMemberDisplayNameDraft(member.displayName);
-    setError(null);
+    clearError();
   }
 
   async function saveMemberDisplayName(
@@ -1252,13 +1359,13 @@ function App() {
   ) {
     const normalized = nextDisplayName?.trim() ?? null;
     if (normalized !== null && normalized.length === 0) {
-      setError("Введите имя или верните имя из Telegram.");
+      showError("Введите имя или верните имя из Telegram.");
       return;
     }
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setUpdatingDisplayNameUserId(member.userId);
-    setError(null);
+    clearError();
     try {
       const { member: updated } = await updateMemberDisplayName(member.userId, normalized);
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
@@ -1272,7 +1379,7 @@ function App() {
       }, 2600);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1284,13 +1391,13 @@ function App() {
   async function submitReassignment(reminderId: string) {
     const responsibleUserId = Number(reassignment[reminderId]);
     if (!responsibleUserId) {
-      setError("Выберите нового ответственного.");
+      showError("Выберите нового ответственного.");
       return;
     }
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setReassigningReminderId(reminderId);
-    setError(null);
+    clearError();
     try {
       const { reminder } = await reassignReminder(reminderId, responsibleUserId);
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
@@ -1304,7 +1411,7 @@ function App() {
       void refresh(actionWorkspaceId);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1320,7 +1427,7 @@ function App() {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setManagingReminderId(reminder.reminderId);
-    setError(null);
+    clearError();
     try {
       const { reminder: updated } = await changeReminderLifecycle(reminder.reminderId, action);
       if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
@@ -1332,7 +1439,7 @@ function App() {
       void refresh(actionWorkspaceId);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
-        setError(errorMessage(requestError));
+        showError(requestError);
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1343,6 +1450,12 @@ function App() {
 
   const selectedWorkspace = workspaces.find((workspace) =>
     workspace.workspaceId === workspaceId);
+  const resourceUnavailable = (resource: DashboardResource) =>
+    failedDashboardResources.includes(resource) &&
+    !loadedDashboardResources.includes(resource);
+  const tasksUnavailable = resourceUnavailable("tasks");
+  const planUnavailable = resourceUnavailable("plan");
+  const membersUnavailable = resourceUnavailable("members");
   const selectedWorkspaceTimezone = selectedWorkspace
     ? describeTimezone(selectedWorkspace.timezone, timezoneReference)
     : null;
@@ -1484,19 +1597,34 @@ function App() {
             <h1>Кто может отвечать</h1>
             <p>В списке только люди, которых бот уже встретил и связал с этой Telegram-группой.</p>
           </div>
-          <div className="member-constellation" aria-label={`Подтверждено участников: ${members.length}`}>
+          <div
+            className="member-constellation"
+            aria-label={membersUnavailable
+              ? "Участники не загружены"
+              : `Подтверждено участников: ${members.length}`}
+          >
             <div className="member-constellation__avatars" aria-hidden="true">
               {members.slice(0, 4).map((member) => (
                 <MemberAvatar member={member} size="regular" key={member.userId} />
               ))}
               {members.length > 4 ? <span>+{members.length - 4}</span> : null}
             </div>
-            <span><b>{members.length}</b><small>подтверждено</small></span>
+            <span>
+              <b>{membersUnavailable ? "—" : members.length}</b>
+              <small>{membersUnavailable ? "не загружено" : "подтверждено"}</small>
+            </span>
             <button type="button" disabled={refreshingMembers} onClick={() => void refreshMemberRoster()}>
               {refreshingMembers ? "Обновляю…" : "Обновить"}
             </button>
           </div>
         </section>
+
+        {dashboardLoadError && membersUnavailable ? (
+          <RequestErrorBanner
+            message={dashboardLoadError}
+            recovery={{ label: "Загрузить участников", onRetry: () => void refresh() }}
+          />
+        ) : null}
 
         <section className="member-roster-panel">
           <label className="member-search">
@@ -1511,7 +1639,12 @@ function App() {
           </label>
 
           <div className="member-roster" role="list" aria-label="Подтверждённые участники">
-            {filteredMembers.length === 0 ? (
+            {membersUnavailable ? (
+              <div className="resource-unavailable" role="status">
+                <b>Список пока не загружен</b>
+                <span>После загрузки участники появятся здесь.</span>
+              </div>
+            ) : filteredMembers.length === 0 ? (
               <div className="member-roster__empty">
                 <b>Никого не нашли</b>
                 <span>Проверьте имя или username.</span>
@@ -1657,7 +1790,7 @@ function App() {
           </small>
         </section>
 
-        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
         {notice ? <div className="notice-toast notice-toast--inline" role="status">{notice}</div> : null}
       </main>
     );
@@ -1808,7 +1941,7 @@ function App() {
             </div>
           </section>
 
-          {error ? <div className="error-banner" role="alert">{error}</div> : null}
+          {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
           {notice ? <div className="notice-toast notice-toast--inline" role="status">{notice}</div> : null}
 
           <button className="settings-save primary-action" type="submit" disabled={settingsSaving}>
@@ -1990,7 +2123,7 @@ function App() {
             {reminder.status !== "archived" ? <button className="danger-link" type="button" onClick={() => setArchiveTarget(reminder)}>Архивировать</button> : null}
           </section>
         ) : null}
-        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
         {archiveDialog}
       </main>
@@ -2008,9 +2141,20 @@ function App() {
             <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
           </div>
         </section>
-        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {dashboardLoadError && planUnavailable ? (
+          <RequestErrorBanner
+            message={dashboardLoadError}
+            recovery={{ label: "Загрузить план", onRetry: () => void refresh() }}
+          />
+        ) : null}
+        {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
-        {loading ? <div className="plan-list skeleton-list"><i /><i /><i /></div> : visibleReminders.length === 0 ? (
+        {planUnavailable ? (
+          <div className="resource-unavailable" role="status">
+            <b>План пока не загружен</b>
+            <span>Серии и ближайшие сроки появятся после загрузки.</span>
+          </div>
+        ) : loading ? <div className="plan-list skeleton-list"><i /><i /><i /></div> : visibleReminders.length === 0 ? (
           <button className="empty-plan" onClick={openCreate}><b>План пока пуст</b><span>Добавьте разовый срок или повторяющуюся серию.</span></button>
         ) : (
           <section className="plan-list plan-list--primary" aria-label="Запланированные серии">
@@ -2051,18 +2195,12 @@ function App() {
             <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
           </div>
         </section>
-        {error ? <div className="error-banner" role="alert">{error}</div> : null}
+        {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
         {historyError ? (
-          <div className="error-banner error-banner--actionable" role="alert">
-            <span>{historyError}</span>
-            <button
-              className="error-banner__action"
-              type="button"
-              onClick={() => void refresh()}
-            >
-              Повторить
-            </button>
-          </div>
+          <RequestErrorBanner
+            message={historyError}
+            recovery={{ label: "Загрузить историю", onRetry: () => void refresh() }}
+          />
         ) : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
         {loading ? <div className="history-list skeleton-list"><i /><i /><i /></div> : visibleHistory.length === 0 ? (
@@ -2485,7 +2623,7 @@ function App() {
             </div>
           </section>
 
-          {error ? <div className="error-banner" role="alert">{error}</div> : null}
+          {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
 
           <section className="form-preview" aria-label="Предпросмотр напоминания">
             <p className="eyebrow">Как это будет работать</p>
@@ -2559,7 +2697,11 @@ function App() {
             <span className="workspace-tool-icon"><UiIcon name="members" /></span>
             <span>
               <b>Участники</b>
-              <small>{members.length} {members.length === 1 ? "участник" : "участника"}</small>
+              <small>
+                {membersUnavailable
+                  ? "Не загружено"
+                  : `${members.length} ${members.length === 1 ? "участник" : "участника"}`}
+              </small>
             </span>
             <UiIcon name="arrow-right" />
           </button>
@@ -2574,7 +2716,13 @@ function App() {
         </div>
       </section>
 
-      {error ? <div className="error-banner" role="alert">{error}</div> : null}
+      {dashboardLoadError ? (
+        <RequestErrorBanner
+          message={dashboardLoadError}
+          recovery={{ label: "Загрузить данные", onRetry: () => void refresh() }}
+        />
+      ) : null}
+      {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
       {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
       {undoableOccurrence ? (
         <div className="undo-banner" role="status">
@@ -2592,9 +2740,14 @@ function App() {
       <section className="attention-section" aria-busy={loading}>
         <div className="section-heading">
           <h2>Сейчас</h2>
-          <span>{visibleOccurrences.length}</span>
+          <span>{tasksUnavailable ? "—" : visibleOccurrences.length}</span>
         </div>
-        {loading ? (
+        {tasksUnavailable ? (
+          <div className="resource-unavailable" role="status">
+            <b>Задачи пока не загружены</b>
+            <span>Срочные дела появятся здесь после загрузки.</span>
+          </div>
+        ) : loading ? (
           <div className="rail skeleton-rail"><i /><i /><i /></div>
         ) : visibleOccurrences.length === 0 ? (
           <div className="quiet-state">
@@ -2661,13 +2814,15 @@ function App() {
         )}
       </section>
 
-      <section className="home-plan-teaser">
-        <button type="button" onClick={() => switchMainView("plan")}>
-          <span><small>План</small><b>{visibleReminders.length > 0 ? `Серий в работе: ${visibleReminders.length}` : "Пока пусто"}</b></span>
-          <span>{visibleReminders[0] ? `Ближайшее · ${(planDates.get(visibleReminders[0].reminderId) ?? []).map((date) => formatScheduleDate(date, true)).slice(0, 1).join("")}` : "Добавить напоминание"}</span>
-          <UiIcon name="arrow-right" />
-        </button>
-      </section>
+      {!planUnavailable ? (
+        <section className="home-plan-teaser">
+          <button type="button" onClick={() => switchMainView("plan")}>
+            <span><small>План</small><b>{visibleReminders.length > 0 ? `Серий в работе: ${visibleReminders.length}` : "Пока пусто"}</b></span>
+            <span>{visibleReminders[0] ? `Ближайшее · ${(planDates.get(visibleReminders[0].reminderId) ?? []).map((date) => formatScheduleDate(date, true)).slice(0, 1).join("")}` : "Добавить напоминание"}</span>
+            <UiIcon name="arrow-right" />
+          </button>
+        </section>
+      ) : null}
 
       <BottomNavigation view="home" onChange={switchMainView} onCreate={openCreate} createDisabled={!workspaceId} />
     </main>

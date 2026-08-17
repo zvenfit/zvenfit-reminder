@@ -1543,6 +1543,22 @@ summary:focus-visible {
   text-align: left;
 }
 
+.resource-unavailable {
+  display: grid;
+  gap: 3px;
+  padding: 10px 0;
+  color: var(--ink-soft);
+}
+
+.resource-unavailable b {
+  color: var(--ink);
+  font-size: var(--text-body);
+}
+
+.resource-unavailable span {
+  font-size: var(--text-caption);
+}
+
 .error-banner {
   margin: 18px 0;
   padding: 13px 15px;
@@ -1562,7 +1578,11 @@ summary:focus-visible {
 }
 
 .error-banner__action {
+  display: inline-flex;
   min-height: var(--control-height);
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   padding: 0 14px;
   border: 1px solid color-mix(in srgb, var(--danger) 22%, var(--line));
   border-radius: var(--radius-control);
@@ -1570,6 +1590,13 @@ summary:focus-visible {
   color: var(--ink);
   font-size: var(--text-caption);
   font-weight: 800;
+}
+
+.error-banner__action .ui-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--ink);
+  stroke: currentColor;
 }
 
 .notice-toast {
