@@ -283,6 +283,10 @@ describe("OccurrencesRepository history", () => {
     expect(query).toContain("occurrence.visibility = 'group'");
     expect(query).toContain("reminder.creator_user_id = $actor_user_id");
     expect(query).toContain("occurrence.responsible_user_id = $actor_user_id");
+    expect(query).toContain(") AS history");
+    expect(query).toContain(
+      "ORDER BY history.workspace_id, history.due_at DESC, history.occurrence_id DESC",
+    );
     expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
     expect(decodeYdbValue(params?.$limit)).toBe(40);

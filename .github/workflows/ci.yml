@@ -19,6 +19,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - name: Start local YDB
+        run: |
+          docker compose up -d ydb
+          ./scripts/ydb-local-init.sh
+      - name: Run YDB integration smoke
+        env:
+          RUN_YDB_INTEGRATION: "1"
+          YDB_ENDPOINT: grpc://localhost:2136
+          YDB_DATABASE: /local
+          YDB_ANONYMOUS_CREDENTIALS: "1"
+        run: npm test --workspace=@zvenfit-reminder/shared -- read-queries.integration.test.ts
+      - name: Stop local YDB
+        if: always()
+        run: docker compose down -v
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
       - name: Run Mini App E2E
@@ -80,6 +94,17 @@ jobs:
           yc config profile create ci
           yc config set service-account-key sa-key.json
           yc config set folder-id "$YC_FOLDER_ID"
+      - name: Resolve production log group
+        run: |
+          log_group_json="$(yc logging group get --name zvenfit-reminder --format json)"
+          printf '%s' "$log_group_json" | jq -e '.retention_period == "2592000s"' >/dev/null
+          log_group_id="$(printf '%s' "$log_group_json" | jq -er .id)"
+          echo "YC_LOG_GROUP_ID=$log_group_id" >> "$GITHUB_ENV"
+      - name: Keep API Gateway logs for 30 days
+        run: |
+          yc serverless api-gateway update zvenfit-reminder-api \
+            --log-group-id "$YC_LOG_GROUP_ID" \
+            --min-log-level info
       - name: Install YDB CLI
         run: |
           ydb_cli_dir="$RUNNER_TEMP/ydb-cli"
@@ -146,6 +171,8 @@ jobs:
             --memory 256m \
             --execution-timeout 30s \
             --service-account-id "$YC_RUNTIME_SERVICE_ACCOUNT_ID" \
+            --log-group-id "$YC_LOG_GROUP_ID" \
+            --min-log-level info \
             --source-path bot-webhook.zip \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \
@@ -196,6 +223,8 @@ jobs:
             --memory 256m \
             --execution-timeout 60s \
             --service-account-id "$YC_RUNTIME_SERVICE_ACCOUNT_ID" \
+            --log-group-id "$YC_LOG_GROUP_ID" \
+            --min-log-level info \
             --source-path reminder-cron.zip \
             --environment BOT_TOKEN="$BOT_TOKEN" \
             --environment WEBHOOK_SECRET="$WEBHOOK_SECRET" \

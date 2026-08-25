@@ -34,12 +34,13 @@ route and Telegram-native fallback replies for message and callback failures.
 Артефакты падения — скриншот и Playwright trace — сохраняются в
 `test-results/` и не коммитятся.
 
-## 3. YDB integration — следующий слой
+## 3. YDB integration — каждый pull request и push в main
 
-Локальная YDB поднимается через `npm run dev:stack`. Отдельный интеграционный
-набор должен проверять реальные запросы репозиториев, транзакции, индексы,
-изоляцию workspace и повторное применение миграций. Для этого нужен Docker;
-пока слой не автоматизирован и остаётся известным пробелом.
+CI поднимает локальную YDB, применяет все миграции и выполняет read-query smoke
+для Mini App repositories. Запросы workspace, reminders, members, dashboard и
+history реально компилируются и выполняются YDB, поэтому несовместимый SQL не
+может пройти только за счёт mock-тестов. Локально этот слой запускается через
+`npm run dev:stack` и отдельный integration test с `RUN_YDB_INTEGRATION=1`.
 
 ## Telegram и production
 
@@ -56,7 +57,8 @@ YDB никогда не используются в Playwright-тестах.
 - устанавливает webhook и отправляет подписанный синтетический update через
   Cloudflare Worker;
 - вызывает защищённый `/health/runtime` внутри новой версии bot-функции,
-  компилирует и выполняет YDB-запрос списка доступных workspace, а затем
+  компилирует и выполняет production YDB-запросы workspace, reminders, members,
+  dashboard и history на заведомо пустом sentinel workspace, а затем
   проверяет реальные исходящие `getMe` и `sendMessage` к Telegram API через
   Worker proxy (для `sendMessage` используется несуществующий chat id, сообщение
   никому не отправляется, ожидается штатный Telegram `400`);

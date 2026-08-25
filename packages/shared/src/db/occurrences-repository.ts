@@ -348,18 +348,20 @@ export class OccurrencesRepository {
           DECLARE $workspace_id AS Utf8;
           DECLARE $actor_user_id AS Int64;
           DECLARE $limit AS Uint64;
-          SELECT occurrence.* FROM reminder_occurrences AS occurrence
-          INNER JOIN reminders AS reminder
-            ON occurrence.workspace_id = reminder.workspace_id
-            AND occurrence.reminder_id = reminder.reminder_id
-          WHERE occurrence.workspace_id = $workspace_id
-            AND occurrence.status IN ('completed', 'cancelled')
-            AND (
-              occurrence.visibility = 'group'
-              OR reminder.creator_user_id = $actor_user_id
-              OR occurrence.responsible_user_id = $actor_user_id
-            )
-          ORDER BY occurrence.workspace_id, occurrence.due_at DESC, occurrence.occurrence_id DESC
+          SELECT history.* FROM (
+            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            INNER JOIN reminders AS reminder
+              ON occurrence.workspace_id = reminder.workspace_id
+              AND occurrence.reminder_id = reminder.reminder_id
+            WHERE occurrence.workspace_id = $workspace_id
+              AND occurrence.status IN ('completed', 'cancelled')
+              AND (
+                occurrence.visibility = 'group'
+                OR reminder.creator_user_id = $actor_user_id
+                OR occurrence.responsible_user_id = $actor_user_id
+              )
+          ) AS history
+          ORDER BY history.workspace_id, history.due_at DESC, history.occurrence_id DESC
           LIMIT $limit;
         `,
         {

@@ -169,9 +169,10 @@ Existing rows resolve to `payment` when they already contain an amount and to
 3. A Telegram send whose result cannot be classified is stored as `unknown`.
    The dispatcher prefers a missed repeat over duplicate spam; operational
    reconciliation for unknown deliveries is still manual.
-4. Repository and service behavior is unit-tested, and Mini App user journeys
-   are covered by Playwright against an isolated HTTP mock. There are no YDB
-   integration tests yet.
+4. Repository and service behavior is unit-tested, Mini App user journeys are
+   covered by Playwright against an isolated HTTP mock, and CI compiles the
+   critical read queries against local YDB. Full write-path and concurrency
+   integration coverage remains a follow-up.
 5. There is no configured linter or formatter.
 6. Runtime, timer/API-Gateway invocation, and deployment use separate service
    accounts with resource-scoped bindings. The bot function additionally has a

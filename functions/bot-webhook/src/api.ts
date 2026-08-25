@@ -18,6 +18,10 @@ export interface ApiGatewayEvent {
   path?: string;
   url?: string;
   isBase64Encoded?: boolean;
+  requestContext?: {
+    requestId?: string;
+    request_id?: string;
+  };
 }
 
 export interface ApiGatewayResponse {

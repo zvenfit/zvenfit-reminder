@@ -40,6 +40,60 @@ const TELEGRAM_METHODS = new Set([
 ]);
 const encoder = new TextEncoder();
 
+interface WorkerRequestContext {
+  requestId: string;
+  route: string;
+}
+
+function workerRequestId(request: Request): string {
+  const cloudflareRay = request.headers.get("CF-Ray")?.split("-", 1)[0];
+  return cloudflareRay && /^[A-Za-z0-9]{1,64}$/.test(cloudflareRay)
+    ? cloudflareRay
+    : crypto.randomUUID();
+}
+
+function workerRoute(requestUrl: URL): string {
+  if (requestUrl.pathname === "/health") return "health";
+  if (requestUrl.pathname === "/" || requestUrl.pathname === "/webhook") return "webhook";
+  if (requestUrl.pathname.startsWith(TELEGRAM_FILE_PREFIX)) return "telegram_file";
+  const method = requestUrl.pathname.match(TELEGRAM_METHOD_PATH_PATTERN)?.[1];
+  if (method) {
+    return TELEGRAM_METHODS.has(method) ? `telegram_api.${method}` : "telegram_api.other";
+  }
+  return "not_found";
+}
+
+function workerErrorName(error: unknown): string {
+  return error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
+    ? error.name
+    : "UnknownError";
+}
+
+function logWorkerDependencyError(
+  context: WorkerRequestContext,
+  stage: string,
+  error: unknown,
+): void {
+  console.error(JSON.stringify({
+    message: "Worker dependency request failed",
+    event: "worker_dependency_error",
+    request_id: context.requestId,
+    route: context.route,
+    stage,
+    error_name: workerErrorName(error),
+  }));
+}
+
+function responseWithRequestId(response: Response, requestId: string): Response {
+  const headers = new Headers(response.headers);
+  headers.set("X-Request-Id", requestId);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 function jsonResponse(status: number, body: unknown, extraHeaders?: HeadersInit): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -113,6 +167,7 @@ async function handleTelegramApiRequest(
   method: string,
   telegramFetch: OriginFetch,
   secretsEqual: SecretComparator,
+  context: WorkerRequestContext,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return jsonResponse(405, { error: "Method not allowed" }, { Allow: "POST" });
@@ -154,11 +209,7 @@ async function handleTelegramApiRequest(
       },
     );
   } catch (error) {
-    console.error(JSON.stringify({
-      message: "Telegram API proxy request failed",
-      method,
-      error: error instanceof Error ? error.name : "UnknownError",
-    }));
+    logWorkerDependencyError(context, "telegram_api", error);
     return jsonResponse(502, { error: "Telegram API unavailable" });
   }
 
@@ -203,6 +254,7 @@ async function handleTelegramFileRequest(
   filePath: string,
   telegramFetch: OriginFetch,
   secretsEqual: SecretComparator,
+  context: WorkerRequestContext,
 ): Promise<Response> {
   if (request.method !== "GET") {
     return jsonResponse(405, { error: "Method not allowed" }, { Allow: "GET" });
@@ -227,10 +279,7 @@ async function handleTelegramFileRequest(
       },
     );
   } catch (error) {
-    console.error(JSON.stringify({
-      message: "Telegram file proxy request failed",
-      error: error instanceof Error ? error.name : "UnknownError",
-    }));
+    logWorkerDependencyError(context, "telegram_file", error);
     return jsonResponse(502, { error: "Telegram file unavailable" });
   }
   if (!telegramResponse.ok) {
@@ -258,11 +307,12 @@ async function handleTelegramFileRequest(
   });
 }
 
-export async function handleRequest(
+async function handleRequestCore(
   request: Request,
   env: ProxyEnv,
-  originFetch: OriginFetch = fetch,
-  secretsEqual: SecretComparator = timingSafeSecretEqual,
+  originFetch: OriginFetch,
+  secretsEqual: SecretComparator,
+  context: WorkerRequestContext,
 ): Promise<Response> {
   const requestUrl = new URL(request.url);
 
@@ -278,6 +328,7 @@ export async function handleRequest(
       telegramFilePath,
       originFetch,
       secretsEqual,
+      context,
     );
   }
 
@@ -289,6 +340,7 @@ export async function handleRequest(
       telegramMethod,
       originFetch,
       secretsEqual,
+      context,
     );
   }
 
@@ -311,7 +363,13 @@ export async function handleRequest(
 
   const origin = parseOrigin(env.ORIGIN_URL);
   if (!origin) {
-    console.error(JSON.stringify({ message: "Invalid Telegram webhook origin configuration" }));
+    console.error(JSON.stringify({
+      message: "Invalid Telegram webhook origin configuration",
+      event: "worker_configuration_error",
+      request_id: context.requestId,
+      route: context.route,
+      error_code: "invalid_origin",
+    }));
     return jsonResponse(500, { error: "Proxy is not configured" });
   }
 
@@ -323,6 +381,7 @@ export async function handleRequest(
   const headers = new Headers({
     "Content-Type": JSON_CONTENT_TYPE,
     [TELEGRAM_SECRET_HEADER]: secret,
+    "X-Zvenfit-Request-Id": context.requestId,
   });
 
   let originResponse: Response;
@@ -334,10 +393,7 @@ export async function handleRequest(
       redirect: "manual",
     });
   } catch (error) {
-    console.error(JSON.stringify({
-      message: "Telegram webhook origin request failed",
-      error: error instanceof Error ? error.name : "UnknownError",
-    }));
+    logWorkerDependencyError(context, "webhook_origin", error);
     return jsonResponse(502, { error: "Origin unavailable" });
   }
 
@@ -352,6 +408,67 @@ export async function handleRequest(
     statusText: originResponse.statusText,
     headers: responseHeaders,
   });
+}
+
+export async function handleRequest(
+  request: Request,
+  env: ProxyEnv,
+  originFetch: OriginFetch = fetch,
+  secretsEqual: SecretComparator = timingSafeSecretEqual,
+): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  const context: WorkerRequestContext = {
+    requestId: workerRequestId(request),
+    route: workerRoute(requestUrl),
+  };
+  const startedAt = performance.now();
+  try {
+    const response = await handleRequestCore(
+      request,
+      env,
+      originFetch,
+      secretsEqual,
+      context,
+    );
+    const payload = JSON.stringify({
+      message: "Worker request completed",
+      event: "worker_request",
+      request_id: context.requestId,
+      route: context.route,
+      http_method: request.method,
+      status_code: response.status,
+      duration_ms: Math.round(performance.now() - startedAt),
+      outcome: response.status >= 500
+        ? "server_error"
+        : response.status >= 400
+          ? "client_error"
+          : "ok",
+    });
+    if (response.status >= 500) {
+      console.error(payload);
+    } else if (response.status >= 400) {
+      console.warn(payload);
+    } else {
+      console.log(payload);
+    }
+    return responseWithRequestId(response, context.requestId);
+  } catch (error) {
+    console.error(JSON.stringify({
+      message: "Worker request crashed",
+      event: "worker_request",
+      request_id: context.requestId,
+      route: context.route,
+      http_method: request.method,
+      status_code: 500,
+      duration_ms: Math.round(performance.now() - startedAt),
+      outcome: "exception",
+      error_name: workerErrorName(error),
+    }));
+    return responseWithRequestId(
+      jsonResponse(500, { error: "Internal server error" }),
+      context.requestId,
+    );
+  }
 }
 
 export default {

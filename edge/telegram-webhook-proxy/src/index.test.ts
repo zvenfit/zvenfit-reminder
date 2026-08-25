@@ -43,6 +43,7 @@ describe("Telegram webhook proxy", () => {
   });
 
   it("proxies allowlisted Telegram API methods without exposing the token in its public URL", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
       new Response(JSON.stringify({ ok: true, result: { id: 123456 } }), {
         status: 200,
@@ -54,6 +55,7 @@ describe("Telegram webhook proxy", () => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        "CF-Ray": "workerrequest1-SVO",
         [PROXY_SECRET_HEADER]: "proxy-secret",
         [BOT_TOKEN_HEADER]: BOT_TOKEN,
         "X-Untrusted-Header": "must-not-be-forwarded",
@@ -72,7 +74,15 @@ describe("Telegram webhook proxy", () => {
     }));
     expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe(body);
     expect(response.status).toBe(200);
+    expect(response.headers.get("X-Request-Id")).toBe("workerrequest1");
     await expect(response.json()).resolves.toMatchObject({ ok: true });
+    const logEntry = String(consoleLog.mock.calls.at(-1)?.[0]);
+    expect(logEntry).toContain('"event":"worker_request"');
+    expect(logEntry).toContain('"route":"telegram_api.sendMessage"');
+    expect(logEntry).not.toContain(BOT_TOKEN);
+    expect(logEntry).not.toContain("proxy-secret");
+    expect(logEntry).not.toContain("Готово");
+    consoleLog.mockRestore();
   });
 
   it("allows the prepared user picker method used by Mini Apps", async () => {
@@ -322,6 +332,7 @@ describe("Telegram webhook proxy", () => {
     const headers = new Headers(init?.headers);
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get(SECRET_HEADER)).toBe("test-secret");
+    expect(headers.get("X-Zvenfit-Request-Id")).toMatch(/^[0-9a-f-]{36}$/);
     expect(headers.has("X-Untrusted-Header")).toBe(false);
     expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe(requestBody);
 
@@ -347,7 +358,7 @@ describe("Telegram webhook proxy", () => {
 
     expect(invalid.status).toBe(500);
     expect(unavailable.status).toBe(502);
-    expect(consoleError).toHaveBeenCalledTimes(2);
+    expect(consoleError).toHaveBeenCalledTimes(4);
     consoleError.mockRestore();
   });
 });

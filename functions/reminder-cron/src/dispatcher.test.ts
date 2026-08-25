@@ -120,7 +120,7 @@ describe("runDispatcher", () => {
       "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_123",
       -100123,
       "Напоминание",
-      new (await import("grammy")).InlineKeyboard(),
+      { inline_keyboard: [] },
     )).resolves.toBe(77);
 
     const [url, init] = fetchMock.mock.calls[0]!;
@@ -403,7 +403,7 @@ describe("runDispatcher", () => {
       new Date("2026-08-13T12:11:00.000Z"),
       dependencies,
     );
-    expect(first.errors).toContain("completion_message_finalize_failed:workspace-a");
+    expect(first.errors).toContain("completion_message_finalize_failed");
     expect(markCompletionMessageFinalized).not.toHaveBeenCalled();
 
     const second = await runDispatcher(
@@ -537,7 +537,7 @@ describe("runDispatcher", () => {
     );
 
     expect(stats.workspaces).toBe(2);
-    expect(stats.errors).toContain("occurrence_scan_failed:workspace-a");
+    expect(stats.errors).toContain("occurrence_scan_failed");
     expect(dependencies.occurrences.listRuntimeCandidates).toHaveBeenCalledWith(
       "workspace-b",
       expect.any(Date),

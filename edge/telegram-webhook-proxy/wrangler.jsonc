@@ -7,7 +7,12 @@
   "workers_dev": true,
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": false,
+      "persist": true
+    }
   },
   "vars": {
     "ORIGIN_URL": "https://functions.yandexcloud.net/d4e3h1o2eoa1vp5g7ec5"

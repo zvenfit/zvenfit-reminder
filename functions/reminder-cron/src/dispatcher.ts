@@ -12,7 +12,6 @@ import {
   type ReservedDelivery,
 } from "@zvenfit-reminder/shared";
 import { setDefaultResultOrder } from "node:dns";
-import { InlineKeyboard } from "grammy";
 
 // Yandex Cloud Functions has public IPv4 egress, while Telegram may resolve to IPv6 first.
 setDefaultResultOrder("ipv4first");
@@ -32,12 +31,19 @@ export interface DispatcherStats {
   errors: string[];
 }
 
+interface InlineKeyboardMarkup {
+  inline_keyboard: Array<Array<{
+    text: string;
+    callback_data: string;
+  }>>;
+}
+
 interface TelegramClient {
   send(
     botToken: string,
     chatId: number,
     text: string,
-    replyMarkup: InlineKeyboard,
+    replyMarkup: InlineKeyboardMarkup,
   ): Promise<number>;
   delete(botToken: string, chatId: number, messageId: number): Promise<void>;
   editFinal(
@@ -51,7 +57,7 @@ interface TelegramClient {
     chatId: number,
     messageId: number,
     text: string,
-    replyMarkup: InlineKeyboard,
+    replyMarkup: InlineKeyboardMarkup,
   ): Promise<void>;
 }
 
@@ -147,7 +153,7 @@ async function editTelegramMessage(
   chatId: number,
   messageId: number,
   text: string,
-  replyMarkup: InlineKeyboard | { inline_keyboard: [] },
+  replyMarkup: InlineKeyboardMarkup,
 ): Promise<void> {
   const request = telegramApiRequest({ ...routing, botToken }, "editMessageText");
   const response = await fetch(request.url, {
@@ -187,21 +193,32 @@ function createDependencies(config: AppConfig): DispatcherDependencies {
   };
 }
 
-function deliveryKeyboard(occurrence: ReminderOccurrence): InlineKeyboard {
-  return new InlineKeyboard()
-    .text(
-      occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
-      occurrenceCallbackData("done", occurrence.occurrenceId),
-    )
-    .text("⏰ +1 час", occurrenceCallbackData("snooze", occurrence.occurrenceId));
+function deliveryKeyboard(occurrence: ReminderOccurrence): InlineKeyboardMarkup {
+  return {
+    inline_keyboard: [[
+      {
+        text: occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
+        callback_data: occurrenceCallbackData("done", occurrence.occurrenceId),
+      },
+      {
+        text: "⏰ +1 час",
+        callback_data: occurrenceCallbackData("snooze", occurrence.occurrenceId),
+      },
+    ]],
+  };
 }
 
-function messageSyncKeyboard(occurrence: ReminderOccurrence, now: Date): InlineKeyboard | null {
+function messageSyncKeyboard(
+  occurrence: ReminderOccurrence,
+  now: Date,
+): InlineKeyboardMarkup | null {
   if (occurrence.status === "completed" && occurrence.undoUntil && occurrence.undoUntil > now) {
-    return new InlineKeyboard().text(
-      occurrence.kind === "payment" ? "↩️ Отменить оплату" : "↩️ Отменить выполнение",
-      occurrenceCallbackData("undo", occurrence.occurrenceId),
-    );
+    return {
+      inline_keyboard: [[{
+        text: occurrence.kind === "payment" ? "↩️ Отменить оплату" : "↩️ Отменить выполнение",
+        callback_data: occurrenceCallbackData("undo", occurrence.occurrenceId),
+      }]],
+    };
   }
   if (
     occurrence.notificationState === "waiting" &&
@@ -423,7 +440,7 @@ export async function runDispatcher(
               );
             } catch {
               telegramFinalized = false;
-              stats.errors.push(`completion_message_finalize_failed:${workspace.workspaceId}`);
+              stats.errors.push("completion_message_finalize_failed");
             }
           }
           if (finalized && telegramFinalized) {
@@ -436,11 +453,11 @@ export async function runDispatcher(
           stats.completionFinalized += finalized ? 1 : 0;
           stats.skipped += finalized ? 0 : 1;
         } catch {
-          stats.errors.push(`completion_finalize_failed:${workspace.workspaceId}`);
+          stats.errors.push("completion_finalize_failed");
         }
       }
     } catch {
-      stats.errors.push(`completion_scan_failed:${workspace.workspaceId}`);
+      stats.errors.push("completion_scan_failed");
     }
 
     try {
@@ -490,7 +507,7 @@ export async function runDispatcher(
           succeeded = true;
           stats.messagesSynced += 1;
         } catch {
-          stats.errors.push(`message_sync_failed:${workspace.workspaceId}`);
+          stats.errors.push("message_sync_failed");
         } finally {
           try {
             await dependencies.occurrences.finishMessageSync(
@@ -501,12 +518,12 @@ export async function runDispatcher(
               succeeded,
             );
           } catch {
-            stats.errors.push(`message_sync_finalize_failed:${workspace.workspaceId}`);
+            stats.errors.push("message_sync_finalize_failed");
           }
         }
       }
     } catch {
-      stats.errors.push(`message_sync_scan_failed:${workspace.workspaceId}`);
+      stats.errors.push("message_sync_scan_failed");
     }
 
     try {
@@ -524,11 +541,11 @@ export async function runDispatcher(
           stats.materialized += occurrence ? 1 : 0;
           stats.skipped += occurrence ? 0 : 1;
         } catch {
-          stats.errors.push(`occurrence_materialize_failed:${workspace.workspaceId}`);
+          stats.errors.push("occurrence_materialize_failed");
         }
       }
     } catch {
-      stats.errors.push(`occurrence_scan_failed:${workspace.workspaceId}`);
+      stats.errors.push("occurrence_scan_failed");
     }
 
     try {
@@ -550,11 +567,11 @@ export async function runDispatcher(
           stats.reserved += 1;
           await dispatchReservation(config, reservation, dependencies, stats);
         } catch {
-          stats.errors.push(`delivery_reserve_failed:${workspace.workspaceId}`);
+          stats.errors.push("delivery_reserve_failed");
         }
       }
     } catch {
-      stats.errors.push(`delivery_scan_failed:${workspace.workspaceId}`);
+      stats.errors.push("delivery_scan_failed");
     }
   }
 

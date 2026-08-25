@@ -14,6 +14,8 @@ YDB_NAME="zvenfit-reminder"
 BOT_FN="zvenfit-reminder-bot"
 CRON_FN="zvenfit-reminder-cron"
 APIGW_NAME="zvenfit-reminder-api"
+LOG_GROUP_NAME="zvenfit-reminder"
+LOG_RETENTION="720h"
 
 echo "==> Создаём runtime, invoker и deploy service accounts..."
 yc iam service-account create --name "$RUNTIME_SA_NAME" --folder-id "$YC_FOLDER_ID" 2>/dev/null || true
@@ -22,6 +24,20 @@ yc iam service-account create --name "$DEPLOY_SA_NAME" --folder-id "$YC_FOLDER_I
 RUNTIME_SA_ID=$(yc iam service-account get --name "$RUNTIME_SA_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
 INVOKER_SA_ID=$(yc iam service-account get --name "$INVOKER_SA_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
 DEPLOY_SA_ID=$(yc iam service-account get --name "$DEPLOY_SA_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
+
+echo "==> Настраиваем production log group на 30 дней..."
+if yc logging group get --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" >/dev/null 2>&1; then
+  yc logging group update --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" \
+    --retention-period "$LOG_RETENTION"
+else
+  yc logging group create --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" \
+    --description "ZvenFit Reminder production logs" \
+    --retention-period "$LOG_RETENTION"
+fi
+LOG_GROUP_ID=$(yc logging group get --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" \
+  --format json | jq -r .id)
+yc logging group add-access-binding --id "$LOG_GROUP_ID" \
+  --service-account-id "$DEPLOY_SA_ID" --role logging.editor 2>/dev/null || true
 
 yc iam service-account add-access-binding --id "$RUNTIME_SA_ID" \
   --role iam.serviceAccounts.user --subject "serviceAccount:$DEPLOY_SA_ID" 2>/dev/null || true
@@ -66,9 +82,11 @@ APIGW_SPEC=$(mktemp)
 trap 'rm -f "$APIGW_SPEC"' EXIT
 sed "s/\${BOT_FUNCTION_ID}/$BOT_FN_ID/g; s/\${INVOKER_SA_ID}/$INVOKER_SA_ID/g" infra/api-gateway.yaml > "$APIGW_SPEC"
 if yc serverless api-gateway get --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" >/dev/null 2>&1; then
-  yc serverless api-gateway update --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" --spec "$APIGW_SPEC"
+  yc serverless api-gateway update --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" \
+    --spec "$APIGW_SPEC" --log-group-id "$LOG_GROUP_ID" --min-log-level info
 else
-  yc serverless api-gateway create --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" --spec "$APIGW_SPEC"
+  yc serverless api-gateway create --name "$APIGW_NAME" --folder-id "$YC_FOLDER_ID" \
+    --spec "$APIGW_SPEC" --log-group-id "$LOG_GROUP_ID" --min-log-level info
 fi
 
 echo ""
@@ -79,6 +97,7 @@ echo "DEPLOY_SA_ID=$DEPLOY_SA_ID"
 echo "YDB_ENDPOINT=$YDB_ENDPOINT"
 echo "YDB_DATABASE=$YDB_DATABASE"
 echo "BUCKET_NAME=$BUCKET_NAME"
+echo "LOG_GROUP_ID=$LOG_GROUP_ID"
 echo ""
 echo "Дальше:"
 echo "1. Создай JSON-ключ только для deploy SA ($DEPLOY_SA_ID) и сохрани его в YC_SA_JSON."

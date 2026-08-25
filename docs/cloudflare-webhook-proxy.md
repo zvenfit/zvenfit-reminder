@@ -26,6 +26,10 @@ Cloud Functions также идут через закрытый маршрут W
   до 512 KiB и только по безопасному Telegram `file_path`.
 - Proxy secret сравнивается constant-time. Bot token не хранится в Worker и не
   попадает в публичный URL или ответы; в Telegram он уходит по HTTPS.
+- Автоматические invocation logs отключены: они могут индексировать закрытые
+  заголовки запроса. Вместо них Worker пишет безопасные structured events с
+  `request_id`, категорией маршрута, HTTP-статусом и длительностью, но без
+  headers, body, file path и Telegram-идентификаторов.
 
 ## Локальная проверка
 

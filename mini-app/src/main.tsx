@@ -630,6 +630,7 @@ function App() {
   const [occurrences, setOccurrences] = useState<ReminderOccurrence[]>([]);
   const [historyOccurrences, setHistoryOccurrences] = useState<ReminderOccurrence[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [dashboardLoadError, setDashboardLoadError] = useState<string | null>(null);
   const [loadedDashboardResources, setLoadedDashboardResources] = useState<DashboardResource[]>([]);
   const [failedDashboardResources, setFailedDashboardResources] = useState<DashboardResource[]>([]);
@@ -672,6 +673,7 @@ function App() {
   const [reassignment, setReassignment] = useState<Record<string, string>>({});
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
+  const historyRefreshGenerationRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [errorRecovery, setErrorRecovery] = useState<ErrorRecovery | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -806,6 +808,7 @@ function App() {
       return;
     }
     const generation = ++refreshGenerationRef.current;
+    const historyGeneration = ++historyRefreshGenerationRef.current;
     selectWorkspace(selectedId);
     setLoading(true);
     clearError();
@@ -858,11 +861,13 @@ function App() {
           ? "Не удалось обновить данные. Показываем последнюю загруженную версию."
           : dashboardFailureMessage(unavailableResources));
       setHasLoadedDashboard(true);
-      if (historyResult.status === "fulfilled") {
-        setHistoryOccurrences(historyResult.value.occurrences);
-      } else {
-        setHistoryOccurrences([]);
-        setHistoryError("История временно недоступна. Остальные данные загружены.");
+      if (historyGeneration === historyRefreshGenerationRef.current) {
+        if (historyResult.status === "fulfilled") {
+          setHistoryOccurrences(historyResult.value.occurrences);
+        } else {
+          setHistoryOccurrences([]);
+          setHistoryError("История временно недоступна. Остальные данные загружены.");
+        }
       }
     } catch (requestError) {
       if (
@@ -879,6 +884,37 @@ function App() {
         activeWorkspaceIdRef.current === selectedId
       ) {
         setLoading(false);
+      }
+    }
+  }
+
+  async function refreshHistory(selectedId = workspaceId) {
+    if (!selectedId || activeWorkspaceIdRef.current !== selectedId) return;
+    const generation = ++historyRefreshGenerationRef.current;
+    selectWorkspace(selectedId);
+    setHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const response = await loadHistory();
+      if (
+        generation === historyRefreshGenerationRef.current &&
+        activeWorkspaceIdRef.current === selectedId
+      ) {
+        setHistoryOccurrences(response.occurrences);
+      }
+    } catch {
+      if (
+        generation === historyRefreshGenerationRef.current &&
+        activeWorkspaceIdRef.current === selectedId
+      ) {
+        setHistoryError("История временно недоступна. Остальные данные загружены.");
+      }
+    } finally {
+      if (
+        generation === historyRefreshGenerationRef.current &&
+        activeWorkspaceIdRef.current === selectedId
+      ) {
+        setHistoryLoading(false);
       }
     }
   }
@@ -932,6 +968,7 @@ function App() {
   }
 
   async function changeWorkspace(nextWorkspaceId: string) {
+    historyRefreshGenerationRef.current += 1;
     activeWorkspaceIdRef.current = nextWorkspaceId;
     setWorkspaceId(nextWorkspaceId);
     window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId);
@@ -2199,11 +2236,11 @@ function App() {
         {historyError ? (
           <RequestErrorBanner
             message={historyError}
-            recovery={{ label: "Загрузить историю", onRetry: () => void refresh() }}
+            recovery={{ label: "Загрузить историю", onRetry: () => void refreshHistory() }}
           />
         ) : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
-        {loading ? <div className="history-list skeleton-list"><i /><i /><i /></div> : visibleHistory.length === 0 ? (
+        {loading || historyLoading ? <div className="history-list skeleton-list"><i /><i /><i /></div> : visibleHistory.length === 0 ? (
           <div className="quiet-state"><span className="quiet-pulse"><UiIcon name="history" /></span><div><b>История пока пуста</b><p>Завершённые и отменённые напоминания появятся здесь.</p></div></div>
         ) : (
           <section className="history-list" aria-label="История напоминаний">

@@ -565,9 +565,18 @@ test("keeps tasks and members available when history temporarily fails", async (
   await expect(retryAction).toBeVisible();
   expect(await historyAlert.evaluate((element) => Number.parseFloat(getComputedStyle(element).gap)))
     .toBeGreaterThanOrEqual(12);
+  const requestsBeforeRetry = state.requests.length;
+  const historyRequestsBeforeRetry = state.requests.filter((request) =>
+    request.path === "/api/history").length;
   await retryAction.click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("История пока пуста")).toBeVisible();
+  const retryRequests = state.requests.slice(requestsBeforeRetry);
+  expect(retryRequests).toHaveLength(1);
+  expect(retryRequests[0]?.path).toBe("/api/history");
+  expect(state.requests.filter((request) => request.path === "/api/history")).toHaveLength(
+    historyRequestsBeforeRetry + 1,
+  );
 });
 
 test("recovers from an empty workspace response without leaving disabled controls", async ({ page }) => {

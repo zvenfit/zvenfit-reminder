@@ -1,6 +1,7 @@
 import {
   DeliveryInProgressError,
   OccurrenceNotActionableError,
+  OccurrencesRepository,
   RemindersRepository,
   UndoWindowExpiredError,
   WorkspaceMembersRepository,
@@ -8,8 +9,10 @@ import {
   WorkspacesRepository,
   escapeHtml,
   loadConfig,
+  operationalErrorFields,
   parseOccurrenceCallbackData,
   validateInitData,
+  writeFunctionLog,
   type ParsedInitData,
 } from "@zvenfit-reminder/shared";
 import { setDefaultResultOrder } from "node:dns";
@@ -36,6 +39,13 @@ import { renderOccurrenceAction } from "./occurrence-message.js";
 import { handleWorkspaceApi } from "./workspace-api.js";
 import { observeTelegramIdentity } from "./telegram-observation.js";
 import { telegramClientOptions } from "./telegram-network.js";
+import {
+  logApiFailure,
+  logApiResponse,
+  normalizedApiRoute,
+  requestIdForEvent,
+  responseWithRequestId,
+} from "./request-observability.js";
 
 let botInstance: Bot | null = null;
 const TELEGRAM_API_TIMEOUT_SECONDS = 5;
@@ -43,6 +53,11 @@ const TELEGRAM_API_FAILURE_TEXT =
   "⚠️ Бот временно не может связаться с Telegram API. Попробуйте ещё раз через минуту.";
 const INTERNAL_FAILURE_TEXT =
   "⚠️ Не удалось обработать запрос. Попробуйте ещё раз через минуту.";
+const HEALTH_SENTINEL_WORKSPACE_ID = "__runtime-health__";
+
+interface FunctionContext {
+  requestId?: string;
+}
 
 // Yandex Cloud Functions has public IPv4 egress, while Telegram may resolve to IPv6 first.
 setDefaultResultOrder("ipv4first");
@@ -557,6 +572,29 @@ export function getBot(): Bot {
   return bot;
 }
 
+async function verifyRuntimeReadQueries(config: ReturnType<typeof loadConfig>): Promise<void> {
+  const workspaces = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
+  const members = new WorkspaceMembersRepository(config.ydbEndpoint, config.ydbDatabase);
+  const reminders = new RemindersRepository(config.ydbEndpoint, config.ydbDatabase);
+  const occurrences = new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase);
+  await Promise.all([
+    workspaces.listForUser(0),
+    members.listProfiles(HEALTH_SENTINEL_WORKSPACE_ID),
+    reminders.listForActor(HEALTH_SENTINEL_WORKSPACE_ID, 0),
+    occurrences.listActionableForActor(HEALTH_SENTINEL_WORKSPACE_ID, 0),
+    occurrences.listHistoryForActor(HEALTH_SENTINEL_WORKSPACE_ID, 0, 1),
+  ]);
+}
+
+function telegramUpdateKind(update: unknown): string {
+  if (!update || typeof update !== "object") return "unknown";
+  const value = update as Record<string, unknown>;
+  for (const kind of ["callback_query", "message", "chat_member", "channel_post"]) {
+    if (kind in value) return kind;
+  }
+  return "other";
+}
+
 async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   // REST API для Mini App, авторизация через X-Telegram-Init-Data
   const config = loadConfig();
@@ -628,9 +666,10 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
       }
       const members = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
       return jsonResponse(200, { members, synced });
-    } catch (error) {
+    } catch {
       return jsonResponse(502, {
-        error: error instanceof Error ? error.message : "Failed to sync members",
+        error: "Member sync is temporarily unavailable",
+        code: "member_sync_failed",
       });
     }
   }
@@ -641,20 +680,29 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
   return jsonResponse(404, { error: "Not found" });
 }
 
-export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
+export async function handler(
+  event: ApiGatewayEvent,
+  functionContext: FunctionContext = {},
+): Promise<ApiGatewayResponse> {
   const path = getPath(event);
   const method = event.httpMethod ?? "GET";
+  const requestId = requestIdForEvent(event, functionContext.requestId);
 
   if (isRuntimeHealthRequest(path, method)) {
     const config = loadConfig();
     const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
     if (secret !== config.webhookSecret) {
-      return { statusCode: 403, body: "Forbidden" };
+      writeFunctionLog("WARN", "Runtime health check rejected", {
+        event: "runtime_health",
+        request_id: requestId,
+        status_code: 403,
+      });
+      return responseWithRequestId({ statusCode: 403, body: "Forbidden" }, requestId);
     }
 
+    const startedAt = performance.now();
     try {
-      const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
-      await workspacesRepo.listForUser(0);
+      await verifyRuntimeReadQueries(config);
       const bot = getBot();
       await bot.api.getMe();
       try {
@@ -666,43 +714,101 @@ export async function handler(event: ApiGatewayEvent): Promise<ApiGatewayRespons
           throw error;
         }
       }
-      return jsonResponse(200, { ok: true });
-    } catch (error) {
-      console.error("Runtime dependency health check failed", {
-        error: error instanceof Error ? error.message : "Unknown error",
+      const response = jsonResponse(200, {
+        ok: true,
+        checks: ["ydb_reads", "telegram_get_me", "telegram_send_transport"],
       });
-      return jsonResponse(502, { ok: false });
+      writeFunctionLog("INFO", "Runtime health check completed", {
+        event: "runtime_health",
+        request_id: requestId,
+        status_code: 200,
+        duration_ms: Math.round(performance.now() - startedAt),
+      });
+      return responseWithRequestId(response, requestId);
+    } catch (error) {
+      writeFunctionLog("ERROR", "Runtime health check failed", {
+        event: "runtime_health",
+        request_id: requestId,
+        status_code: 502,
+        duration_ms: Math.round(performance.now() - startedAt),
+        ...operationalErrorFields(error),
+      });
+      return responseWithRequestId(jsonResponse(502, { ok: false, requestId }), requestId);
     }
   }
 
   if (path.startsWith("/api")) {
-    return handleApi(event);
+    const startedAt = performance.now();
+    const route = normalizedApiRoute(path);
+    try {
+      const response = await handleApi(event);
+      logApiResponse({
+        requestId,
+        method,
+        route,
+        response,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return responseWithRequestId(response, requestId);
+    } catch (error) {
+      logApiFailure({
+        requestId,
+        method,
+        route,
+        error,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return responseWithRequestId(jsonResponse(502, {
+        error: "Service dependency is temporarily unavailable",
+        code: "dependency_failed",
+        requestId,
+      }), requestId);
+    }
   }
 
   if (isWebhookRequest(path, method)) {
     const config = loadConfig();
     const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
     if (secret !== config.webhookSecret) {
-      return { statusCode: 403, body: "Forbidden" };
+      writeFunctionLog("WARN", "Telegram webhook rejected", {
+        event: "telegram_webhook",
+        request_id: requestId,
+        status_code: 403,
+      });
+      return responseWithRequestId({ statusCode: 403, body: "Forbidden" }, requestId);
     }
 
-    const bot = getBot();
-    await ensureBotInitialized(bot);
-    const update = JSON.parse(event.body ?? "{}");
+    const startedAt = performance.now();
+    let update: unknown = {};
     try {
-      await bot.handleUpdate(update);
-      return { statusCode: 200, body: "" };
-    } catch (error) {
-      console.error("Telegram update processing failed", {
-        updateId: typeof update?.update_id === "number" ? update.update_id : null,
-        error: error instanceof Error ? error.message : "Unknown error",
+      const bot = getBot();
+      await ensureBotInitialized(bot);
+      const parsedUpdate: Parameters<Bot["handleUpdate"]>[0] = JSON.parse(event.body ?? "{}");
+      update = parsedUpdate;
+      await bot.handleUpdate(parsedUpdate);
+      writeFunctionLog("INFO", "Telegram update processed", {
+        event: "telegram_webhook",
+        request_id: requestId,
+        update_kind: telegramUpdateKind(update),
+        status_code: 200,
+        duration_ms: Math.round(performance.now() - startedAt),
       });
-      return buildWebhookFailureResponse(
+      return responseWithRequestId({ statusCode: 200, body: "" }, requestId);
+    } catch (error) {
+      writeFunctionLog("ERROR", "Telegram update processing failed", {
+        event: "telegram_webhook",
+        request_id: requestId,
+        update_kind: telegramUpdateKind(update),
+        status_code: 200,
+        duration_ms: Math.round(performance.now() - startedAt),
+        ...operationalErrorFields(error),
+      });
+      return responseWithRequestId(buildWebhookFailureResponse(
         update,
         isTelegramTransportFailure(error) ? TELEGRAM_API_FAILURE_TEXT : INTERNAL_FAILURE_TEXT,
-      );
+      ), requestId);
     }
   }
 
-  return jsonResponse(404, { error: "Not found" });
+  return responseWithRequestId(jsonResponse(404, { error: "Not found" }), requestId);
 }
