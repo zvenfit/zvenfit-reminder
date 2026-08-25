@@ -100,11 +100,6 @@ jobs:
           printf '%s' "$log_group_json" | jq -e '.retention_period == "2592000s"' >/dev/null
           log_group_id="$(printf '%s' "$log_group_json" | jq -er .id)"
           echo "YC_LOG_GROUP_ID=$log_group_id" >> "$GITHUB_ENV"
-      - name: Keep API Gateway logs for 30 days
-        run: |
-          yc serverless api-gateway update zvenfit-reminder-api \
-            --log-group-id "$YC_LOG_GROUP_ID" \
-            --min-log-level info
       - name: Install YDB CLI
         run: |
           ydb_cli_dir="$RUNNER_TEMP/ydb-cli"
