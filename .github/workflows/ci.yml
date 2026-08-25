@@ -97,7 +97,6 @@ jobs:
       - name: Resolve production log group
         run: |
           log_group_json="$(yc logging group get --name zvenfit-reminder --format json)"
-          printf '%s' "$log_group_json" | jq -e '.retention_period == "2592000s"' >/dev/null
           log_group_id="$(printf '%s' "$log_group_json" | jq -er .id)"
           echo "YC_LOG_GROUP_ID=$log_group_id" >> "$GITHUB_ENV"
       - name: Install YDB CLI

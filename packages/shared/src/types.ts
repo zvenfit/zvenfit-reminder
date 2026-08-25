@@ -9,11 +9,18 @@ export interface AppConfig {
   telegramProxySecret?: string;
 }
 
+export class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigurationError";
+  }
+}
+
 export function loadConfig(): AppConfig {
   const required = (key: string): string => {
     const value = process.env[key];
     if (!value) {
-      throw new Error(`Missing required env var: ${key}`);
+      throw new ConfigurationError(`Missing required env var: ${key}`);
     }
     return value;
   };
@@ -21,7 +28,9 @@ export function loadConfig(): AppConfig {
   const telegramApiRoot = process.env.TELEGRAM_API_ROOT?.trim() || undefined;
   const telegramProxySecret = process.env.TELEGRAM_PROXY_SECRET?.trim() || undefined;
   if ((telegramApiRoot && !telegramProxySecret) || (!telegramApiRoot && telegramProxySecret)) {
-    throw new Error("TELEGRAM_API_ROOT and TELEGRAM_PROXY_SECRET must be configured together");
+    throw new ConfigurationError(
+      "TELEGRAM_API_ROOT and TELEGRAM_PROXY_SECRET must be configured together",
+    );
   }
 
   return {

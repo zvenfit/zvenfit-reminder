@@ -9,6 +9,8 @@
     "enabled": true,
     "logs": {
       "enabled": true,
+      // Routine public 2xx/4xx are suppressed in code; keep dependency and 5xx
+      // events complete for incident investigation.
       "head_sampling_rate": 1,
       "invocation_logs": false,
       "persist": true

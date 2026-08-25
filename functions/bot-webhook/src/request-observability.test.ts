@@ -5,6 +5,7 @@ import {
   normalizedApiRoute,
   requestIdForEvent,
   responseWithRequestId,
+  trustedEdgeRequestIdForEvent,
 } from "./request-observability.js";
 
 afterEach(() => {
@@ -22,15 +23,24 @@ describe("API request observability", () => {
     expect(normalizedApiRoute("/api/history")).toBe("/api/history");
   });
 
-  it("uses the Worker correlation ID when it is present", () => {
+  it("keeps the platform ID canonical when a public correlation header is present", () => {
     const requestId = requestIdForEvent({
       requestContext: { requestId: "gateway-request-1" },
       headers: { "X-Zvenfit-Request-Id": "worker-request-1" },
     });
     const response = responseWithRequestId({ statusCode: 200, body: "{}" }, requestId);
 
-    expect(requestId).toBe("worker-request-1");
-    expect(response.headers?.["X-Request-Id"]).toBe("worker-request-1");
+    expect(requestId).toBe("gateway-request-1");
+    expect(response.headers?.["X-Request-Id"]).toBe("gateway-request-1");
+  });
+
+  it("exposes a valid edge ID separately for use after authentication", () => {
+    expect(trustedEdgeRequestIdForEvent({
+      headers: { "X-Zvenfit-Request-Id": "worker-request-1" },
+    })).toBe("worker-request-1");
+    expect(trustedEdgeRequestIdForEvent({
+      headers: { "X-Zvenfit-Request-Id": "untrusted value" },
+    })).toBeUndefined();
   });
 
   it("prefers the API Gateway request ID to the function runtime ID", () => {

@@ -93,6 +93,7 @@ interface ApiState {
   dashboardFailuresRemaining?: number;
   memberFailuresRemaining?: number;
   historyFailuresRemaining?: number;
+  historyDelayMs?: number;
   createFailuresRemaining?: number;
 }
 
@@ -306,6 +307,9 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "pending" || item.status === "overdue") });
     }
     if (method === "GET" && path === "/api/history") {
+      if ((state.historyDelayMs ?? 0) > 0) {
+        await new Promise((resolve) => setTimeout(resolve, state.historyDelayMs));
+      }
       if ((state.historyFailuresRemaining ?? 0) > 0) {
         state.historyFailuresRemaining = (state.historyFailuresRemaining ?? 1) - 1;
         return fulfill({ error: "History query failed", code: "history_unavailable" }, 500);
@@ -577,6 +581,31 @@ test("keeps tasks and members available when history temporarily fails", async (
   expect(state.requests.filter((request) => request.path === "/api/history")).toHaveLength(
     historyRequestsBeforeRetry + 1,
   );
+});
+
+test("settles an in-flight history retry when switching groups", async ({ page }) => {
+  const state = createState();
+  // Vite's StrictMode runs the initial effect twice in E2E development mode.
+  state.historyFailuresRemaining = 2;
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: "История", exact: true }).click();
+  const retryAction = page.getByRole("alert")
+    .getByRole("button", { name: "Загрузить историю" });
+  await expect(retryAction).toBeVisible();
+
+  state.historyDelayMs = 500;
+  const historyRequestsBeforeRetry = state.requests.filter((request) =>
+    request.path === "/api/history").length;
+  await retryAction.click();
+  await expect.poll(() => state.requests.filter((request) =>
+    request.path === "/api/history").length).toBe(historyRequestsBeforeRetry + 1);
+
+  await page.getByRole("combobox", { name: "Выбранная группа" }).selectOption("home");
+  await page.getByRole("button", { name: "История", exact: true }).click();
+
+  await expect(page.getByText("История пока пуста")).toBeVisible();
+  await expect(page.locator(".history-list.skeleton-list")).toHaveCount(0);
 });
 
 test("recovers from an empty workspace response without leaving disabled controls", async ({ page }) => {

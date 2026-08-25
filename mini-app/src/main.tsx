@@ -809,6 +809,7 @@ function App() {
     }
     const generation = ++refreshGenerationRef.current;
     const historyGeneration = ++historyRefreshGenerationRef.current;
+    setHistoryLoading(false);
     selectWorkspace(selectedId);
     setLoading(true);
     clearError();
@@ -969,6 +970,7 @@ function App() {
 
   async function changeWorkspace(nextWorkspaceId: string) {
     historyRefreshGenerationRef.current += 1;
+    setHistoryLoading(false);
     activeWorkspaceIdRef.current = nextWorkspaceId;
     setWorkspaceId(nextWorkspaceId);
     window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId);

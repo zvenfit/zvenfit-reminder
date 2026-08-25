@@ -45,6 +45,7 @@ import {
   normalizedApiRoute,
   requestIdForEvent,
   responseWithRequestId,
+  trustedEdgeRequestIdForEvent,
 } from "./request-observability.js";
 
 let botInstance: Bot | null = null;
@@ -54,6 +55,7 @@ const TELEGRAM_API_FAILURE_TEXT =
 const INTERNAL_FAILURE_TEXT =
   "⚠️ Не удалось обработать запрос. Попробуйте ещё раз через минуту.";
 const HEALTH_SENTINEL_WORKSPACE_ID = "__runtime-health__";
+export const AUTHENTICATED_WEBHOOK_HEADER = "X-Zvenfit-Webhook-Authenticated";
 
 interface FunctionContext {
   requestId?: string;
@@ -138,6 +140,19 @@ export function buildWebhookFailureResponse(
   }
 
   return { statusCode: 200, body: "" };
+}
+
+function authenticatedWebhookResponse(
+  response: ApiGatewayResponse,
+  requestId: string,
+): ApiGatewayResponse {
+  return responseWithRequestId({
+    ...response,
+    headers: {
+      ...response.headers,
+      [AUTHENTICATED_WEBHOOK_HEADER]: "1",
+    },
+  }, requestId);
 }
 
 export function getBot(): Bot {
@@ -595,7 +610,10 @@ function telegramUpdateKind(update: unknown): string {
   return "other";
 }
 
-async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
+async function handleApi(
+  event: ApiGatewayEvent,
+  requestId: string,
+): Promise<ApiGatewayResponse> {
   // REST API для Mini App, авторизация через X-Telegram-Init-Data
   const config = loadConfig();
   const method = event.httpMethod ?? "GET";
@@ -666,7 +684,13 @@ async function handleApi(event: ApiGatewayEvent): Promise<ApiGatewayResponse> {
       }
       const members = await workspaceMembersRepo.listProfiles(workspace.workspaceId);
       return jsonResponse(200, { members, synced });
-    } catch {
+    } catch (error) {
+      writeFunctionLog("ERROR", "Member sync failed", {
+        event: "member_sync",
+        request_id: requestId,
+        route: "/api/members/sync",
+        ...operationalErrorFields(error),
+      });
       return jsonResponse(502, {
         error: "Member sync is temporarily unavailable",
         code: "member_sync_failed",
@@ -689,19 +713,19 @@ export async function handler(
   const requestId = requestIdForEvent(event, functionContext.requestId);
 
   if (isRuntimeHealthRequest(path, method)) {
-    const config = loadConfig();
-    const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
-    if (secret !== config.webhookSecret) {
-      writeFunctionLog("WARN", "Runtime health check rejected", {
-        event: "runtime_health",
-        request_id: requestId,
-        status_code: 403,
-      });
-      return responseWithRequestId({ statusCode: 403, body: "Forbidden" }, requestId);
-    }
-
     const startedAt = performance.now();
     try {
+      const config = loadConfig();
+      const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
+      if (secret !== config.webhookSecret) {
+        writeFunctionLog("WARN", "Runtime health check rejected", {
+          event: "runtime_health",
+          request_id: requestId,
+          status_code: 403,
+        });
+        return responseWithRequestId({ statusCode: 403, body: "Forbidden" }, requestId);
+      }
+
       await verifyRuntimeReadQueries(config);
       const bot = getBot();
       await bot.api.getMe();
@@ -741,7 +765,7 @@ export async function handler(
     const startedAt = performance.now();
     const route = normalizedApiRoute(path);
     try {
-      const response = await handleApi(event);
+      const response = await handleApi(event, requestId);
       logApiResponse({
         requestId,
         method,
@@ -767,20 +791,24 @@ export async function handler(
   }
 
   if (isWebhookRequest(path, method)) {
-    const config = loadConfig();
-    const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
-    if (secret !== config.webhookSecret) {
-      writeFunctionLog("WARN", "Telegram webhook rejected", {
-        event: "telegram_webhook",
-        request_id: requestId,
-        status_code: 403,
-      });
-      return responseWithRequestId({ statusCode: 403, body: "Forbidden" }, requestId);
-    }
-
     const startedAt = performance.now();
     let update: unknown = {};
+    let edgeRequestId: string | undefined;
+    let webhookAuthenticated = false;
     try {
+      const config = loadConfig();
+      const secret = getHeader(event, "X-Telegram-Bot-Api-Secret-Token");
+      if (secret !== config.webhookSecret) {
+        writeFunctionLog("WARN", "Telegram webhook rejected", {
+          event: "telegram_webhook",
+          request_id: requestId,
+          status_code: 403,
+        });
+        return responseWithRequestId({ statusCode: 403, body: "Forbidden" }, requestId);
+      }
+      webhookAuthenticated = true;
+      edgeRequestId = trustedEdgeRequestIdForEvent(event);
+
       const bot = getBot();
       await ensureBotInitialized(bot);
       const parsedUpdate: Parameters<Bot["handleUpdate"]>[0] = JSON.parse(event.body ?? "{}");
@@ -789,24 +817,29 @@ export async function handler(
       writeFunctionLog("INFO", "Telegram update processed", {
         event: "telegram_webhook",
         request_id: requestId,
+        edge_request_id: edgeRequestId,
         update_kind: telegramUpdateKind(update),
         status_code: 200,
         duration_ms: Math.round(performance.now() - startedAt),
       });
-      return responseWithRequestId({ statusCode: 200, body: "" }, requestId);
+      return authenticatedWebhookResponse({ statusCode: 200, body: "" }, requestId);
     } catch (error) {
       writeFunctionLog("ERROR", "Telegram update processing failed", {
         event: "telegram_webhook",
         request_id: requestId,
+        edge_request_id: edgeRequestId,
         update_kind: telegramUpdateKind(update),
         status_code: 200,
         duration_ms: Math.round(performance.now() - startedAt),
         ...operationalErrorFields(error),
       });
-      return responseWithRequestId(buildWebhookFailureResponse(
+      const response = buildWebhookFailureResponse(
         update,
         isTelegramTransportFailure(error) ? TELEGRAM_API_FAILURE_TEXT : INTERNAL_FAILURE_TEXT,
-      ), requestId);
+      );
+      return webhookAuthenticated
+        ? authenticatedWebhookResponse(response, requestId)
+        : responseWithRequestId(response, requestId);
     }
   }
 

@@ -1,5 +1,6 @@
 import {
   createRequestId,
+  normalizeRequestId,
   operationalErrorFields,
   writeFunctionLog,
 } from "@zvenfit-reminder/shared";
@@ -24,11 +25,14 @@ export function requestIdForEvent(
   functionRequestId?: string,
 ): string {
   return createRequestId(
-    getHeader(event, "X-Zvenfit-Request-Id"),
     event.requestContext?.requestId,
     event.requestContext?.request_id,
     functionRequestId,
   );
+}
+
+export function trustedEdgeRequestIdForEvent(event: ApiGatewayEvent): string | undefined {
+  return normalizeRequestId(getHeader(event, "X-Zvenfit-Request-Id")) ?? undefined;
 }
 
 export function normalizedApiRoute(path: string): string {

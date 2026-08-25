@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfig } from "./types.js";
+import { ConfigurationError, loadConfig } from "./types.js";
 
 function stubRequiredConfig(): void {
   vi.stubEnv("YDB_ENDPOINT", "grpc://unused");
@@ -29,6 +29,7 @@ describe("loadConfig", () => {
     vi.stubEnv("TELEGRAM_API_ROOT", "https://reminder.example.workers.dev/telegram");
     vi.stubEnv("TELEGRAM_PROXY_SECRET", "");
 
+    expect(() => loadConfig()).toThrow(ConfigurationError);
     expect(() => loadConfig()).toThrow("must be configured together");
   });
 });

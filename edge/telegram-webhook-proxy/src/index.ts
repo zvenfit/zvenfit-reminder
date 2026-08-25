@@ -20,6 +20,7 @@ export const MAX_TELEGRAM_FILE_BYTES = 512 * 1024;
 const TELEGRAM_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 const TELEGRAM_PROXY_SECRET_HEADER = "X-Zvenfit-Telegram-Proxy-Secret";
 const TELEGRAM_BOT_TOKEN_HEADER = "X-Zvenfit-Telegram-Bot-Token";
+const AUTHENTICATED_WEBHOOK_HEADER = "X-Zvenfit-Webhook-Authenticated";
 const JSON_CONTENT_TYPE = "application/json";
 const YANDEX_FUNCTION_HOST = "functions.yandexcloud.net";
 const FUNCTION_PATH_PATTERN = /^\/[a-z0-9]+$/;
@@ -43,6 +44,7 @@ const encoder = new TextEncoder();
 interface WorkerRequestContext {
   requestId: string;
   route: string;
+  trusted: boolean;
 }
 
 function workerRequestId(request: Request): string {
@@ -82,6 +84,13 @@ function logWorkerDependencyError(
     stage,
     error_name: workerErrorName(error),
   }));
+}
+
+function shouldLogWorkerRequest(
+  context: WorkerRequestContext,
+  response: Response,
+): boolean {
+  return context.trusted || response.status >= 500;
 }
 
 function responseWithRequestId(response: Response, requestId: string): Response {
@@ -169,6 +178,12 @@ async function handleTelegramApiRequest(
   secretsEqual: SecretComparator,
   context: WorkerRequestContext,
 ): Promise<Response> {
+  const providedSecret = request.headers.get(TELEGRAM_PROXY_SECRET_HEADER);
+  if (!providedSecret || !await secretsEqual(providedSecret, env.TELEGRAM_PROXY_SECRET)) {
+    return jsonResponse(403, { error: "Forbidden" });
+  }
+  context.trusted = true;
+
   if (request.method !== "POST") {
     return jsonResponse(405, { error: "Method not allowed" }, { Allow: "POST" });
   }
@@ -179,11 +194,6 @@ async function handleTelegramApiRequest(
   const contentType = request.headers.get("Content-Type")?.toLowerCase() ?? "";
   if (!contentType.startsWith(JSON_CONTENT_TYPE)) {
     return jsonResponse(415, { error: "Expected application/json" });
-  }
-
-  const providedSecret = request.headers.get(TELEGRAM_PROXY_SECRET_HEADER);
-  if (!providedSecret || !await secretsEqual(providedSecret, env.TELEGRAM_PROXY_SECRET)) {
-    return jsonResponse(403, { error: "Forbidden" });
   }
 
   const botToken = request.headers.get(TELEGRAM_BOT_TOKEN_HEADER);
@@ -256,12 +266,14 @@ async function handleTelegramFileRequest(
   secretsEqual: SecretComparator,
   context: WorkerRequestContext,
 ): Promise<Response> {
-  if (request.method !== "GET") {
-    return jsonResponse(405, { error: "Method not allowed" }, { Allow: "GET" });
-  }
   const providedSecret = request.headers.get(TELEGRAM_PROXY_SECRET_HEADER);
   if (!providedSecret || !await secretsEqual(providedSecret, env.TELEGRAM_PROXY_SECRET)) {
     return jsonResponse(403, { error: "Forbidden" });
+  }
+  context.trusted = true;
+
+  if (request.method !== "GET") {
+    return jsonResponse(405, { error: "Method not allowed" }, { Allow: "GET" });
   }
   const botToken = request.headers.get(TELEGRAM_BOT_TOKEN_HEADER);
   if (!botToken || !TELEGRAM_BOT_TOKEN_PATTERN.test(botToken)) {
@@ -396,7 +408,10 @@ async function handleRequestCore(
     logWorkerDependencyError(context, "webhook_origin", error);
     return jsonResponse(502, { error: "Origin unavailable" });
   }
+  context.trusted = originResponse.headers.get(AUTHENTICATED_WEBHOOK_HEADER) === "1";
 
+  // Rebuild the public response headers so the internal authentication marker
+  // cannot leave the Worker-to-function trust boundary.
   const responseHeaders = new Headers({ "Cache-Control": "no-store" });
   const originContentType = originResponse.headers.get("Content-Type");
   if (originContentType) {
@@ -420,6 +435,7 @@ export async function handleRequest(
   const context: WorkerRequestContext = {
     requestId: workerRequestId(request),
     route: workerRoute(requestUrl),
+    trusted: false,
   };
   const startedAt = performance.now();
   try {
@@ -430,26 +446,28 @@ export async function handleRequest(
       secretsEqual,
       context,
     );
-    const payload = JSON.stringify({
-      message: "Worker request completed",
-      event: "worker_request",
-      request_id: context.requestId,
-      route: context.route,
-      http_method: request.method,
-      status_code: response.status,
-      duration_ms: Math.round(performance.now() - startedAt),
-      outcome: response.status >= 500
-        ? "server_error"
-        : response.status >= 400
-          ? "client_error"
-          : "ok",
-    });
-    if (response.status >= 500) {
-      console.error(payload);
-    } else if (response.status >= 400) {
-      console.warn(payload);
-    } else {
-      console.log(payload);
+    if (shouldLogWorkerRequest(context, response)) {
+      const payload = JSON.stringify({
+        message: "Worker request completed",
+        event: "worker_request",
+        request_id: context.requestId,
+        route: context.route,
+        http_method: request.method,
+        status_code: response.status,
+        duration_ms: Math.round(performance.now() - startedAt),
+        outcome: response.status >= 500
+          ? "server_error"
+          : response.status >= 400
+            ? "client_error"
+            : "ok",
+      });
+      if (response.status >= 500) {
+        console.error(payload);
+      } else if (response.status >= 400) {
+        console.warn(payload);
+      } else {
+        console.log(payload);
+      }
     }
     return responseWithRequestId(response, context.requestId);
   } catch (error) {
