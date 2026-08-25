@@ -20,8 +20,8 @@ export async function handler(
 ): Promise<{ statusCode: number; body: string }> {
   const requestId = createRequestId(context.requestId);
   const startedAt = performance.now();
-  const config = loadConfig();
   try {
+    const config = loadConfig();
     const stats = await runDispatcher(config);
     const hasOperationalErrors = stats.failed > 0 || stats.unknown > 0 || stats.errors.length > 0;
     writeFunctionLog(hasOperationalErrors ? "ERROR" : "INFO", "Reminder dispatcher completed", {
@@ -39,6 +39,7 @@ export async function handler(
       skipped: stats.skipped,
       error_count: stats.errors.length,
       error_codes: [...new Set(stats.errors)],
+      error_causes: stats.errorCauses,
     });
     return {
       statusCode: hasOperationalErrors ? 500 : 200,

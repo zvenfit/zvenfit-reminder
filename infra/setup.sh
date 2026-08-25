@@ -15,7 +15,6 @@ BOT_FN="zvenfit-reminder-bot"
 CRON_FN="zvenfit-reminder-cron"
 APIGW_NAME="zvenfit-reminder-api"
 LOG_GROUP_NAME="zvenfit-reminder"
-LOG_RETENTION="720h"
 
 echo "==> Создаём runtime, invoker и deploy service accounts..."
 yc iam service-account create --name "$RUNTIME_SA_NAME" --folder-id "$YC_FOLDER_ID" 2>/dev/null || true
@@ -25,14 +24,12 @@ RUNTIME_SA_ID=$(yc iam service-account get --name "$RUNTIME_SA_NAME" --folder-id
 INVOKER_SA_ID=$(yc iam service-account get --name "$INVOKER_SA_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
 DEPLOY_SA_ID=$(yc iam service-account get --name "$DEPLOY_SA_NAME" --folder-id "$YC_FOLDER_ID" --format json | jq -r .id)
 
-echo "==> Настраиваем production log group на 30 дней..."
+echo "==> Проверяем production log group (retention управляется владельцем)..."
 if yc logging group get --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" >/dev/null 2>&1; then
-  yc logging group update --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" \
-    --retention-period "$LOG_RETENTION"
+  :
 else
   yc logging group create --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" \
-    --description "ZvenFit Reminder production logs" \
-    --retention-period "$LOG_RETENTION"
+    --description "ZvenFit Reminder production logs"
 fi
 LOG_GROUP_ID=$(yc logging group get --name "$LOG_GROUP_NAME" --folder-id "$YC_FOLDER_ID" \
   --format json | jq -r .id)

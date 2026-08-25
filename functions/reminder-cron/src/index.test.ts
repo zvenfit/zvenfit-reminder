@@ -12,6 +12,7 @@ vi.mock("@zvenfit-reminder/shared", async (importOriginal) => {
 vi.mock("./dispatcher.js", () => ({ runDispatcher: vi.fn() }));
 
 import { runDispatcher } from "./dispatcher.js";
+import { loadConfig } from "@zvenfit-reminder/shared";
 import { handler } from "./index.js";
 
 const stats = {
@@ -26,10 +27,13 @@ const stats = {
   unknown: 0,
   skipped: 0,
   errors: [],
+  errorCauses: [],
 };
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.mocked(loadConfig).mockReset();
+  vi.mocked(loadConfig).mockImplementation(() => ({} as ReturnType<typeof loadConfig>));
   vi.mocked(runDispatcher).mockReset();
 });
 
@@ -53,6 +57,7 @@ describe("cron handler observability", () => {
       sent: 0,
       unknown: 1,
       errors: ["send_lease_lost"],
+      errorCauses: ["delivery_send:send_lease_lost:error"],
     });
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
@@ -62,5 +67,22 @@ describe("cron handler observability", () => {
     const entry = String(consoleError.mock.calls[0]?.[0]);
     expect(entry).toContain('"unknown":1');
     expect(entry).toContain('"error_codes":["send_lease_lost"]');
+    expect(entry).toContain('"error_causes":["delivery_send:send_lease_lost:error"]');
+  });
+
+  it("logs configuration failures through the fatal boundary", async () => {
+    vi.mocked(loadConfig).mockImplementationOnce(() => {
+      const error = new Error("Missing secret value");
+      error.name = "ConfigurationError";
+      throw error;
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(handler()).rejects.toThrow("Missing secret value");
+
+    const entry = String(consoleError.mock.calls[0]?.[0]);
+    expect(entry).toContain('"level":"FATAL"');
+    expect(entry).toContain('"error_code":"configuration_error"');
+    expect(entry).not.toContain("Missing secret value");
   });
 });

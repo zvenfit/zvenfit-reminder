@@ -47,6 +47,28 @@ export function operationalErrorFields(error: unknown): {
     return { error_code: `ydb_${ydbCode}`, error_name: normalizedName };
   }
 
+  const structuredError = error as Error & {
+    error_code?: unknown;
+    method?: unknown;
+    status?: unknown;
+  };
+  const telegramStatus = normalizedName === "grammy_error"
+    ? structuredError.error_code
+    : normalizedName === "telegram_http_error"
+      ? structuredError.status
+      : undefined;
+  if (
+    typeof telegramStatus === "number" &&
+    Number.isInteger(telegramStatus) &&
+    telegramStatus >= 100 &&
+    telegramStatus <= 599
+  ) {
+    return { error_code: `telegram_http_${telegramStatus}`, error_name: normalizedName };
+  }
+  if (normalizedName === "http_error" && typeof structuredError.method === "string") {
+    return { error_code: "telegram_transport_error", error_name: normalizedName };
+  }
+
   return {
     error_code: normalizedName,
     error_name: normalizedName,

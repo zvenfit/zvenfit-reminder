@@ -37,6 +37,27 @@ describe("function observability", () => {
     });
   });
 
+  it("classifies Telegram response and transport failures without their text", () => {
+    const responseError = Object.assign(new Error("Forbidden: private details"), {
+      name: "GrammyError",
+      error_code: 403,
+      method: "getChatMember",
+    });
+    const transportError = Object.assign(new Error("request contained a bot token"), {
+      name: "HttpError",
+      method: "getChatMember",
+    });
+
+    expect(operationalErrorFields(responseError)).toEqual({
+      error_code: "telegram_http_403",
+      error_name: "grammy_error",
+    });
+    expect(operationalErrorFields(transportError)).toEqual({
+      error_code: "telegram_transport_error",
+      error_name: "http_error",
+    });
+  });
+
   it("writes single-line structured entries at the requested severity", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 

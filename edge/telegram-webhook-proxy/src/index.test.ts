@@ -11,6 +11,7 @@ const ORIGIN_URL = "https://functions.yandexcloud.net/d4e3h1o2eoa1vp5g7ec5";
 const SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 const PROXY_SECRET_HEADER = "X-Zvenfit-Telegram-Proxy-Secret";
 const BOT_TOKEN_HEADER = "X-Zvenfit-Telegram-Bot-Token";
+const AUTHENTICATED_WEBHOOK_HEADER = "X-Zvenfit-Webhook-Authenticated";
 const BOT_TOKEN = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef_123";
 const env: WorkerEnv = { ORIGIN_URL, TELEGRAM_PROXY_SECRET: "proxy-secret" };
 const compareSecrets = async (provided: string, expected: string) => provided === expected;
@@ -40,6 +41,121 @@ describe("Telegram webhook proxy", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
     expect(originFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not persist routine public health, not-found, or unauthorized requests", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const originFetch = vi.fn<OriginFetch>();
+
+    const health = await handleRequest(
+      new Request("https://proxy.example/health"),
+      env,
+      originFetch,
+      compareSecrets,
+    );
+    const missing = await handleRequest(
+      new Request("https://proxy.example/not-found"),
+      env,
+      originFetch,
+      compareSecrets,
+    );
+    const forbidden = await handleRequest(
+      new Request("https://proxy.example/telegram/getMe", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          [PROXY_SECRET_HEADER]: "wrong-secret",
+          [BOT_TOKEN_HEADER]: BOT_TOKEN,
+        },
+        body: "{}",
+      }),
+      env,
+      originFetch,
+      compareSecrets,
+    );
+
+    expect([health.status, missing.status, forbidden.status]).toEqual([200, 404, 403]);
+    expect(consoleLog).not.toHaveBeenCalled();
+    expect(consoleWarn).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+    consoleError.mockRestore();
+  });
+
+  it("keeps client errors from authenticated internal callers searchable", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const originFetch = vi.fn<OriginFetch>();
+    const authenticatedHeaders = {
+      "Content-Type": "application/json",
+      [PROXY_SECRET_HEADER]: "proxy-secret",
+      [BOT_TOKEN_HEADER]: BOT_TOKEN,
+    };
+    const requests = [
+      new Request("https://proxy.example/telegram/getMe", {
+        method: "POST",
+        headers: {
+          ...authenticatedHeaders,
+          [BOT_TOKEN_HEADER]: "invalid-token",
+        },
+        body: "{}",
+      }),
+      new Request("https://proxy.example/telegram/getMe", {
+        method: "GET",
+        headers: authenticatedHeaders,
+      }),
+      new Request("https://proxy.example/telegram/setWebhook", {
+        method: "POST",
+        headers: authenticatedHeaders,
+        body: "{}",
+      }),
+      new Request("https://proxy.example/telegram/getMe", {
+        method: "POST",
+        headers: {
+          ...authenticatedHeaders,
+          "Content-Type": "text/plain",
+        },
+        body: "{}",
+      }),
+      new Request("https://proxy.example/telegram-file/photos/avatar.jpg", {
+        method: "POST",
+        headers: authenticatedHeaders,
+      }),
+    ];
+
+    const responses = await Promise.all(requests.map((request) =>
+      handleRequest(request, env, originFetch, compareSecrets)));
+
+    expect(responses.map((response) => response.status)).toEqual([403, 405, 404, 415, 405]);
+    expect(consoleWarn).toHaveBeenCalledTimes(5);
+    for (const call of consoleWarn.mock.calls) {
+      expect(String(call[0])).toContain('"event":"worker_request"');
+    }
+    expect(originFetch).not.toHaveBeenCalled();
+    consoleWarn.mockRestore();
+  });
+
+  it("trusts webhook traffic only after the origin confirms secret verification", async () => {
+    const consoleLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const originFetch = vi.fn<OriginFetch>()
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(new Response("", {
+        status: 200,
+        headers: { [AUTHENTICATED_WEBHOOK_HEADER]: "1" },
+      }));
+
+    const unverified = await handleRequest(telegramRequest(), env, originFetch);
+    const verified = await handleRequest(telegramRequest(), env, originFetch);
+
+    expect(unverified.status).toBe(200);
+    expect(verified.status).toBe(200);
+    expect(consoleLog).toHaveBeenCalledOnce();
+    expect(String(consoleLog.mock.calls[0]?.[0])).toContain('"event":"worker_request"');
+    expect(unverified.headers.has(AUTHENTICATED_WEBHOOK_HEADER)).toBe(false);
+    expect(verified.headers.has(AUTHENTICATED_WEBHOOK_HEADER)).toBe(false);
+    consoleLog.mockRestore();
   });
 
   it("proxies allowlisted Telegram API methods without exposing the token in its public URL", async () => {

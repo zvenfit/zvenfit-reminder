@@ -6,8 +6,11 @@ import {
   buildOccurrenceMessage,
   escapeHtml,
   occurrenceCallbackData,
+  operationalErrorFields,
   telegramApiRequest,
   type AppConfig,
+  type DeliveryValidation,
+  type NotificationDelivery,
   type ReminderOccurrence,
   type ReservedDelivery,
 } from "@zvenfit-reminder/shared";
@@ -29,6 +32,7 @@ export interface DispatcherStats {
   unknown: number;
   skipped: number;
   errors: string[];
+  errorCauses: string[];
 }
 
 interface InlineKeyboardMarkup {
@@ -273,6 +277,39 @@ function sanitizedErrorCode(error: unknown): string {
     : "telegram_transport_unknown";
 }
 
+function recordDispatcherCause(
+  stats: DispatcherStats,
+  stage: string,
+  error: unknown,
+  explicitCode?: string,
+): void {
+  const fields = operationalErrorFields(error);
+  const cause = `${stage}:${explicitCode ?? fields.error_code}:${fields.error_name}`;
+  if (!stats.errorCauses.includes(cause)) {
+    stats.errorCauses.push(cause);
+  }
+}
+
+function recordDispatcherError(
+  stats: DispatcherStats,
+  stage: string,
+  error: unknown,
+): void {
+  stats.errors.push(stage);
+  recordDispatcherCause(stats, stage, error);
+}
+
+function recordDispatcherStateCause(
+  stats: DispatcherStats,
+  stage: string,
+  errorCode: string,
+): void {
+  const cause = `${stage}:${errorCode}:delivery_state`;
+  if (!stats.errorCauses.includes(cause)) {
+    stats.errorCauses.push(cause);
+  }
+}
+
 async function cleanupPreviousMessage(
   config: AppConfig,
   reservation: ReservedDelivery,
@@ -315,16 +352,23 @@ async function dispatchReservation(
   dependencies: DispatcherDependencies,
   stats: DispatcherStats,
 ): Promise<void> {
-  const validation = await dependencies.deliveries.beginSend(
-    reservation.delivery.workspaceId,
-    reservation.delivery.deliveryKey,
-    new Date(),
-  );
+  let validation: DeliveryValidation;
+  try {
+    validation = await dependencies.deliveries.beginSend(
+      reservation.delivery.workspaceId,
+      reservation.delivery.deliveryKey,
+      new Date(),
+    );
+  } catch (error) {
+    recordDispatcherError(stats, "delivery_begin_send_failed", error);
+    return;
+  }
   if (!validation.valid || validation.targetChatId !== reservation.targetChatId) {
     stats.skipped += 1;
     return;
   }
-  let sentMessageId: number | null = null;
+
+  let sentMessageId: number;
   try {
     const text = buildOccurrenceMessage(
       reservation.occurrence,
@@ -337,44 +381,7 @@ async function dispatchReservation(
       text,
       deliveryKeyboard(reservation.occurrence),
     );
-    const delivery = await dependencies.deliveries.recordResult(
-      reservation.delivery.workspaceId,
-      reservation.delivery.deliveryKey,
-      { status: "sent", telegramMessageId: sentMessageId },
-      new Date(),
-    );
-    if (!delivery) {
-      throw new Error("Reserved delivery disappeared before finalization");
-    }
-    if (delivery.status !== "sent") {
-      await retireMessage(
-        config,
-        dependencies.telegram,
-        reservation.targetChatId,
-        sentMessageId,
-      );
-      stats.unknown += 1;
-      stats.errors.push(delivery.errorCode ?? "send_lease_lost");
-      return;
-    }
-    await cleanupPreviousMessage(
-      config,
-      {
-        ...reservation,
-        delivery: { ...delivery, telegramMessageId: sentMessageId },
-      },
-      dependencies.telegram,
-    );
-    stats.sent += 1;
   } catch (error) {
-    if (sentMessageId != null) {
-      await retireMessage(
-        config,
-        dependencies.telegram,
-        reservation.targetChatId,
-        sentMessageId,
-      );
-    }
     const status = error instanceof TelegramHttpError ? "failed" : "unknown";
     const errorCode = sanitizedErrorCode(error);
     try {
@@ -384,12 +391,85 @@ async function dispatchReservation(
         { status, errorCode },
         new Date(),
       );
-    } catch {
-      stats.errors.push("delivery_result_persist_failed");
+    } catch (persistError) {
+      recordDispatcherError(stats, "delivery_result_persist_failed", persistError);
     }
     stats[status] += 1;
     stats.errors.push(errorCode);
+    recordDispatcherCause(
+      stats,
+      "delivery_send",
+      error,
+      error instanceof TelegramHttpError ? errorCode : undefined,
+    );
+    return;
   }
+
+  let delivery: NotificationDelivery | null;
+  try {
+    delivery = await dependencies.deliveries.recordResult(
+      reservation.delivery.workspaceId,
+      reservation.delivery.deliveryKey,
+      { status: "sent", telegramMessageId: sentMessageId },
+      new Date(),
+    );
+  } catch (error) {
+    await retireMessage(
+      config,
+      dependencies.telegram,
+      reservation.targetChatId,
+      sentMessageId,
+    );
+    recordDispatcherError(stats, "delivery_result_persist_failed", error);
+    try {
+      await dependencies.deliveries.recordResult(
+        reservation.delivery.workspaceId,
+        reservation.delivery.deliveryKey,
+        { status: "unknown", errorCode: "delivery_result_persist_failed" },
+        new Date(),
+      );
+    } catch (recoveryError) {
+      recordDispatcherError(stats, "delivery_result_recovery_failed", recoveryError);
+    }
+    stats.unknown += 1;
+    return;
+  }
+
+  if (!delivery) {
+    await retireMessage(
+      config,
+      dependencies.telegram,
+      reservation.targetChatId,
+      sentMessageId,
+    );
+    const error = new Error("Reserved delivery disappeared before finalization");
+    error.name = "DeliveryResultMissingError";
+    recordDispatcherError(stats, "delivery_result_persist_failed", error);
+    stats.unknown += 1;
+    return;
+  }
+  if (delivery.status !== "sent") {
+    await retireMessage(
+      config,
+      dependencies.telegram,
+      reservation.targetChatId,
+      sentMessageId,
+    );
+    const errorCode = delivery.errorCode ?? "send_lease_lost";
+    stats.unknown += 1;
+    stats.errors.push(errorCode);
+    recordDispatcherStateCause(stats, "delivery_result_conflict", errorCode);
+    return;
+  }
+  await cleanupPreviousMessage(
+    config,
+    {
+      ...reservation,
+      delivery: { ...delivery, telegramMessageId: sentMessageId },
+    },
+    dependencies.telegram,
+  );
+  stats.sent += 1;
 }
 
 export async function runDispatcher(
@@ -410,6 +490,7 @@ export async function runDispatcher(
     unknown: 0,
     skipped: 0,
     errors: [],
+    errorCauses: [],
   };
   const workspaces = await dependencies.workspaces.listActive();
   stats.workspaces = workspaces.length;
@@ -438,9 +519,9 @@ export async function runDispatcher(
                 finalized.occurrence.latestMessageId,
                 messageSyncText(finalized.occurrence, now),
               );
-            } catch {
+            } catch (error) {
               telegramFinalized = false;
-              stats.errors.push("completion_message_finalize_failed");
+              recordDispatcherError(stats, "completion_message_finalize_failed", error);
             }
           }
           if (finalized && telegramFinalized) {
@@ -452,12 +533,12 @@ export async function runDispatcher(
           }
           stats.completionFinalized += finalized ? 1 : 0;
           stats.skipped += finalized ? 0 : 1;
-        } catch {
-          stats.errors.push("completion_finalize_failed");
+        } catch (error) {
+          recordDispatcherError(stats, "completion_finalize_failed", error);
         }
       }
-    } catch {
-      stats.errors.push("completion_scan_failed");
+    } catch (error) {
+      recordDispatcherError(stats, "completion_scan_failed", error);
     }
 
     try {
@@ -465,12 +546,20 @@ export async function runDispatcher(
         workspace.workspaceId,
       );
       for (const candidate of messageCandidates) {
-        const claim = await dependencies.occurrences.beginMessageSync(
-          workspace.workspaceId,
-          candidate.occurrence.occurrenceId,
-          candidate.stateRevision,
-          now,
-        );
+        let claim: Awaited<ReturnType<
+          DispatcherDependencies["occurrences"]["beginMessageSync"]
+        >>;
+        try {
+          claim = await dependencies.occurrences.beginMessageSync(
+            workspace.workspaceId,
+            candidate.occurrence.occurrenceId,
+            candidate.stateRevision,
+            now,
+          );
+        } catch (error) {
+          recordDispatcherError(stats, "message_sync_begin_failed", error);
+          continue;
+        }
         if (!claim) {
           stats.skipped += 1;
           continue;
@@ -506,8 +595,8 @@ export async function runDispatcher(
           }
           succeeded = true;
           stats.messagesSynced += 1;
-        } catch {
-          stats.errors.push("message_sync_failed");
+        } catch (error) {
+          recordDispatcherError(stats, "message_sync_failed", error);
         } finally {
           try {
             await dependencies.occurrences.finishMessageSync(
@@ -517,13 +606,13 @@ export async function runDispatcher(
               syncKey,
               succeeded,
             );
-          } catch {
-            stats.errors.push("message_sync_finalize_failed");
+          } catch (error) {
+            recordDispatcherError(stats, "message_sync_finalize_failed", error);
           }
         }
       }
-    } catch {
-      stats.errors.push("message_sync_scan_failed");
+    } catch (error) {
+      recordDispatcherError(stats, "message_sync_scan_failed", error);
     }
 
     try {
@@ -540,12 +629,12 @@ export async function runDispatcher(
           );
           stats.materialized += occurrence ? 1 : 0;
           stats.skipped += occurrence ? 0 : 1;
-        } catch {
-          stats.errors.push("occurrence_materialize_failed");
+        } catch (error) {
+          recordDispatcherError(stats, "occurrence_materialize_failed", error);
         }
       }
-    } catch {
-      stats.errors.push("occurrence_scan_failed");
+    } catch (error) {
+      recordDispatcherError(stats, "occurrence_scan_failed", error);
     }
 
     try {
@@ -554,24 +643,30 @@ export async function runDispatcher(
         now,
       );
       for (const candidate of deliveryCandidates) {
+        let reservation: ReservedDelivery | null;
         try {
-          const reservation = await dependencies.deliveries.reserve(
+          reservation = await dependencies.deliveries.reserve(
             workspace.workspaceId,
             candidate.occurrenceId,
             now,
           );
-          if (!reservation) {
-            stats.skipped += 1;
-            continue;
-          }
-          stats.reserved += 1;
+        } catch (error) {
+          recordDispatcherError(stats, "delivery_reserve_failed", error);
+          continue;
+        }
+        if (!reservation) {
+          stats.skipped += 1;
+          continue;
+        }
+        stats.reserved += 1;
+        try {
           await dispatchReservation(config, reservation, dependencies, stats);
-        } catch {
-          stats.errors.push("delivery_reserve_failed");
+        } catch (error) {
+          recordDispatcherError(stats, "delivery_dispatch_failed", error);
         }
       }
-    } catch {
-      stats.errors.push("delivery_scan_failed");
+    } catch (error) {
+      recordDispatcherError(stats, "delivery_scan_failed", error);
     }
   }
 

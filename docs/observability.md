@@ -3,12 +3,16 @@
 ## Хранение
 
 - Yandex Cloud Functions и API Gateway пишут в custom log group
-  `zvenfit-reminder` с retention 30 дней.
+  `zvenfit-reminder`. Retention и ротацией управляет владелец облака: CI и
+  `infra/setup.sh` только находят или создают группу и не проверяют и не меняют
+  срок хранения.
 - Cloudflare Worker хранит только явно записанные приложением структурированные
   события. Автоматические invocation logs отключены, потому что они могут
-  индексировать закрытые request headers. Retention Workers Logs ограничен
-  возможностями Cloudflare; основная долговременная история находится в Yandex
-  Cloud Logging и YDB audit/delivery tables.
+  индексировать закрытые request headers. Обычные публичные health, 404 и
+  неавторизованные 4xx не сохраняются; доверенные запросы, dependency errors и
+  5xx сохраняются полностью. Retention Workers Logs ограничен возможностями
+  Cloudflare; основная долговременная история находится в Yandex Cloud Logging
+  и YDB audit/delivery tables.
 - `audit_events` отвечает за бизнес-действия, а `notification_deliveries` — за
   фактические попытки отправки. Они не заменяют execution logs и проверяются
   вместе с ними.
@@ -17,9 +21,11 @@
 
 Все production-события однострочные и содержат машинные поля:
 
-- `event`: `api_request`, `telegram_webhook`, `runtime_health`,
+- `event`: `api_request`, `member_sync`, `telegram_webhook`, `runtime_health`,
   `cron_dispatch`, `worker_request` или `worker_dependency_error`;
-- `request_id`: корреляция внутри запроса и на маршруте Worker → bot-function;
+- `request_id`: канонический ID платформы, которая обрабатывает запрос;
+- `edge_request_id`: доверенный ID Worker в логах bot-function после успешной
+  проверки webhook secret;
 - `route`: нормализованный маршрут без occurrence/reminder/user ID;
 - `status_code`, `duration_ms`, `error_code` и счётчики конкретного процесса.
 
@@ -27,7 +33,8 @@
 Telegram init data, bot/proxy/webhook tokens, service-account JSON, тексты
 личных напоминаний и Telegram chat/user/message IDs. Неизвестная ошибка
 записывается как тип и стабильный код; для YDB сохраняется числовой issue code,
-но не SQL и не исходный текст исключения.
+для Telegram — безопасный HTTP status или transport-класс, но не SQL и не
+исходный текст исключения.
 
 ## Cron summary
 
@@ -36,7 +43,15 @@ Telegram init data, bot/proxy/webhook tokens, service-account JSON, тексты
 - `workspaces`, `materialized`, `reserved`, `sent`;
 - `failed`, `unknown`, `skipped`;
 - `completion_finalized`, `messages_synced`;
-- `error_count`, `error_codes`, `duration_ms`.
+- `error_count`, `error_codes`, `error_causes`, `duration_ms`.
+
+`error_codes` показывает этап или итог отправки. `error_causes` содержит
+дедуплицированные безопасные значения `stage:error_code:error_name`, чтобы
+отличить YDB, Telegram и транспортные сбои без исходного текста исключения.
+Claim и persistence операции имеют отдельные этапы: scan и begin-sync,
+reserve и begin-send, Telegram send, сохранение результата и recovery. Поэтому
+ошибка YDB не маскируется транспортным кодом и по summary видно, до какой
+границы успел дойти dispatcher.
 
 Если есть `failed`, `unknown` или непустой `errors`, событие имеет уровень
 `ERROR`, а response cron-функции — `500`. Полное падение до получения stats
@@ -47,8 +62,12 @@ Telegram init data, bot/proxy/webhook tokens, service-account JSON, тексты
 1. Зафиксировать время, endpoint и `X-Request-Id` из ответа Mini App.
 2. Найти `api_request` по `request_id`; проверить `route`, `status_code`,
    `duration_ms` и `error_code`.
-3. Для Telegram webhook найти такой же `request_id` в Cloudflare
-   `worker_request` и Yandex `telegram_webhook`.
+3. Для Telegram webhook взять `request_id` из Cloudflare `worker_request` и
+   найти его как `edge_request_id` в Yandex `telegram_webhook`; локальный
+   `request_id` bot-function при этом остаётся доверенным platform ID. Worker
+   считает webhook доверенным только по внутреннему response marker, который
+   bot-function выставляет после проверки webhook secret; наружу этот marker
+   не возвращается.
 4. Для уведомления найти ближайший `cron_dispatch`, затем проверить
    `notification_deliveries` по status и `error_code` и соответствующие
    `audit_events`.

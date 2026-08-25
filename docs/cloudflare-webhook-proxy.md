@@ -12,12 +12,16 @@ Cloud Functions также идут через закрытый маршрут W
 - Принимаются только JSON `POST /` и `POST /webhook` с непустым заголовком
   `X-Telegram-Bot-Api-Secret-Token`.
 - Bot-функция повторно сравнивает заголовок с `WEBHOOK_SECRET` и отвечает `403`
-  при несовпадении.
+  при несовпадении. После успешной проверки она добавляет во внутренний ответ
+  marker аутентификации: Worker использует его для решения о записи telemetry
+  и удаляет из публичного ответа.
 - Update больше 1 MiB не пересылается.
 - При недоступности origin Worker возвращает `502`, поэтому Telegram повторит
   доставку.
 - Outbound-маршрут принимает только JSON до 256 KiB, отдельный proxy secret и
-  валидный bot token в закрытых заголовках.
+  валидный bot token в закрытых заголовках. Proxy secret проверяется до метода,
+  allowlist и content type, поэтому ошибки доверенного внутреннего клиента
+  остаются расследуемыми, а публичный клиент не получает лишних деталей.
 - Разрешены только необходимые методы: `getMe`, `getChatMember`, `sendMessage`,
   `editMessageText`, `deleteMessage`, `answerCallbackQuery`,
   `savePreparedKeyboardButton`, `getUserProfilePhotos` и `getFile`.
@@ -29,7 +33,12 @@ Cloud Functions также идут через закрытый маршрут W
 - Автоматические invocation logs отключены: они могут индексировать закрытые
   заголовки запроса. Вместо них Worker пишет безопасные structured events с
   `request_id`, категорией маршрута, HTTP-статусом и длительностью, но без
-  headers, body, file path и Telegram-идентификаторов.
+  headers, body, file path и Telegram-идентификаторов. Публичные health, 404 и
+  неавторизованные 4xx не сохраняются; после проверки proxy secret или
+  подтверждённой bot-функцией проверки webhook secret сохраняются и успешные,
+  и ошибочные запросы, а dependency errors и 5xx не семплируются.
+- `request_id` Worker передаётся origin только как `edge_request_id`; канонический
+  `request_id` bot-function всегда берётся из Yandex runtime/API Gateway.
 
 ## Локальная проверка
 

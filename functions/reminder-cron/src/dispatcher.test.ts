@@ -517,7 +517,7 @@ describe("runDispatcher", () => {
       occurrences: {
         ...noMessageSync(),
         listRuntimeCandidates: vi.fn()
-          .mockRejectedValueOnce(new Error("workspace a unavailable"))
+          .mockRejectedValueOnce(new Error("code = 400080; SELECT private_value"))
           .mockResolvedValueOnce([]),
         materialize: vi.fn(),
       },
@@ -538,10 +538,53 @@ describe("runDispatcher", () => {
 
     expect(stats.workspaces).toBe(2);
     expect(stats.errors).toContain("occurrence_scan_failed");
+    expect(stats.errorCauses).toContain("occurrence_scan_failed:ydb_400080:error");
+    expect(stats.errorCauses.join(" ")).not.toContain("SELECT");
     expect(dependencies.occurrences.listRuntimeCandidates).toHaveBeenCalledWith(
       "workspace-b",
       expect.any(Date),
     );
+  });
+
+  it("distinguishes message-sync claim failures from scan failures", async () => {
+    const item = occurrence();
+    const dependencies = {
+      workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      actions: {
+        listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
+        finalizeCompletion: vi.fn(),
+      },
+      occurrences: {
+        listMessageSyncCandidates: vi.fn().mockResolvedValue([{
+          occurrence: item,
+          stateRevision: item.stateRevision,
+          retireOnly: false,
+        }]),
+        beginMessageSync: vi.fn().mockRejectedValue(
+          new Error("code = 400080; SELECT private_value"),
+        ),
+        finishMessageSync: vi.fn(),
+        listRuntimeCandidates: vi.fn().mockResolvedValue([]),
+        materialize: vi.fn(),
+      },
+      deliveries: {
+        listCandidates: vi.fn().mockResolvedValue([]),
+        reserve: vi.fn(),
+        beginSend: vi.fn(),
+        recordResult: vi.fn(),
+      },
+      telegram: { send: vi.fn(), delete: vi.fn(), editFinal: vi.fn() },
+    } as unknown as DispatcherDependencies;
+
+    const stats = await runDispatcher(
+      config,
+      new Date("2026-08-14T00:00:00.000Z"),
+      dependencies,
+    );
+
+    expect(stats.errors).toContain("message_sync_begin_failed");
+    expect(stats.errors).not.toContain("message_sync_scan_failed");
+    expect(stats.errorCauses).toContain("message_sync_begin_failed:ydb_400080:error");
   });
 
   it("cancels a stale private reservation before sending", async () => {
@@ -579,6 +622,44 @@ describe("runDispatcher", () => {
     expect(send).not.toHaveBeenCalled();
     expect(recordResult).not.toHaveBeenCalled();
     expect(stats.skipped).toBe(1);
+  });
+
+  it("distinguishes begin-send failures from reservation failures", async () => {
+    const item = occurrence();
+    const reservation = reservedDelivery(item);
+    const send = vi.fn();
+    const dependencies = {
+      workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      actions: {
+        listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
+        finalizeCompletion: vi.fn(),
+      },
+      occurrences: {
+        ...noMessageSync(),
+        listRuntimeCandidates: vi.fn().mockResolvedValue([]),
+        materialize: vi.fn(),
+      },
+      deliveries: {
+        listCandidates: vi.fn().mockResolvedValue([{ occurrenceId: item.occurrenceId }]),
+        reserve: vi.fn().mockResolvedValue(reservation),
+        beginSend: vi.fn().mockRejectedValue(
+          new Error("code = 400080; SELECT private_value"),
+        ),
+        recordResult: vi.fn(),
+      },
+      telegram: { send, delete: vi.fn(), editFinal: vi.fn() },
+    } as unknown as DispatcherDependencies;
+
+    const stats = await runDispatcher(
+      config,
+      new Date("2026-08-13T12:00:00.000Z"),
+      dependencies,
+    );
+
+    expect(send).not.toHaveBeenCalled();
+    expect(stats.errors).toContain("delivery_begin_send_failed");
+    expect(stats.errors).not.toContain("delivery_reserve_failed");
+    expect(stats.errorCauses).toContain("delivery_begin_send_failed:ydb_400080:error");
   });
 
   it("renders watcher mentions for escalation deliveries", async () => {
@@ -661,15 +742,19 @@ describe("runDispatcher", () => {
     );
   });
 
-  it("retires a message when the send result loses its database lease", async () => {
+  it("keeps the YDB cause when persisting a successful send fails", async () => {
     const item = occurrence();
     item.latestMessageChatId = null;
     item.latestMessageId = null;
     const reservation = reservedDelivery(item);
     const deleteMessage = vi.fn().mockResolvedValue(undefined);
     const recordResult = vi.fn()
-      .mockRejectedValueOnce(new Error("delivery already finalized as unknown"))
-      .mockRejectedValueOnce(new Error("delivery already finalized as unknown"));
+      .mockRejectedValueOnce(new Error("code = 400080; SELECT private_value"))
+      .mockResolvedValueOnce({
+        ...reservation.delivery,
+        status: "unknown",
+        errorCode: "delivery_result_persist_failed",
+      });
     const dependencies = {
       workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
       actions: {
@@ -699,5 +784,60 @@ describe("runDispatcher", () => {
     expect(deleteMessage).toHaveBeenCalledWith("test-token", -100123, 777);
     expect(stats.unknown).toBe(1);
     expect(stats.errors).toContain("delivery_result_persist_failed");
+    expect(stats.errors).not.toContain("telegram_transport_unknown");
+    expect(stats.errorCauses).toContain("delivery_result_persist_failed:ydb_400080:error");
+    expect(recordResult).toHaveBeenNthCalledWith(
+      2,
+      "workspace-a",
+      "delivery-a",
+      { status: "unknown", errorCode: "delivery_result_persist_failed" },
+      expect.any(Date),
+    );
+  });
+
+  it("records a forensic cause when a successful send loses its delivery lease", async () => {
+    const item = occurrence();
+    item.latestMessageChatId = null;
+    item.latestMessageId = null;
+    const reservation = reservedDelivery(item);
+    const deleteMessage = vi.fn().mockResolvedValue(undefined);
+    const recordResult = vi.fn().mockResolvedValue({
+      ...reservation.delivery,
+      status: "unknown",
+      errorCode: "send_lease_lost",
+    });
+    const dependencies = {
+      workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      actions: {
+        listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
+        finalizeCompletion: vi.fn(),
+      },
+      occurrences: { ...noMessageSync(), listRuntimeCandidates: vi.fn().mockResolvedValue([]), materialize: vi.fn() },
+      deliveries: {
+        listCandidates: vi.fn().mockResolvedValue([{ occurrenceId: item.occurrenceId }]),
+        reserve: vi.fn().mockResolvedValue(reservation),
+        beginSend: vi.fn().mockResolvedValue({ valid: true, targetChatId: -100123 }),
+        recordResult,
+      },
+      telegram: {
+        send: vi.fn().mockResolvedValue(777),
+        delete: deleteMessage,
+        editFinal: vi.fn(),
+      },
+    } as unknown as DispatcherDependencies;
+
+    const stats = await runDispatcher(
+      config,
+      new Date("2026-08-13T12:00:00.000Z"),
+      dependencies,
+    );
+
+    expect(recordResult).toHaveBeenCalledOnce();
+    expect(deleteMessage).toHaveBeenCalledWith("test-token", -100123, 777);
+    expect(stats.unknown).toBe(1);
+    expect(stats.errors).toContain("send_lease_lost");
+    expect(stats.errorCauses).toContain(
+      "delivery_result_conflict:send_lease_lost:delivery_state",
+    );
   });
 });
