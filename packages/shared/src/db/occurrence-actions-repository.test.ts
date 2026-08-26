@@ -167,16 +167,20 @@ describe("OccurrenceActionsRepository", () => {
       resultSet([occurrenceRow()]),
       resultSet([workspaceRow]),
     ]);
-    const occurrence = await repository.snooze(
+    const result = await repository.snooze(
       "workspace-a",
       "occurrence-a",
       20,
-      new Date("2026-08-13T20:00:00.000Z"),
+      { type: "duration", minutes: 120 },
       new Date("2026-08-13T18:00:00.000Z"),
     );
 
-    expect(occurrence?.snoozeUntil?.toISOString()).toBe("2026-08-14T05:00:00.000Z");
-    expect(occurrence?.notificationSequence).toBe(1);
+    expect(result?.occurrence.snoozeUntil?.toISOString()).toBe("2026-08-14T05:00:00.000Z");
+    expect(result?.occurrence.notificationSequence).toBe(1);
+    expect(result?.snooze).toMatchObject({
+      adjustedForQuietHours: true,
+      timezone: "Europe/Moscow",
+    });
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("snoozed_by = $actor_user_id"),
     );
@@ -189,15 +193,15 @@ describe("OccurrenceActionsRepository", () => {
       resultSet([occurrenceRow({ due_at: "2026-08-13T17:00:00.000Z" })]),
       resultSet([workspaceRow]),
     ]);
-    const occurrence = await repository.snooze(
+    const result = await repository.snooze(
       "workspace-a",
       "occurrence-a",
       20,
-      new Date("2026-08-14T09:00:00.000Z"),
+      { type: "duration", minutes: 900 },
       new Date("2026-08-13T18:00:00.000Z"),
     );
 
-    expect(occurrence?.status).toBe("overdue");
+    expect(result?.occurrence.status).toBe("overdue");
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("snoozed_by = $actor_user_id"));
     expect(writeCall?.[0]).toContain(
@@ -205,6 +209,34 @@ describe("OccurrenceActionsRepository", () => {
     );
     expect(decodeYdbValue(writeCall?.[1]?.$revision_increment)).toBe(1);
     expect(decodeYdbValue(writeCall?.[1]?.$overdue_status)).toBe("overdue");
+  });
+
+  it("uses the occurrence timezone and authoritative workspace morning time", async () => {
+    const { repository, session } = repositoryDouble([
+      resultSet([occurrenceRow({ timezone: "Europe/Moscow" })]),
+      resultSet([{ ...workspaceRow, default_all_day_reminder_time: "07:30" }]),
+    ]);
+    const result = await repository.snooze(
+      "workspace-a",
+      "occurrence-a",
+      20,
+      { type: "preset", preset: "tomorrow_morning" },
+      new Date("2026-08-13T12:00:00.000Z"),
+    );
+
+    expect(result?.snooze.requestedAt.toISOString()).toBe("2026-08-14T04:30:00.000Z");
+    expect(result?.occurrence.snoozeUntil?.toISOString()).toBe("2026-08-14T05:00:00.000Z");
+    const writeCall = session.executeQuery.mock.calls.find(([query]) =>
+      query.includes("snoozed_by = $actor_user_id"),
+    );
+    const payload = JSON.parse(String(decodeYdbValue(writeCall?.[1]?.$payload)));
+    expect(payload).toMatchObject({
+      selection: { type: "preset", preset: "tomorrow_morning" },
+      requestedAt: "2026-08-14T04:30:00.000Z",
+      effectiveAt: "2026-08-14T05:00:00.000Z",
+      adjustedForQuietHours: true,
+      timezone: "Europe/Moscow",
+    });
   });
 
   it("completes idempotently while retaining the runtime slot for ten minutes", async () => {

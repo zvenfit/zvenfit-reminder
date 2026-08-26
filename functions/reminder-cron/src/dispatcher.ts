@@ -4,7 +4,6 @@ import {
   OccurrencesRepository,
   WorkspacesRepository,
   buildOccurrenceMessage,
-  escapeHtml,
   occurrenceCallbackData,
   operationalErrorFields,
   telegramApiRequest,
@@ -199,16 +198,32 @@ function createDependencies(config: AppConfig): DispatcherDependencies {
 
 function deliveryKeyboard(occurrence: ReminderOccurrence): InlineKeyboardMarkup {
   return {
-    inline_keyboard: [[
-      {
-        text: occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
-        callback_data: occurrenceCallbackData("done", occurrence.occurrenceId),
-      },
-      {
-        text: "⏰ +1 час",
-        callback_data: occurrenceCallbackData("snooze", occurrence.occurrenceId),
-      },
-    ]],
+    inline_keyboard: [
+      [
+        {
+          text: occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
+          callback_data: occurrenceCallbackData("done", occurrence.occurrenceId),
+        },
+        {
+          text: "⏰ +1 час",
+          callback_data: occurrenceCallbackData("snooze", occurrence.occurrenceId),
+        },
+      ],
+      [
+        {
+          text: "Вечером",
+          callback_data: occurrenceCallbackData("snooze", occurrence.occurrenceId, "evening"),
+        },
+        {
+          text: "Завтра утром",
+          callback_data: occurrenceCallbackData(
+            "snooze",
+            occurrence.occurrenceId,
+            "tomorrow_morning",
+          ),
+        },
+      ],
+    ],
   };
 }
 
@@ -233,42 +248,8 @@ function messageSyncKeyboard(
   return null;
 }
 
-function formatOccurrenceInstant(instant: Date, timezone: string): string {
-  return new Intl.DateTimeFormat("ru-RU", {
-    day: "numeric",
-    month: "long",
-    hour: "2-digit",
-    minute: "2-digit",
-    timeZone: timezone,
-  }).format(instant);
-}
-
 function messageSyncText(occurrence: ReminderOccurrence, now: Date): string {
-  const base = buildOccurrenceMessage(occurrence, now);
-  if (occurrence.status === "completed") {
-    const actorName = escapeHtml(occurrence.completedByDisplayName ?? "Участник");
-    const actor = occurrence.completedBy == null
-      ? actorName
-      : `<a href="tg://user?id=${occurrence.completedBy}">${actorName}</a>`;
-    const completedAt = occurrence.completedAt
-      ? formatOccurrenceInstant(occurrence.completedAt, occurrence.timezone)
-      : null;
-    return `${base}\n\n✅ ${occurrence.kind === "payment" ? "Оплачено" : "Выполнено"}: ${actor}${
-      completedAt ? `\nКогда: ${escapeHtml(completedAt)}` : ""
-    }`;
-  }
-  if (occurrence.status === "cancelled") {
-    return `${base}\n\n⏹ Напоминание завершено`;
-  }
-  if (occurrence.notificationState === "stopped") {
-    return `${base}\n\n⏸ Напоминание приостановлено`;
-  }
-  if (occurrence.snoozeUntil) {
-    return `${base}\n\n⏰ Отложено до ${escapeHtml(
-      formatOccurrenceInstant(occurrence.snoozeUntil, occurrence.timezone),
-    )}`;
-  }
-  return base;
+  return buildOccurrenceMessage(occurrence, now);
 }
 
 function sanitizedErrorCode(error: unknown): string {
@@ -373,7 +354,10 @@ async function dispatchReservation(
     const text = buildOccurrenceMessage(
       reservation.occurrence,
       reservation.delivery.claimedAt,
-      { escalationWatchers: reservation.escalationWatchers },
+      {
+        deliveryType: reservation.delivery.deliveryType,
+        escalationWatchers: reservation.escalationWatchers,
+      },
     );
     sentMessageId = await dependencies.telegram.send(
       config.botToken,

@@ -8,6 +8,8 @@ import {
   telegramApiRequest,
   type AppConfig,
   type ReminderOccurrence,
+  type SnoozeResolution,
+  type SnoozeSelection,
 } from "@zvenfit-reminder/shared";
 import type { InlineKeyboard } from "grammy";
 import { renderOccurrenceAction } from "./occurrence-message.js";
@@ -17,15 +19,18 @@ const TELEGRAM_API_TIMEOUT_MS = 10_000;
 export type OccurrenceAction = "done" | "snooze" | "undo";
 
 interface OccurrenceActionInputBase {
-  action: OccurrenceAction;
   occurrenceId: string;
   actorUserId: number;
-  snoozeMinutes?: number;
   now?: Date;
   actorDisplayName?: string;
 }
 
+type OccurrenceActionSelection =
+  | { action: "done" | "undo"; snooze?: never }
+  | { action: "snooze"; snooze?: SnoozeSelection };
+
 export type OccurrenceActionInput = OccurrenceActionInputBase &
+  OccurrenceActionSelection &
   (
     | {
         source: "telegram";
@@ -39,6 +44,7 @@ export type OccurrenceActionInput = OccurrenceActionInputBase &
 export interface OccurrenceActionResult {
   action: OccurrenceAction;
   occurrence: ReminderOccurrence;
+  snooze?: SnoozeResolution;
 }
 
 export class OccurrenceActionNotFoundError extends Error {
@@ -128,17 +134,10 @@ function callbackLocationAllowed(
   return input.chatType === "private" && input.chatId === input.actorUserId;
 }
 
-export async function executeOccurrenceAction(
-  config: AppConfig,
+async function authorizeOccurrenceActionWithDependencies(
   input: OccurrenceActionInput,
-  providedDependencies?: OccurrenceActionDependencies,
-): Promise<OccurrenceActionResult> {
-  const dependencies = providedDependencies ?? createDependencies(config);
-  const now = input.now ?? new Date();
-  const snoozeMinutes = input.snoozeMinutes ?? 60;
-  if (!Number.isInteger(snoozeMinutes) || snoozeMinutes < 15 || snoozeMinutes > 30 * 24 * 60) {
-    throw new Error("Snooze duration must be between 15 minutes and 30 days");
-  }
+  dependencies: OccurrenceActionDependencies,
+) {
   const privateOccurrence = input.source === "telegram" && input.chatType === "private"
     ? await dependencies.occurrences.findByIdForActor(input.occurrenceId, input.actorUserId)
     : null;
@@ -180,32 +179,56 @@ export async function executeOccurrenceAction(
     throw new OccurrenceActionForbiddenError();
   }
 
-  const updated =
-    input.action === "done"
-      ? await dependencies.actions.complete(
-          workspace.workspaceId,
-          occurrence.occurrenceId,
-          input.actorUserId,
-          now,
-        )
-      : input.action === "snooze"
-        ? await dependencies.actions.snooze(
-            workspace.workspaceId,
-            occurrence.occurrenceId,
-            input.actorUserId,
-            new Date(now.getTime() + snoozeMinutes * 60 * 1_000),
-            now,
-          )
-        : await dependencies.actions.undoCompletion(
-            workspace.workspaceId,
-            occurrence.occurrenceId,
-            input.actorUserId,
-            now,
-          );
+  return { workspace, occurrence };
+}
+
+export async function executeOccurrenceAction(
+  config: AppConfig,
+  input: OccurrenceActionInput,
+  providedDependencies?: OccurrenceActionDependencies,
+): Promise<OccurrenceActionResult> {
+  const dependencies = providedDependencies ?? createDependencies(config);
+  const now = input.now ?? new Date();
+  const { workspace, occurrence } = await authorizeOccurrenceActionWithDependencies(
+    input,
+    dependencies,
+  );
+
+  let updated: ReminderOccurrence | null;
+  let snooze: SnoozeResolution | undefined;
+  if (input.action === "done") {
+    updated = await dependencies.actions.complete(
+      workspace.workspaceId,
+      occurrence.occurrenceId,
+      input.actorUserId,
+      now,
+    );
+  } else if (input.action === "snooze") {
+    const snoozed = await dependencies.actions.snooze(
+      workspace.workspaceId,
+      occurrence.occurrenceId,
+      input.actorUserId,
+      input.snooze ?? { type: "preset", preset: "one_hour" },
+      now,
+    );
+    updated = snoozed?.occurrence ?? null;
+    snooze = snoozed?.snooze;
+  } else {
+    updated = await dependencies.actions.undoCompletion(
+      workspace.workspaceId,
+      occurrence.occurrenceId,
+      input.actorUserId,
+      now,
+    );
+  }
   if (!updated) {
     throw new OccurrenceActionNotFoundError();
   }
-  const result = { action: input.action, occurrence: updated };
+  const result: OccurrenceActionResult = {
+    action: input.action,
+    occurrence: updated,
+    ...(snooze ? { snooze } : {}),
+  };
   const claim = await dependencies.occurrences.beginMessageSync(
     workspace.workspaceId,
     occurrence.occurrenceId,

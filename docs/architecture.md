@@ -140,6 +140,16 @@ Migrations `0003_reminder_kind.sql` and `0004_occurrence_kind.sql` add the
 nullable `kind` discriminator to reminder definitions and occurrences.
 Existing rows resolve to `payment` when they already contain an amount and to
 `task` otherwise; all new writes persist the explicit kind.
+Migration `0005_occurrence_lead_minutes.sql` adds a nullable snapshot of the
+requested notification lead to occurrences. Existing rows intentionally keep a
+`NULL` value because their stored first-notification timestamp may already have
+been shifted by quiet hours and cannot be reversed safely. Newly materialized
+occurrences and edits with an explicit numeric lead persist the exact requested
+value.
+For a legacy row, occurrence-only PATCH accepts `leadMinutes: null` only while
+the deadline and timezone remain unchanged; this preserves its existing first
+notification, sequence, and snooze state. Changing the deadline requires an
+explicit numeric lead instead of guessing from a quiet-hours-adjusted timestamp.
 
 ## Build and deployment
 

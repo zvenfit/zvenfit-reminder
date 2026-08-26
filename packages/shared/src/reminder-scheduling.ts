@@ -1,11 +1,17 @@
 import { DateTime } from "luxon";
 import {
   DEFAULT_ALL_DAY_REMINDER_TIME,
+  MAX_SNOOZE_MINUTES,
+  MIN_SNOOZE_MINUTES,
+  SNOOZE_EVENING_LOCAL_TIME,
   type DeadlineTiming,
   type MonthlyDay,
   type ScheduleSpec,
+  type SnoozeSelection,
+  localDateSchema,
   localTimeSchema,
   scheduleSpecSchema,
+  snoozeSelectionSchema,
 } from "./reminder-domain.js";
 
 export interface ScheduledDeadline {
@@ -23,6 +29,34 @@ export interface QuietHours {
   startLocal: string;
   endLocal: string;
 }
+
+export type InvalidSnoozeSelectionReason =
+  | "invalid_selection"
+  | "too_soon"
+  | "too_far"
+  | "nonexistent_local_time"
+  | "ambiguous_local_time";
+
+export class InvalidSnoozeSelectionError extends Error {
+  constructor(readonly reason: InvalidSnoozeSelectionReason) {
+    super(`Invalid snooze selection: ${reason}`);
+    this.name = "InvalidSnoozeSelectionError";
+  }
+}
+
+export interface SnoozeResolution {
+  requestedAt: Date;
+  effectiveAt: Date;
+  adjustedForQuietHours: boolean;
+  timezone: string;
+}
+
+export interface SnoozeResolutionOptions {
+  ignoreQuietHours?: boolean;
+  tomorrowMorningLocalTime?: string;
+}
+
+const MAX_PRESET_LOCAL_GAP_SEARCH_MINUTES = 24 * 60;
 
 function assertTimezone(timezone: string): void {
   if (!DateTime.now().setZone(timezone).isValid) {
@@ -53,6 +87,55 @@ function localDate(value: string, timezone: string): DateTime {
 function setLocalTime(date: DateTime, timeLocal: string): DateTime {
   const { hour, minute } = parseLocalTime(timeLocal);
   return date.set({ hour, minute, second: 0, millisecond: 0 });
+}
+
+function strictLocalDateTime(
+  dateLocal: string,
+  timeLocal: string,
+  timezone: string,
+): DateTime {
+  localDateSchema.parse(dateLocal);
+  localTimeSchema.parse(timeLocal);
+  const expected = `${dateLocal}T${timeLocal}`;
+  const result = DateTime.fromISO(expected, { zone: timezone, setZone: true });
+  if (!result.isValid || result.toFormat("yyyy-MM-dd'T'HH:mm") !== expected) {
+    throw new InvalidSnoozeSelectionError("nonexistent_local_time");
+  }
+  const possibleOffsets = result.getPossibleOffsets();
+  if (possibleOffsets.length !== 1) {
+    throw new InvalidSnoozeSelectionError("ambiguous_local_time");
+  }
+  return possibleOffsets[0]!;
+}
+
+function presetLocalDateTime(
+  dateLocal: string,
+  timeLocal: string,
+  timezone: string,
+): DateTime {
+  localDateSchema.parse(dateLocal);
+  localTimeSchema.parse(timeLocal);
+  const wallTime = DateTime.fromISO(`${dateLocal}T${timeLocal}`, { zone: "UTC" });
+  if (!wallTime.isValid) {
+    throw new InvalidSnoozeSelectionError("invalid_selection");
+  }
+  for (
+    let offsetMinutes = 0;
+    offsetMinutes <= MAX_PRESET_LOCAL_GAP_SEARCH_MINUTES;
+    offsetMinutes += 1
+  ) {
+    const expected = wallTime.plus({ minutes: offsetMinutes }).toFormat("yyyy-MM-dd'T'HH:mm");
+    const candidate = DateTime.fromISO(expected, { zone: timezone, setZone: true });
+    if (!candidate.isValid || candidate.toFormat("yyyy-MM-dd'T'HH:mm") !== expected) {
+      continue;
+    }
+    const possibleOffsets = candidate.getPossibleOffsets()
+      .sort((left, right) => left.toMillis() - right.toMillis());
+    if (possibleOffsets[0]) {
+      return possibleOffsets[0];
+    }
+  }
+  throw new InvalidSnoozeSelectionError("nonexistent_local_time");
 }
 
 function buildDeadline(
@@ -342,6 +425,92 @@ export function calculateSnoozedNotificationAt(
     throw new Error("Snooze instant must be in the future");
   }
   return adjustForQuietHours(requestedAt, timezone, quietHours, ignoreQuietHours);
+}
+
+export function resolveSnoozeAt(
+  input: SnoozeSelection,
+  reference: Date,
+  timezone: string,
+  quietHours: QuietHours,
+  options: SnoozeResolutionOptions = {},
+): SnoozeResolution {
+  assertInstant(reference, "Reference");
+  assertTimezone(timezone);
+  const parsed = snoozeSelectionSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new InvalidSnoozeSelectionError("invalid_selection");
+  }
+
+  const selection = parsed.data;
+  const minimum = new Date(reference.getTime() + MIN_SNOOZE_MINUTES * 60 * 1_000);
+  const maximum = new Date(reference.getTime() + MAX_SNOOZE_MINUTES * 60 * 1_000);
+  const localReference = DateTime.fromJSDate(reference, { zone: timezone });
+  let requestedAt: Date;
+
+  if (selection.type === "duration") {
+    requestedAt = new Date(reference.getTime() + selection.minutes * 60 * 1_000);
+  } else if (selection.type === "custom") {
+    requestedAt = strictLocalDateTime(
+      selection.localDate,
+      selection.localTime,
+      timezone,
+    ).toJSDate();
+  } else if (selection.preset === "one_hour") {
+    requestedAt = new Date(reference.getTime() + 60 * 60 * 1_000);
+  } else if (selection.preset === "evening") {
+    const currentLocalDate = localReference.toISODate();
+    if (!currentLocalDate) {
+      throw new InvalidSnoozeSelectionError("invalid_selection");
+    }
+    let candidate = presetLocalDateTime(
+      currentLocalDate,
+      SNOOZE_EVENING_LOCAL_TIME,
+      timezone,
+    );
+    if (candidate.toJSDate() < minimum) {
+      const nextLocalDate = localReference.plus({ days: 1 }).toISODate();
+      if (!nextLocalDate) {
+        throw new InvalidSnoozeSelectionError("invalid_selection");
+      }
+      candidate = presetLocalDateTime(
+        nextLocalDate,
+        SNOOZE_EVENING_LOCAL_TIME,
+        timezone,
+      );
+    }
+    requestedAt = candidate.toJSDate();
+  } else {
+    const tomorrowLocalDate = localReference.plus({ days: 1 }).toISODate();
+    if (!tomorrowLocalDate) {
+      throw new InvalidSnoozeSelectionError("invalid_selection");
+    }
+    requestedAt = presetLocalDateTime(
+      tomorrowLocalDate,
+      options.tomorrowMorningLocalTime ?? DEFAULT_ALL_DAY_REMINDER_TIME,
+      timezone,
+    ).toJSDate();
+  }
+
+  if (requestedAt < minimum) {
+    throw new InvalidSnoozeSelectionError("too_soon");
+  }
+  if (requestedAt > maximum) {
+    throw new InvalidSnoozeSelectionError("too_far");
+  }
+
+  const effectiveAt = calculateSnoozedNotificationAt(
+    requestedAt,
+    reference,
+    timezone,
+    quietHours,
+    options.ignoreQuietHours,
+  );
+  return {
+    requestedAt,
+    effectiveAt,
+    adjustedForQuietHours: effectiveAt.getTime() !== requestedAt.getTime(),
+    timezone,
+  };
 }
 
 export function calculateFirstEscalationAt(

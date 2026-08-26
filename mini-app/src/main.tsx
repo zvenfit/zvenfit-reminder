@@ -28,11 +28,21 @@ import {
   type ReminderKind,
   type ReminderOccurrence,
   type ScheduleSpec,
+  type SnoozeSelection,
   type UpdateOccurrenceBody,
   type WorkspaceMember,
   type Workspace,
 } from "./api";
 import { formatScheduleDate, upcomingScheduleDates } from "./schedule-preview";
+import { SnoozePicker } from "./snooze-picker";
+import { formatSnoozeInstant } from "./snooze-options";
+import {
+  cancellationReasonLabel,
+  firstSignalPresentation,
+  leadNotificationLabel,
+  nextSignalPresentation,
+  repeatNotificationLabel,
+} from "./reminder-presentation";
 import {
   buildTimezoneOptions,
   describeTimezone,
@@ -52,6 +62,9 @@ type View = MainView | "detail" | "create" | "settings" | "members";
 type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
 type DetailTarget = { kind: "occurrence" | "reminder"; id: string };
+type EditScope = "occurrence" | "series";
+
+const PRESERVE_LEGACY_LEAD = "preserve";
 
 interface ReminderFormState {
   kind: ReminderKind;
@@ -85,6 +98,14 @@ interface SettingsFormState {
   quietHoursStart: string;
   quietHoursEnd: string;
   defaultAllDayReminderTime: string;
+}
+
+function cloneReminderForm(form: ReminderFormState): ReminderFormState {
+  return {
+    ...form,
+    watcherUserIds: [...form.watcherUserIds],
+    weekdays: [...form.weekdays],
+  };
 }
 
 function localDateInputValue(date = new Date()): string {
@@ -482,23 +503,16 @@ function formSchedulePreview(form: ReminderFormState): string {
   }
 }
 
-function formUpcomingDates(form: ReminderFormState, timezone: string): string[] {
+function formUpcomingDates(
+  form: ReminderFormState,
+  timezone: string,
+  reference = new Date(),
+): string[] {
   try {
-    return upcomingScheduleDates(buildSchedule(form), timezone, 3);
+    return upcomingScheduleDates(buildSchedule(form), timezone, 3, reference);
   } catch {
     return [];
   }
-}
-
-function repeatPreviewLabel(minutes: string): string {
-  const labels: Record<string, string> = {
-    "60": "каждый час",
-    "180": "каждые 3 часа",
-    "360": "каждые 6 часов",
-    "720": "каждые 12 часов",
-    "1440": "раз в день",
-  };
-  return labels[minutes] ?? "по выбранному ритму";
 }
 
 function buildSchedule(form: ReminderFormState): ScheduleSpec {
@@ -552,6 +566,9 @@ function errorMessage(error: unknown): string {
   if (error instanceof ApiError && error.code === "private_chat_required") {
     return "Ответственный ещё не открыл личный чат с ботом. Попросите его отправить боту /start.";
   }
+  if (error instanceof ApiError && error.code === "legacy_lead_requires_selection") {
+    return "Для нового срока выберите, когда отправить первый сигнал.";
+  }
   if (error instanceof ApiError && error.code === "workspace_required") {
     return "Выберите группу.";
   }
@@ -571,6 +588,22 @@ function errorMessage(error: unknown): string {
     return "Не удалось связаться с сервисом. Проверьте интернет и попробуйте ещё раз.";
   }
   return error instanceof Error ? error.message : "Что-то пошло не так";
+}
+
+function snoozeErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.code === "validation_failed") {
+    if (error.reason === "nonexistent_local_time") {
+      return "Такого местного времени нет из-за перевода часов. Выберите более позднее время.";
+    }
+    if (error.reason === "ambiguous_local_time") {
+      return "Из-за перевода часов это время встречается дважды. Выберите другое время.";
+    }
+    return "Выберите время от 15 минут до 30 дней от текущего момента.";
+  }
+  if (error instanceof ApiError && error.code === "delivery_in_progress") {
+    return "Сигнал уже отправляется. Подождите немного и попробуйте ещё раз.";
+  }
+  return errorMessage(error);
 }
 
 interface ErrorRecovery {
@@ -658,6 +691,8 @@ function App() {
   const [confirmingOwnership, setConfirmingOwnership] = useState(false);
   const [transferringOwnership, setTransferringOwnership] = useState(false);
   const [actingOccurrenceId, setActingOccurrenceId] = useState<string | null>(null);
+  const [snoozeTargetId, setSnoozeTargetId] = useState<string | null>(null);
+  const [snoozeError, setSnoozeError] = useState<string | null>(null);
   const [updatingRoleUserId, setUpdatingRoleUserId] = useState<number | null>(null);
   const [editingMemberUserId, setEditingMemberUserId] = useState<number | null>(null);
   const [memberDisplayNameDraft, setMemberDisplayNameDraft] = useState("");
@@ -666,10 +701,11 @@ function App() {
   const [managingReminderId, setManagingReminderId] = useState<string | null>(null);
   const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
   const [editingOccurrenceId, setEditingOccurrenceId] = useState<string | null>(null);
-  const [editScope, setEditScope] = useState<"occurrence" | "series">("series");
+  const [editScope, setEditScope] = useState<EditScope>("series");
   const [occurrenceDate, setOccurrenceDate] = useState(localDate());
   const [occurrenceTime, setOccurrenceTime] = useState("09:00");
   const [occurrenceAllDay, setOccurrenceAllDay] = useState(false);
+  const editFormDraftsRef = useRef<Record<EditScope, ReminderFormState> | null>(null);
   const [reassignment, setReassignment] = useState<Record<string, string>>({});
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
@@ -678,6 +714,7 @@ function App() {
   const [errorRecovery, setErrorRecovery] = useState<ErrorRecovery | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
+  const [clockNow, setClockNow] = useState(() => new Date());
   const timezoneReference = useMemo(() => new Date(), []);
   const timezoneOptions = useMemo(
     () => view === "settings" ? buildTimezoneOptions(timezoneReference) : [],
@@ -697,6 +734,11 @@ function App() {
     const timeout = window.setTimeout(() => setUndoableOccurrence(null), remaining);
     return () => window.clearTimeout(timeout);
   }, [undoableOccurrence]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setClockNow(new Date()), 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
     (previewMode ? members[0]?.userId : undefined);
@@ -797,6 +839,18 @@ function App() {
     clearError();
     setView("detail");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function openSnoozePicker(occurrenceId: string) {
+    clearError();
+    setSnoozeError(null);
+    setSnoozeTargetId(occurrenceId);
+  }
+
+  function closeSnoozePicker() {
+    if (actingOccurrenceId === snoozeTargetId) return;
+    setSnoozeTargetId(null);
+    setSnoozeError(null);
   }
 
   async function refresh(selectedId = workspaceId) {
@@ -979,6 +1033,8 @@ function App() {
     setArchiveTarget(null);
     setUndoableOccurrence(null);
     setActingOccurrenceId(null);
+    setSnoozeTargetId(null);
+    setSnoozeError(null);
     setReassigningReminderId(null);
     setManagingReminderId(null);
     setUpdatingRoleUserId(null);
@@ -1015,6 +1071,7 @@ function App() {
     setForm(nextForm);
     setEditingReminderId(null);
     setEditingOccurrenceId(null);
+    editFormDraftsRef.current = null;
     setEditScope("series");
     clearError();
     setView("create");
@@ -1022,19 +1079,63 @@ function App() {
   }
 
   function openEdit(reminder: Reminder, occurrence?: ReminderOccurrence) {
-    setForm(reminderForm(reminder));
+    const seriesForm = reminderForm(reminder);
+    const nextForm = cloneReminderForm(seriesForm);
+    if (occurrence) {
+      nextForm.kind = occurrence.kind;
+      nextForm.title = occurrence.title;
+      nextForm.description = occurrence.description ?? "";
+      nextForm.actionUrl = occurrence.actionUrl ?? "";
+      nextForm.amountRub = occurrence.amountMinor == null ? "" : String(occurrence.amountMinor / 100);
+      nextForm.currency = occurrence.currency ?? "RUB";
+      nextForm.visibility = occurrence.visibility;
+      nextForm.assignmentMode = occurrence.assignment.mode;
+      nextForm.responsibleUserId = occurrence.assignment.mode === "person"
+        ? String(occurrence.assignment.responsibleUserId)
+        : "";
+      nextForm.watcherUserIds = [...occurrence.watcherUserIds];
+      nextForm.leadMinutes = occurrence.leadMinutes == null
+        ? PRESERVE_LEGACY_LEAD
+        : String(occurrence.leadMinutes);
+      if (occurrence.repeatIntervalMinutes) {
+        nextForm.repeatIntervalMinutes = String(occurrence.repeatIntervalMinutes);
+      }
+      if (occurrence.ignoreQuietHours != null) {
+        nextForm.ignoreQuietHours = occurrence.ignoreQuietHours;
+      }
+    }
+    editFormDraftsRef.current = occurrence
+      ? { occurrence: cloneReminderForm(nextForm), series: cloneReminderForm(seriesForm) }
+      : null;
+    setForm(cloneReminderForm(nextForm));
     setEditingReminderId(reminder.reminderId);
     setEditingOccurrenceId(occurrence?.occurrenceId ?? null);
     setEditScope(occurrence ? "occurrence" : "series");
     if (occurrence) {
       const localDeadline = occurrenceLocalDeadline(occurrence);
-      setOccurrenceDate(localDeadline.date);
-      setOccurrenceTime(localDeadline.time);
-      setOccurrenceAllDay(false);
+      const isAllDay = occurrence.allDay ?? false;
+      setOccurrenceDate(occurrence.dueLocalDate ?? localDeadline.date);
+      setOccurrenceTime(isAllDay
+        ? selectedWorkspace?.defaultAllDayReminderTime ?? "09:00"
+        : localDeadline.time);
+      setOccurrenceAllDay(isAllDay);
     }
     clearError();
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function changeEditScope(nextScope: EditScope) {
+    if (nextScope === editScope) return;
+    const drafts = editFormDraftsRef.current;
+    if (!drafts) {
+      setEditScope(nextScope);
+      return;
+    }
+    drafts[editScope] = cloneReminderForm(form);
+    setForm(cloneReminderForm(drafts[nextScope]));
+    setEditScope(nextScope);
+    clearError();
   }
 
   function openSettings() {
@@ -1191,6 +1292,25 @@ function App() {
       showError("Выберите хотя бы один день недели.");
       return;
     }
+    const editingOccurrence = editingOccurrenceId
+      ? [...occurrences, ...historyOccurrences].find((occurrence) =>
+          occurrence.occurrenceId === editingOccurrenceId)
+      : undefined;
+    if (
+      editingOccurrence &&
+      editScope === "occurrence" &&
+      form.leadMinutes === PRESERVE_LEGACY_LEAD
+    ) {
+      const originalDeadline = occurrenceLocalDeadline(editingOccurrence);
+      const originalAllDay = editingOccurrence.allDay ?? false;
+      const deadlineChanged = occurrenceDate !== (editingOccurrence.dueLocalDate ?? originalDeadline.date) ||
+        occurrenceAllDay !== originalAllDay ||
+        (!occurrenceAllDay && occurrenceTime !== originalDeadline.time);
+      if (deadlineChanged) {
+        showError("Срок изменился. Выберите, когда отправить первый сигнал.");
+        return;
+      }
+    }
     setSaving(true);
     clearError();
     const amount = form.amountRub.trim() ? Math.round(Number(form.amountRub) * 100) : null;
@@ -1213,16 +1333,24 @@ function App() {
           : { mode: "person", responsibleUserId },
       watcherUserIds: form.watcherUserIds.filter((id) => id !== responsibleUserId),
       schedule: buildSchedule(form),
-      timezone: editingReminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow",
+      timezone: editingOccurrenceId && editScope === "occurrence"
+        ? editingOccurrence?.timezone ?? editingReminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow"
+        : editingReminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow",
       notificationPolicy: {
-        leadMinutes: Number(form.leadMinutes),
+        leadMinutes: form.leadMinutes === PRESERVE_LEGACY_LEAD ? 0 : Number(form.leadMinutes),
         repeatIntervalMinutes: Number(form.repeatIntervalMinutes),
         ignoreQuietHours: form.ignoreQuietHours,
-        escalation: editingReminder?.notificationPolicy.escalation ?? {
-          enabled: true,
-          delayMinutes: 1440,
-          repeatMinutes: 1440,
-        },
+        escalation: editingOccurrenceId && editScope === "occurrence"
+          ? editingOccurrence?.escalation ?? editingReminder?.notificationPolicy.escalation ?? {
+              enabled: true,
+              delayMinutes: 1440,
+              repeatMinutes: 1440,
+            }
+          : editingReminder?.notificationPolicy.escalation ?? {
+              enabled: true,
+              delayMinutes: 1440,
+              repeatMinutes: 1440,
+            },
       },
     };
 
@@ -1239,7 +1367,12 @@ function App() {
           assignment: payload.assignment,
           watcherUserIds: payload.watcherUserIds,
           timezone: payload.timezone,
-          notificationPolicy: payload.notificationPolicy,
+          notificationPolicy: {
+            ...payload.notificationPolicy,
+            leadMinutes: form.leadMinutes === PRESERVE_LEGACY_LEAD
+              ? null
+              : payload.notificationPolicy.leadMinutes,
+          },
           dueLocalDate: occurrenceDate,
           timing: occurrenceAllDay ? { kind: "allDay" } : { kind: "timed", timeLocal: occurrenceTime },
         };
@@ -1257,6 +1390,7 @@ function App() {
       }
       setEditingReminderId(null);
       setEditingOccurrenceId(null);
+      editFormDraftsRef.current = null;
       setEditScope("series");
       setView(editingOccurrenceId && editScope === "occurrence" ? "detail" : "plan");
       await refresh();
@@ -1267,47 +1401,71 @@ function App() {
     }
   }
 
-  async function actOnOccurrence(
-    occurrenceId: string,
-    action: "complete" | "snooze",
-    snoozeMinutes = 60,
-  ) {
+  async function completeOccurrenceAction(occurrenceId: string) {
     const actionWorkspaceId = activeWorkspaceIdRef.current;
     if (!actionWorkspaceId) return;
     setActingOccurrenceId(occurrenceId);
     clearError();
     try {
-      if (action === "complete") {
-        const { occurrence } = await completeOccurrence(occurrenceId);
-        if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
-        setOccurrences((current) =>
-          current.filter((occurrence) => occurrence.occurrenceId !== occurrenceId),
-        );
-        setHistoryOccurrences((current) => [
-          occurrence,
-          ...current.filter((item) => item.occurrenceId !== occurrenceId),
-        ]);
-        setUndoableOccurrence(occurrence);
-      } else {
-        const { occurrence } = await snoozeOccurrence(occurrenceId, snoozeMinutes);
-        if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
-        setOccurrences((current) =>
-          current.map((item) => (item.occurrenceId === occurrenceId ? occurrence : item)),
-        );
-        setNotice(snoozeMinutes === 60
-          ? "Следующий сигнал — через час"
-          : snoozeMinutes === 360
-            ? "Следующий сигнал — вечером"
-            : snoozeMinutes === 1440
-              ? "Следующий сигнал — завтра"
-              : `Следующий сигнал — через ${relativeDuration(occurrence.nextNotificationAt ?? occurrence.dueAt)}`);
-      }
-      window.setTimeout(() => {
-        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
-      }, 2600);
+      const { occurrence } = await completeOccurrence(occurrenceId);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      setOccurrences((current) =>
+        current.filter((item) => item.occurrenceId !== occurrenceId),
+      );
+      setHistoryOccurrences((current) => [
+        occurrence,
+        ...current.filter((item) => item.occurrenceId !== occurrenceId),
+      ]);
+      setUndoableOccurrence(occurrence);
     } catch (requestError) {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
         showError(requestError);
+      }
+    } finally {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setActingOccurrenceId(null);
+      }
+    }
+  }
+
+  async function submitSnooze(
+    occurrenceId: string,
+    selection: SnoozeSelection,
+  ) {
+    const actionWorkspaceId = activeWorkspaceIdRef.current;
+    if (!actionWorkspaceId) return;
+    setActingOccurrenceId(occurrenceId);
+    setSnoozeError(null);
+    clearError();
+    try {
+      const response = await snoozeOccurrence(occurrenceId, selection);
+      if (activeWorkspaceIdRef.current !== actionWorkspaceId) return;
+      const { occurrence } = response;
+      setOccurrences((current) =>
+        current.map((item) => (item.occurrenceId === occurrenceId ? occurrence : item)),
+      );
+      const effectiveAt = response.snooze?.effectiveAt ??
+        occurrence.snoozeUntil ?? occurrence.nextNotificationAt;
+      const timezone = response.snooze?.timezone ?? occurrence.timezone;
+      const exactTime = effectiveAt ? formatSnoozeInstant(effectiveAt, timezone) : null;
+      const requestedTime = response.snooze?.requestedAt
+        ? formatSnoozeInstant(response.snooze.requestedAt, timezone)
+        : null;
+      setNotice(exactTime
+        ? response.snooze?.adjustedForQuietHours
+          ? requestedTime
+            ? `Тихие часы перенесли сигнал с ${requestedTime} на ${exactTime}`
+            : `Тихие часы перенесли следующий сигнал на ${exactTime}`
+          : `Следующий сигнал — ${exactTime}`
+        : "Следующий сигнал отложен");
+      setSnoozeTargetId(null);
+      setSnoozeError(null);
+      window.setTimeout(() => {
+        if (activeWorkspaceIdRef.current === actionWorkspaceId) setNotice(null);
+      }, 3600);
+    } catch (requestError) {
+      if (activeWorkspaceIdRef.current === actionWorkspaceId) {
+        setSnoozeError(snoozeErrorMessage(requestError));
       }
     } finally {
       if (activeWorkspaceIdRef.current === actionWorkspaceId) {
@@ -1498,6 +1656,19 @@ function App() {
   const selectedWorkspaceTimezone = selectedWorkspace
     ? describeTimezone(selectedWorkspace.timezone, timezoneReference)
     : null;
+  const snoozeTarget = snoozeTargetId
+    ? occurrences.find((occurrence) => occurrence.occurrenceId === snoozeTargetId)
+    : undefined;
+  const snoozePicker = snoozeTarget && selectedWorkspace ? (
+    <SnoozePicker
+      occurrence={snoozeTarget}
+      workspace={selectedWorkspace}
+      pending={actingOccurrenceId === snoozeTarget.occurrenceId}
+      error={snoozeError}
+      onClose={closeSnoozePicker}
+      onConfirm={(selection) => void submitSnooze(snoozeTarget.occurrenceId, selection)}
+    />
+  ) : null;
   const archiveDialog = archiveTarget ? (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.currentTarget === event.target) setArchiveTarget(null);
@@ -2058,24 +2229,43 @@ function App() {
       occurrence.visibility === "private" ? isCreator || isResponsible : isCreator || isManager || isResponsible
     ));
     const nextDates = reminder ? upcomingScheduleDates(reminder.schedule, reminder.timezone, 3) : [];
-    const timeline = occurrence ? [
-      occurrence.createdAt ? {
-        label: "Напоминание создано",
+    const nextSignal = occurrence?.nextNotificationAt
+      ? nextSignalPresentation(occurrence.nextNotificationAt, detailTimezone, clockNow)
+      : null;
+    const timeline: Array<{ label: string; value: string; detail?: string }> = [];
+    if (occurrence?.createdAt) {
+      timeline.push({
+        label: "Повтор запланирован",
         value: formatMoment(occurrence.createdAt, detailTimezone, true),
-      } : null,
-      occurrence.snoozedAt ? {
+        detail: reminder
+          ? `Серия создана: ${memberName(memberMap.get(reminder.creatorUserId))}`
+          : undefined,
+      });
+    }
+    if (occurrence?.snoozedAt) {
+      timeline.push({
         label: "Сигнал отложен",
-        value: `${formatMoment(occurrence.snoozedAt, detailTimezone, true)}${occurrence.snoozeUntil ? ` · до ${formatMoment(occurrence.snoozeUntil, detailTimezone)}` : ""}`,
-      } : null,
-      occurrence.completedAt ? {
+        value: `${occurrence.snoozedBy ? memberName(memberMap.get(occurrence.snoozedBy)) : "Участник"} · ${formatMoment(occurrence.snoozedAt, detailTimezone, true)}`,
+        detail: occurrence.snoozeUntil
+          ? `Следующий сигнал: ${formatMoment(occurrence.snoozeUntil, detailTimezone, true)}`
+          : undefined,
+      });
+    }
+    if (occurrence?.completedAt) {
+      timeline.push({
         label: occurrence.kind === "payment" ? "Оплату отметил" : "Выполнение отметил",
         value: `${occurrence.completedByDisplayName ?? memberName(occurrence.completedBy ? memberMap.get(occurrence.completedBy) : undefined)} · ${formatMoment(occurrence.completedAt, detailTimezone, true)}`,
-      } : null,
-      occurrence.cancelledAt ? {
+        detail: `Ответственный: ${responsibleUserId ? memberName(responsible) : "любой участник"}`,
+      });
+    }
+    if (occurrence?.cancelledAt) {
+      const cancellationReason = cancellationReasonLabel(occurrence.cancellationReason);
+      timeline.push({
         label: "Повтор отменён",
         value: `${occurrence.cancelledBy ? memberName(memberMap.get(occurrence.cancelledBy)) : "Участник"} · ${formatMoment(occurrence.cancelledAt, detailTimezone, true)}`,
-      } : null,
-    ].filter((item): item is { label: string; value: string } => Boolean(item)) : [];
+        detail: cancellationReason ? `Причина: ${cancellationReason}` : undefined,
+      });
+    }
 
     if (!occurrence && !reminder) {
       return (
@@ -2116,8 +2306,8 @@ function App() {
           ) : null}
           {reminder ? <div><span>Ритм</span><b>{scheduleLabel(reminder.schedule)}</b><small>{reminder.status === "paused" ? "Новые сигналы приостановлены" : "Повторяется автоматически"}</small></div> : null}
           <div><span>Ответственный</span><b>{responsibleUserId ? memberName(responsible) : "Любой участник"}</b><small>{responsible?.username ? `@${responsible.username}` : responsibleUserId ? "Участник группы" : "Кто отметит первым"}</small></div>
-          {occurrence?.nextNotificationAt && occurrence.status !== "completed" && occurrence.status !== "cancelled" ? (
-            <div><span>Следующий сигнал</span><b>Через {relativeDuration(occurrence.nextNotificationAt)}</b><small>{formatMoment(occurrence.nextNotificationAt, detailTimezone, true)}</small></div>
+          {nextSignal && occurrence && occurrence.status !== "completed" && occurrence.status !== "cancelled" ? (
+            <div className="detail-fact--signal"><span>Следующий сигнал</span><b>{nextSignal.exact}</b><small>{nextSignal.relative} · {occurrence.ignoreQuietHours ? "Разрешён в тихие часы" : "С учётом тихих часов"}</small></div>
           ) : reminder ? (
             <div><span>Повтор сигнала</span><b>Каждые {relativeDuration(new Date(Date.now() + reminder.notificationPolicy.repeatIntervalMinutes * 60_000).toISOString())}</b><small>{reminder.notificationPolicy.ignoreQuietHours ? "Даже в тихие часы" : "С учётом тихих часов"}</small></div>
           ) : null}
@@ -2125,14 +2315,19 @@ function App() {
 
         {occurrence && (occurrence.status === "pending" || occurrence.status === "overdue") && (canAct || canSnooze) ? (
           <section className="detail-actions" aria-label="Действия с напоминанием">
-            {canAct ? <button className="primary-action" type="button" disabled={actingOccurrenceId === occurrence.occurrenceId} onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}>
+            {canAct ? <button className="primary-action" type="button" disabled={actingOccurrenceId === occurrence.occurrenceId} onClick={() => void completeOccurrenceAction(occurrence.occurrenceId)}>
               {occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение"}
             </button> : null}
-            {canSnooze ? <div className="detail-snooze"><span>Напомнить позже</span><div>
-              <button type="button" onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze", 60)}>Через час</button>
-              <button type="button" onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze", 360)}>Вечером</button>
-              <button type="button" onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze", 1440)}>Завтра</button>
-            </div></div> : null}
+            {canSnooze ? <div className="detail-snooze">
+              <button
+                type="button"
+                disabled={actingOccurrenceId === occurrence.occurrenceId}
+                onClick={() => openSnoozePicker(occurrence.occurrenceId)}
+              >
+                <UiIcon name="clock" />
+                Напомнить позже
+              </button>
+            </div> : null}
           </section>
         ) : null}
 
@@ -2149,9 +2344,8 @@ function App() {
           <section className="detail-section">
             <p className="eyebrow">История этого повтора</p>
             <ol className="event-timeline">
-              {timeline.map((event) => <li key={`${event.label}-${event.value}`}><span /><div><b>{event.label}</b><small>{event.value}</small></div></li>)}
+              {timeline.map((event) => <li key={`${event.label}-${event.value}`}><span /><div><b>{event.label}</b><small>{event.value}</small>{event.detail ? <small className="event-timeline__detail">{event.detail}</small> : null}</div></li>)}
             </ol>
-            {occurrence?.cancellationReason ? <p className="cancellation-note">Причина: {occurrence.cancellationReason}</p> : null}
           </section>
         ) : null}
 
@@ -2164,6 +2358,7 @@ function App() {
         ) : null}
         {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
         {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
+        {snoozePicker}
         {archiveDialog}
       </main>
     );
@@ -2252,10 +2447,18 @@ function App() {
                 ? occurrence.completedByDisplayName ?? (occurrence.completedBy ? memberName(memberMap.get(occurrence.completedBy)) : "Участник")
                 : occurrence.cancelledBy ? memberName(memberMap.get(occurrence.cancelledBy)) : "Участник";
               const actionAt = occurrence.completedAt ?? occurrence.cancelledAt ?? occurrence.updatedAt ?? occurrence.dueAt;
+              const actionLabel = occurrence.status === "completed"
+                ? occurrence.kind === "payment" ? "Оплата отмечена" : "Выполнение отмечено"
+                : "Повтор отменён";
               return (
                 <button className="history-row" type="button" onClick={() => openOccurrenceDetail(occurrence.occurrenceId, "history")} key={occurrence.occurrenceId}>
                   <span className={`history-row__mark history-row__mark--${occurrence.status}`}><UiIcon name={occurrence.status === "completed" ? "check" : "history"} /></span>
-                  <span className="history-row__copy"><b>{occurrence.title}</b><span>{occurrenceStatusLabel(occurrence)} · {actorName}</span><small>{formatMoment(actionAt, occurrence.timezone, true)} · {occurrence.assignment.mode === "anyone" ? "Любой участник" : memberName(responsible)}</small></span>
+                  <span className="history-row__copy">
+                    <b>{occurrence.title}</b>
+                    <span className="history-row__action">{actionLabel}: {actorName}</span>
+                    <time dateTime={actionAt}>{formatMoment(actionAt, occurrence.timezone, true)}</time>
+                    <small>Срок: {formatMoment(occurrence.dueAt, occurrence.timezone, true)} · Ответственный: {occurrence.assignment.mode === "anyone" ? "любой участник" : memberName(responsible)}</small>
+                  </span>
                   <UiIcon name="arrow-right" />
                 </button>
               );
@@ -2273,10 +2476,54 @@ function App() {
     const previewResponsible = form.assignmentMode === "anyone"
       ? "Может выполнить любой участник"
       : selectedResponsible ? `Ответственный — ${memberName(selectedResponsible)}` : "Выберите ответственного";
-    const previewTimezone = reminders.find((reminder) => reminder.reminderId === editingReminderId)?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow";
+    const editingOccurrence = editingOccurrenceId
+      ? [...occurrences, ...historyOccurrences].find((occurrence) =>
+          occurrence.occurrenceId === editingOccurrenceId)
+      : undefined;
+    const reminderTimezone = reminders.find((reminder) =>
+      reminder.reminderId === editingReminderId)?.timezone;
+    const previewTimezone = editingOccurrenceId && editScope === "occurrence"
+      ? editingOccurrence?.timezone ?? reminderTimezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow"
+      : reminderTimezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow";
     const previewDates = editingOccurrenceId && editScope === "occurrence"
       ? [occurrenceDate]
-      : formUpcomingDates(form, previewTimezone);
+      : formUpcomingDates(form, previewTimezone, clockNow);
+    const occurrenceOnly = Boolean(editingOccurrenceId && editScope === "occurrence");
+    const previewAllDay = occurrenceOnly ? occurrenceAllDay : form.allDay;
+    const allDayAnchorTime = selectedWorkspace?.defaultAllDayReminderTime ?? "09:00";
+    const deadlinePreview = occurrenceOnly
+      ? `${formatScheduleDate(occurrenceDate)} · ${occurrenceAllDay ? "весь день" : occurrenceTime}`
+      : formSchedulePreview(form);
+    const firstSignalPreview = form.leadMinutes === PRESERVE_LEGACY_LEAD
+      ? editingOccurrence?.reminderStartAt
+        ? `Не менять текущее время — ${formatMoment(editingOccurrence.reminderStartAt, previewTimezone, true)}`
+        : "Не менять текущее время первого сигнала"
+      : previewDates[0]
+        ? firstSignalPresentation({
+            dueLocalDate: previewDates[0],
+            notificationTimeLocal: previewAllDay
+              ? allDayAnchorTime
+              : occurrenceOnly ? occurrenceTime : form.timeLocal,
+            leadMinutes: Number(form.leadMinutes),
+            timezone: previewTimezone,
+            quietHoursStart: selectedWorkspace?.quietHoursStart ?? "22:00",
+            quietHoursEnd: selectedWorkspace?.quietHoursEnd ?? "08:00",
+            ignoreQuietHours: form.ignoreQuietHours,
+            allDay: previewAllDay,
+            now: clockNow,
+          }).label
+        : leadNotificationLabel(Number(form.leadMinutes), {
+            allDay: previewAllDay,
+            allDayAnchorTime,
+          });
+    const repeatSignalPreview = `${repeatNotificationLabel(Number(form.repeatIntervalMinutes))}, пока ${
+      form.kind === "payment" ? "оплата не отмечена" : "задача не выполнена"
+    }`;
+    const quietHoursPreview = form.ignoreQuietHours
+      ? "Сигналы разрешены и в тихие часы."
+      : selectedWorkspace?.quietHoursStart === selectedWorkspace?.quietHoursEnd
+        ? "Тихие часы в группе выключены."
+        : `Если сигнал попадёт в тихие часы ${selectedWorkspace?.quietHoursStart ?? "22:00"}–${selectedWorkspace?.quietHoursEnd ?? "08:00"}, бот перенесёт его на их окончание.`;
     return (
       <main className="app app--form">
         <header className="topbar">
@@ -2311,8 +2558,8 @@ function App() {
           <section className="edit-scope" aria-labelledby="edit-scope-title">
             <div><p className="eyebrow">Область изменений</p><h2 id="edit-scope-title">Что именно изменить?</h2></div>
             <div className="edit-scope__options" role="radiogroup" aria-label="Область редактирования" onKeyDown={handleRovingControlKey}>
-              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} onClick={() => setEditScope("occurrence")}><b>Только этот срок</b><small>{formatScheduleDate(occurrenceDate)}</small></button>
-              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} onClick={() => setEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
+              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} onClick={() => changeEditScope("occurrence")}><b>Только этот срок</b><small>{formatScheduleDate(occurrenceDate)}</small></button>
+              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} onClick={() => changeEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
             </div>
           </section>
         ) : null}
@@ -2501,18 +2748,18 @@ function App() {
           {editingOccurrenceId && editScope === "occurrence" ? (
             <section className="form-panel">
               <p className="eyebrow">Срок этого повтора</p>
-              <h2>Когда он должен быть выполнен</h2>
+              <h2>{form.kind === "payment" ? "Когда нужно оплатить" : "Когда нужно выполнить"}</h2>
               <div className="schedule-grid">
                 <label className="field"><span>Дата</span><input type="date" value={occurrenceDate} onChange={(event) => setOccurrenceDate(event.target.value)} required /></label>
-                <label className="toggle-row field--wide"><span><b>Весь день</b><small>Без точного времени</small></span><input type="checkbox" checked={occurrenceAllDay} onChange={(event) => setOccurrenceAllDay(event.target.checked)} /></label>
+                <label className="toggle-row field--wide"><span><b>Весь день</b><small>Срок — до конца дня, первый сигнал — от {allDayAnchorTime}</small></span><input type="checkbox" checked={occurrenceAllDay} onChange={(event) => setOccurrenceAllDay(event.target.checked)} /></label>
                 {!occurrenceAllDay ? <label className="field field--wide"><span>Время</span><Time24Field label="Время" required value={occurrenceTime} onChange={setOccurrenceTime} /></label> : null}
               </div>
             </section>
           ) : (
           <section className="form-panel">
-            <p className="eyebrow">Ритм</p>
-            <h2>Когда напоминать</h2>
-            <div className="frequency-strip" role="radiogroup" aria-label="Повторение" onKeyDown={handleRovingControlKey}>
+            <p className="eyebrow">Срок</p>
+            <h2>{form.kind === "payment" ? "Когда нужно оплатить" : "Когда нужно выполнить"}</h2>
+            <div className="frequency-strip" role="radiogroup" aria-label="Повтор срока" onKeyDown={handleRovingControlKey}>
               {([
                 ["once", "Один раз"],
                 ["daily", "Ежедневно"],
@@ -2541,7 +2788,7 @@ function App() {
                 </label>
               ) : (
                 <label className="field">
-                  <span>Начать</span>
+                  <span>Считать сроки с</span>
                   <input type="date" value={form.startDate} onChange={(event) => setForm({ ...form, startDate: event.target.value })} required />
                 </label>
               )}
@@ -2614,7 +2861,7 @@ function App() {
               ) : null}
 
               <label className="toggle-row field--wide">
-                <span><b>Весь день</b><small>Без точного времени</small></span>
+                <span><b>Весь день</b><small>Срок — до конца дня, первый сигнал — от {allDayAnchorTime}</small></span>
                 <input type="checkbox" checked={form.allDay} onChange={(event) => setForm({ ...form, allDay: event.target.checked })} />
               </label>
               {!form.allDay ? (
@@ -2633,20 +2880,29 @@ function App() {
           )}
 
           <section className="form-panel">
-            <p className="eyebrow">Повторные сигналы</p>
-            <h2>{form.kind === "payment" ? "Пока не оплачено" : "Пока не выполнено"}</h2>
+            <p className="eyebrow">Сигналы</p>
+            <h2>Когда начать напоминать</h2>
             <div className="schedule-grid">
               <label className="field">
                 <span>Первый сигнал</span>
                 <select value={form.leadMinutes} onChange={(event) => setForm({ ...form, leadMinutes: event.target.value })}>
-                  <option value="0">В срок</option>
-                  <option value="60">За 1 час</option>
-                  <option value="1440">За 1 день</option>
-                  <option value="10080">За неделю</option>
+                  {form.leadMinutes === PRESERVE_LEGACY_LEAD ? (
+                    <option value={PRESERVE_LEGACY_LEAD}>
+                      {editingOccurrence?.reminderStartAt
+                        ? `Не менять — ${formatMoment(editingOccurrence.reminderStartAt, previewTimezone, true)}`
+                        : "Не менять текущее время"}
+                    </option>
+                  ) : null}
+                  {[0, 60, 1_440, 10_080].map((minutes) => (
+                    <option value={minutes} key={minutes}>{leadNotificationLabel(minutes, {
+                      allDay: previewAllDay,
+                      allDayAnchorTime,
+                    })}</option>
+                  ))}
                 </select>
               </label>
               <label className="field">
-                <span>Повторять</span>
+                <span>Повтор уведомлений</span>
                 <select value={form.repeatIntervalMinutes} onChange={(event) => setForm({ ...form, repeatIntervalMinutes: event.target.value })}>
                   <option value="60">Каждый час</option>
                   <option value="180">Каждые 3 часа</option>
@@ -2656,7 +2912,9 @@ function App() {
                 </select>
               </label>
               <label className="toggle-row field--wide">
-                <span><b>Срочно</b><small>Разрешить сигналы в тихие часы 22:00–08:00</small></span>
+                <span><b>Доставлять в тихие часы</b><small>{selectedWorkspace?.quietHoursStart === selectedWorkspace?.quietHoursEnd
+                  ? "Тихие часы в группе выключены"
+                  : `Не переносить сигналы из интервала ${selectedWorkspace?.quietHoursStart ?? "22:00"}–${selectedWorkspace?.quietHoursEnd ?? "08:00"}`}</small></span>
                 <input type="checkbox" checked={form.ignoreQuietHours} onChange={(event) => setForm({ ...form, ignoreQuietHours: event.target.checked })} />
               </label>
             </div>
@@ -2667,8 +2925,13 @@ function App() {
           <section className="form-preview" aria-label="Предпросмотр напоминания">
             <p className="eyebrow">Как это будет работать</p>
             <h2>{form.title.trim() || "Название напоминания"}</h2>
-            <p>{previewResponsible}. {editingOccurrenceId && editScope === "occurrence" ? `${formatScheduleDate(occurrenceDate)} · ${occurrenceAllDay ? "весь день" : occurrenceTime}` : formSchedulePreview(form)}.</p>
-            <small>Если не отметить {form.kind === "payment" ? "оплату" : "выполнение"}, бот напомнит {repeatPreviewLabel(form.repeatIntervalMinutes)}.</small>
+            <p>{previewResponsible}.</p>
+            <dl className="form-preview__plan">
+              <div><dt>Срок</dt><dd>{deadlinePreview}</dd></div>
+              <div><dt>Первый сигнал</dt><dd>{firstSignalPreview}</dd></div>
+              <div><dt>Дальше</dt><dd>{repeatSignalPreview}</dd></div>
+            </dl>
+            <small>{quietHoursPreview}</small>
             {previewDates.length > 0 ? <div className="form-preview__dates" aria-label="Ближайшие даты">{previewDates.map((date, index) => <span className={index === 0 ? "is-next" : ""} key={date}>{formatScheduleDate(date, true)}</span>)}</div> : null}
             {form.frequency === "monthly" && !form.monthlyLastDay && Number(form.monthlyDay) > 28 ? (
               <small className="form-preview__note">Если такого числа в месяце нет, срок переносится на последний день.</small>
@@ -2801,6 +3064,9 @@ function App() {
                 ? memberMap.get(occurrence.assignment.responsibleUserId)
                 : undefined;
               const amount = formatAmount(occurrence.amountMinor, occurrence.currency);
+              const nextSignal = occurrence.nextNotificationAt
+                ? nextSignalPresentation(occurrence.nextNotificationAt, occurrence.timezone, clockNow)
+                : null;
               const isManager = actor?.role === "owner" || actor?.role === "organizer";
               const isResponsible = occurrence.assignment.mode === "person" &&
                 occurrence.assignment.responsibleUserId === actorId;
@@ -2825,13 +3091,13 @@ function App() {
                     </div>
                     <button className="rail-card__title" type="button" onClick={() => openOccurrenceDetail(occurrence.occurrenceId)}>{occurrence.title}<UiIcon name="arrow-right" /></button>
                     <p>{occurrence.assignment.mode === "anyone" ? "Может выполнить любой" : `Ответственный · ${memberName(responsible)}`}</p>
-                    {occurrence.nextNotificationAt ? <small className="rail-signal">Следующий сигнал через {relativeDuration(occurrence.nextNotificationAt)} · {formatMoment(occurrence.nextNotificationAt, occurrence.timezone)}</small> : null}
+                    {nextSignal ? <div className="rail-signal"><span>Следующий сигнал</span><b>{nextSignal.exact}</b><small>{nextSignal.relative} · {occurrence.ignoreQuietHours ? "Разрешён в тихие часы" : "С учётом тихих часов"}</small></div> : null}
                     {canComplete || canSnooze ? <div className="rail-actions">
                       {canComplete ? <button
                         className="rail-action rail-action--complete"
                         type="button"
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
-                        onClick={() => void actOnOccurrence(occurrence.occurrenceId, "complete")}
+                        onClick={() => void completeOccurrenceAction(occurrence.occurrenceId)}
                       >
                         {occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение"}
                       </button> : null}
@@ -2839,10 +3105,10 @@ function App() {
                         className="rail-action"
                         type="button"
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
-                        aria-label="Напомнить через час"
-                        onClick={() => void actOnOccurrence(occurrence.occurrenceId, "snooze")}
+                        aria-label="Напомнить позже"
+                        onClick={() => openSnoozePicker(occurrence.occurrenceId)}
                       >
-                        Через час
+                        Напомнить позже
                       </button> : null}
                     </div> : null}
                   </div>
@@ -2864,6 +3130,7 @@ function App() {
       ) : null}
 
       <BottomNavigation view="home" onChange={switchMainView} onCreate={openCreate} createDisabled={!workspaceId} />
+      {snoozePicker}
     </main>
   );
 }

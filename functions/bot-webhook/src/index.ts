@@ -522,16 +522,28 @@ export function getBot(): Bot {
 
       let result: OccurrenceActionResult;
       try {
-        result = await executeOccurrenceAction(config, {
+        const actionContext = {
           source: "telegram",
-          action: occurrenceCallback.action,
           occurrenceId: occurrenceCallback.occurrenceId,
           actorUserId: ctx.from.id,
           actorDisplayName: [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(" "),
           chatId: ctx.chat.id,
           chatType: ctx.chat.type === "private" ? "private" : "group",
           messageId: ctx.callbackQuery.message?.message_id,
-        });
+        } as const;
+        result = occurrenceCallback.action === "snooze"
+          ? await executeOccurrenceAction(config, {
+              ...actionContext,
+              action: "snooze",
+              snooze: {
+                type: "preset",
+                preset: occurrenceCallback.snoozePreset,
+              },
+            })
+          : await executeOccurrenceAction(config, {
+              ...actionContext,
+              action: occurrenceCallback.action,
+            });
       } catch (error) {
         if (error instanceof DeliveryInProgressError) {
           await ctx.answerCallbackQuery({

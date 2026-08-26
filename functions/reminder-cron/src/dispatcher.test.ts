@@ -48,9 +48,11 @@ function occurrence(): ReminderOccurrence {
     currency: null,
     visibility: "group",
     timezone: "Europe/Moscow",
+    leadMinutes: 0,
     repeatIntervalMinutes: 360,
     ignoreQuietHours: false,
     escalation: { enabled: true, delayMinutes: 1440, repeatMinutes: 1440 },
+    watcherUserIds: [],
     nextNotificationAt: new Date("2026-08-13T12:00:00.000Z"),
     notificationSequence: 0,
     snoozedBy: null,
@@ -249,7 +251,9 @@ describe("runDispatcher", () => {
       expect.stringContaining("25 сентября"),
       expect.anything(),
     );
-    expect(editActive.mock.calls[0]?.[3]).toContain("Отложено до");
+    expect(editActive.mock.calls[0]?.[3]).toContain("Следующий сигнал:");
+    expect(editActive.mock.calls[0]?.[3]).toContain("Срок не изменился:");
+    expect(editActive.mock.calls[0]?.[3]).not.toContain("Просрочено:");
     expect(editActive.mock.calls[0]?.[3]).toContain("17:00");
   });
 
@@ -309,6 +313,7 @@ describe("runDispatcher", () => {
   it("removes the undo button when completion finalization closes the window", async () => {
     const completed = {
       ...occurrence(),
+      dueAt: new Date("2026-08-12T12:00:00.000Z"),
       status: "completed" as const,
       notificationState: "stopped" as const,
       completedBy: 20,
@@ -352,10 +357,12 @@ describe("runDispatcher", () => {
       "test-token",
       -100123,
       55,
-      expect.stringContaining("✅ Выполнено"),
+      expect.stringContaining("✅ <b>"),
     );
     expect(editFinal.mock.calls[0]?.[3]).toContain("Иван Петров");
     expect(editFinal.mock.calls[0]?.[3]).toContain("Когда:");
+    expect(editFinal.mock.calls[0]?.[3]).not.toContain("Просрочено:");
+    expect(editFinal.mock.calls[0]?.[3]).not.toContain("🔴");
     expect(dependencies.actions.markCompletionMessageFinalized).toHaveBeenCalledWith(
       "workspace-a",
       "occurrence-a",
@@ -417,8 +424,21 @@ describe("runDispatcher", () => {
   });
 
   it("scopes every scan to each active workspace and runs reserve-before-send", async () => {
-    const item = occurrence();
-    const reservation = reservedDelivery(item);
+    const dueAt = new Date("2026-08-13T12:00:00.000Z");
+    const item = {
+      ...occurrence(),
+      dueAt,
+      reminderStartAt: dueAt,
+      nextNotificationAt: dueAt,
+    };
+    const baseReservation = reservedDelivery(item);
+    const reservation = {
+      ...baseReservation,
+      delivery: {
+        ...baseReservation.delivery,
+        claimedAt: new Date("2026-08-13T12:00:01.000Z"),
+      },
+    };
     const sentDelivery: NotificationDelivery = {
       ...reservation.delivery,
       status: "sent",
@@ -468,7 +488,7 @@ describe("runDispatcher", () => {
         editFinal: vi.fn().mockResolvedValue(undefined),
       },
     } as unknown as DispatcherDependencies;
-    const now = new Date("2026-08-13T12:00:00.000Z");
+    const now = dueAt;
 
     const stats = await runDispatcher(config, now, dependencies);
 
@@ -489,6 +509,20 @@ describe("runDispatcher", () => {
     );
     expect(dependencies.deliveries.reserve).toHaveBeenCalledBefore(sendTelegram);
     expect(dependencies.deliveries.beginSend).toHaveBeenCalledBefore(sendTelegram);
+    expect(sendTelegram.mock.calls[0]?.[2]).toContain("Срок наступил:");
+    expect(sendTelegram.mock.calls[0]?.[2]).not.toContain("Просрочено:");
+    expect(sendTelegram.mock.calls[0]?.[3]).toEqual({
+      inline_keyboard: [
+        [
+          { text: "✅ Выполнил", callback_data: "od:occurrence-a" },
+          { text: "⏰ +1 час", callback_data: "os:occurrence-a" },
+        ],
+        [
+          { text: "Вечером", callback_data: "oe:occurrence-a" },
+          { text: "Завтра утром", callback_data: "ot:occurrence-a" },
+        ],
+      ],
+    });
     expect(dependencies.deliveries.recordResult).toHaveBeenCalledWith(
       "workspace-a",
       "delivery-a",

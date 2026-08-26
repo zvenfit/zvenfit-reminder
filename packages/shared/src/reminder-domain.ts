@@ -7,6 +7,9 @@ export const DEFAULT_ESCALATION_REPEAT_MINUTES = 24 * 60;
 export const DEFAULT_QUIET_HOURS_START = "22:00";
 export const DEFAULT_QUIET_HOURS_END = "08:00";
 export const DEFAULT_ALL_DAY_REMINDER_TIME = "09:00";
+export const MIN_SNOOZE_MINUTES = 15;
+export const MAX_SNOOZE_MINUTES = 30 * 24 * 60;
+export const SNOOZE_EVENING_LOCAL_TIME = "18:00";
 
 export const workspaceRoleSchema = z.enum(["owner", "organizer", "member"]);
 export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
@@ -81,6 +84,36 @@ export const ianaTimezoneSchema = z.string().refine(
   (value) => IANAZone.isValidZone(value),
   { message: "Expected a valid IANA timezone" },
 );
+
+export const snoozePresetSchema = z.enum([
+  "one_hour",
+  "evening",
+  "tomorrow_morning",
+]);
+export type SnoozePreset = z.infer<typeof snoozePresetSchema>;
+
+export const snoozeSelectionSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("preset"),
+      preset: snoozePresetSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("custom"),
+      localDate: localDateSchema,
+      localTime: localTimeSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("duration"),
+      minutes: z.number().int().min(MIN_SNOOZE_MINUTES).max(MAX_SNOOZE_MINUTES),
+    })
+    .strict(),
+]);
+export type SnoozeSelection = z.infer<typeof snoozeSelectionSchema>;
 
 export const deadlineTimingSchema = z.discriminatedUnion("kind", [
   z
@@ -317,6 +350,38 @@ const reminderDraftBaseSchema = z
 export const reminderDraftUpdateSchema = reminderDraftBaseSchema;
 export type ReminderDraftUpdate = z.infer<typeof reminderDraftUpdateSchema>;
 
+const occurrenceNotificationPolicyUpdateSchema = notificationPolicySchema.extend({
+  // A nullable lead is an explicit compatibility sentinel for occurrences
+  // materialized before their requested lead was persisted. It is accepted
+  // only by occurrence updates; reminder definitions always require a number.
+  leadMinutes: z.number().int().min(0).max(365 * 24 * 60).nullable().default(0),
+});
+
+export const occurrenceDraftUpdateSchema = z.object({
+  ...reminderDraftBaseSchema.shape,
+  notificationPolicy: occurrenceNotificationPolicyUpdateSchema.prefault({}),
+}).strict().superRefine((value, context) => {
+  // Reuse all cross-field draft invariants after replacing the compatibility
+  // sentinel with a validation-only numeric value.
+  const validated = reminderDraftUpdateSchema.safeParse({
+    ...value,
+    notificationPolicy: {
+      ...value.notificationPolicy,
+      leadMinutes: value.notificationPolicy.leadMinutes ?? 0,
+    },
+  });
+  if (!validated.success) {
+    for (const issue of validated.error.issues) {
+      context.addIssue({
+        code: "custom",
+        path: issue.path,
+        message: issue.message,
+      });
+    }
+  }
+});
+export type OccurrenceDraftUpdate = z.infer<typeof occurrenceDraftUpdateSchema>;
+
 export const reminderDraftSchema = reminderDraftBaseSchema
   .transform((value) => ({
     ...value,
@@ -404,9 +469,17 @@ export interface ReminderOccurrence {
   currency: string | null;
   visibility: ReminderVisibility;
   timezone: string;
+  /**
+   * Requested lead time captured when this occurrence was materialized or last
+   * edited. Rows created before migration 0005 do not have an exact value: the
+   * stored reminderStartAt may already include a quiet-hours adjustment, so it
+   * cannot be safely reversed into the original lead duration.
+   */
+  leadMinutes: number | null;
   repeatIntervalMinutes: number;
   ignoreQuietHours: boolean;
   escalation: EscalationPolicy;
+  watcherUserIds: number[];
   nextNotificationAt: Date | null;
   notificationSequence: number;
   snoozedBy: number | null;

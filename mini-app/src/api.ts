@@ -1,3 +1,5 @@
+import { resolveSnoozeSelectionForPreview } from "./snooze-options";
+
 export type WorkspaceRole = "owner" | "organizer" | "member";
 export type ReminderStatus = "active" | "paused" | "archived";
 export type ReminderVisibility = "group" | "private";
@@ -111,6 +113,9 @@ export interface ReminderOccurrence {
   reminderId: string;
   kind: ReminderKind;
   dueAt: string;
+  dueLocalDate?: string;
+  allDay?: boolean;
+  reminderStartAt?: string;
   title: string;
   description: string | null;
   actionUrl?: string | null;
@@ -120,8 +125,13 @@ export interface ReminderOccurrence {
   assignment:
     | { mode: "person"; responsibleUserId: number }
     | { mode: "anyone" };
+  watcherUserIds: number[];
   status: "scheduled" | "pending" | "overdue" | "completed" | "cancelled";
   timezone: string;
+  leadMinutes: number | null;
+  repeatIntervalMinutes?: number;
+  ignoreQuietHours?: boolean;
+  escalation?: Reminder["notificationPolicy"]["escalation"];
   nextNotificationAt: string | null;
   undoUntil: string | null;
   snoozedBy?: number | null;
@@ -137,6 +147,24 @@ export interface ReminderOccurrence {
   updatedAt?: string;
 }
 
+export type SnoozePreset = "one_hour" | "evening" | "tomorrow_morning";
+
+export type SnoozeSelection =
+  | { type: "preset"; preset: SnoozePreset }
+  | { type: "custom"; localDate: string; localTime: string };
+
+export interface SnoozeConfirmation {
+  requestedAt?: string;
+  effectiveAt?: string;
+  adjustedForQuietHours?: boolean;
+  timezone?: string;
+}
+
+export interface SnoozeOccurrenceResponse {
+  occurrence: ReminderOccurrence;
+  snooze?: SnoozeConfirmation;
+}
+
 export type CreateReminderBody = Omit<
   Reminder,
   | "workspaceId"
@@ -148,9 +176,12 @@ export type CreateReminderBody = Omit<
   | "updatedAt"
 >;
 
-export type UpdateOccurrenceBody = Omit<CreateReminderBody, "schedule"> & {
+export type UpdateOccurrenceBody = Omit<CreateReminderBody, "schedule" | "notificationPolicy"> & {
   dueLocalDate: string;
   timing: DeadlineTiming;
+  notificationPolicy: Omit<CreateReminderBody["notificationPolicy"], "leadMinutes"> & {
+    leadMinutes: number | null;
+  };
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
@@ -235,26 +266,26 @@ const mockOccurrences: ReminderOccurrence[] = [
   {
     workspaceId: "demo", occurrenceId: "passport", reminderId: "passport", dueAt: new Date(Date.now() - 18 * 60 * 60 * 1000).toISOString(),
     kind: "task", title: "Забрать готовый паспорт", description: "Взять старый паспорт и расписку из МФЦ.", actionUrl: "https://example.com/passport", amountMinor: null, currency: null, visibility: "group",
-    assignment: { mode: "person", responsibleUserId: 20 }, status: "overdue", timezone: "Europe/Moscow", nextNotificationAt: new Date(Date.now() + 42 * 60 * 1000).toISOString(), undoUntil: null,
+    assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [10], status: "overdue", timezone: "Europe/Moscow", leadMinutes: 0, nextNotificationAt: new Date(Date.now() + 42 * 60 * 1000).toISOString(), undoUntil: null,
     createdAt: new Date(Date.now() - 8 * 86_400_000).toISOString(), updatedAt: new Date().toISOString(),
   },
   {
     workspaceId: "demo", occurrenceId: "internet", reminderId: "internet", dueAt: new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(),
     kind: "payment", title: "Оплатить домашний интернет", description: "Лицевой счёт 408-21. Оплатить до отключения.", actionUrl: "https://example.com/pay", amountMinor: 89000, currency: "RUB", visibility: "group",
-    assignment: { mode: "person", responsibleUserId: 10 }, status: "pending", timezone: "Europe/Moscow", nextNotificationAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(), undoUntil: null,
+    assignment: { mode: "person", responsibleUserId: 10 }, watcherUserIds: [], status: "pending", timezone: "Europe/Moscow", leadMinutes: 1440, nextNotificationAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(), undoUntil: null,
     createdAt: new Date(Date.now() - 30 * 86_400_000).toISOString(), updatedAt: new Date().toISOString(),
   },
   {
     workspaceId: "demo", occurrenceId: "utilities-july", reminderId: "utilities", dueAt: new Date(Date.now() - 23 * 86_400_000).toISOString(),
     kind: "task", title: "Передать показания счётчиков", description: null, actionUrl: null, amountMinor: null, currency: null, visibility: "group",
-    assignment: { mode: "person", responsibleUserId: 20 }, status: "completed", timezone: "Europe/Moscow", nextNotificationAt: null, undoUntil: null,
+    assignment: { mode: "person", responsibleUserId: 20 }, watcherUserIds: [10], status: "completed", timezone: "Europe/Moscow", leadMinutes: 60, nextNotificationAt: null, undoUntil: null,
     completedBy: 20, completedByDisplayName: "Иван", completedAt: new Date(Date.now() - 22 * 86_400_000).toISOString(),
     createdAt: new Date(Date.now() - 31 * 86_400_000).toISOString(), updatedAt: new Date(Date.now() - 22 * 86_400_000).toISOString(),
   },
   {
     workspaceId: "demo", occurrenceId: "water-cancelled", reminderId: "water", dueAt: new Date(Date.now() - 5 * 86_400_000).toISOString(),
     kind: "payment", title: "Заказать воду в офис", description: "Две бутыли по 19 литров.", actionUrl: null, amountMinor: 180000, currency: "RUB", visibility: "group",
-    assignment: { mode: "anyone" }, status: "cancelled", timezone: "Europe/Moscow", nextNotificationAt: null, undoUntil: null,
+    assignment: { mode: "anyone" }, watcherUserIds: [], status: "cancelled", timezone: "Europe/Moscow", leadMinutes: 0, nextNotificationAt: null, undoUntil: null,
     cancelledBy: 10, cancellationReason: "Поставщик перенёс доставку", cancelledAt: new Date(Date.now() - 4 * 86_400_000).toISOString(),
     createdAt: new Date(Date.now() - 10 * 86_400_000).toISOString(), updatedAt: new Date(Date.now() - 4 * 86_400_000).toISOString(),
   },
@@ -273,6 +304,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
+    readonly reason?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -292,7 +324,12 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new ApiError(error.error ?? "Не удалось выполнить запрос", response.status, error.code);
+    throw new ApiError(
+      error.error ?? "Не удалось выполнить запрос",
+      response.status,
+      error.code,
+      error.reason,
+    );
   }
 
   return response.json() as Promise<T>;
@@ -443,7 +480,11 @@ export function updateOccurrence(
       currency: body.currency,
       visibility: body.visibility,
       assignment: body.assignment,
+      watcherUserIds: body.watcherUserIds,
       timezone: body.timezone,
+      leadMinutes: body.notificationPolicy.leadMinutes,
+      repeatIntervalMinutes: body.notificationPolicy.repeatIntervalMinutes,
+      ignoreQuietHours: body.notificationPolicy.ignoreQuietHours,
       dueAt: new Date(`${body.dueLocalDate}T${localTime}:00`).toISOString(),
       nextNotificationAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -473,16 +514,38 @@ export function completeOccurrence(
 
 export function snoozeOccurrence(
   occurrenceId: string,
-  minutes = 60,
-): Promise<{ occurrence: ReminderOccurrence }> {
+  selection: SnoozeSelection,
+): Promise<SnoozeOccurrenceResponse> {
   if (MOCK_MODE) {
     const occurrence = mockOccurrences.find((item) => item.occurrenceId === occurrenceId)!;
-    occurrence.nextNotificationAt = new Date(Date.now() + minutes * 60 * 1000).toISOString();
-    return Promise.resolve({ occurrence });
+    const workspace = mockWorkspaces.find((item) =>
+      item.workspaceId === occurrence.workspaceId);
+    const effective = resolveSnoozeSelectionForPreview(selection, {
+      now: new Date(),
+      timezone: occurrence.timezone,
+      morningTime: workspace?.defaultAllDayReminderTime ?? "09:00",
+    });
+    if (!effective) {
+      return Promise.reject(new ApiError(
+        "Не удалось определить выбранное время",
+        400,
+        "validation_failed",
+      ));
+    }
+    occurrence.nextNotificationAt = effective.toISOString();
+    occurrence.snoozeUntil = occurrence.nextNotificationAt;
+    return Promise.resolve({
+      occurrence,
+      snooze: {
+        effectiveAt: occurrence.nextNotificationAt,
+        adjustedForQuietHours: false,
+        timezone: occurrence.timezone,
+      },
+    });
   }
   return api(`/api/occurrences/${encodeURIComponent(occurrenceId)}/snooze`, {
     method: "POST",
-    body: JSON.stringify({ minutes }),
+    body: JSON.stringify(selection),
   });
 }
 
@@ -580,6 +643,12 @@ declare global {
         ready: () => void;
         expand: () => void;
         close?: () => void;
+        BackButton?: {
+          show: () => void;
+          hide: () => void;
+          onClick: (handler: () => void) => void;
+          offClick: (handler: () => void) => void;
+        };
         themeParams: Record<string, string>;
         showAlert: (message: string) => void;
       };

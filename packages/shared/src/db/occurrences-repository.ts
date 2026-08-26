@@ -2,16 +2,16 @@ import { randomUUID } from "node:crypto";
 import { DateTime } from "luxon";
 import {
   escalationPolicySchema,
+  occurrenceDraftUpdateSchema,
   occurrenceNotificationStateSchema,
   occurrenceStatusSchema,
   reminderDraftSchema,
-  reminderDraftUpdateSchema,
   reminderKindSchema,
   reminderRuntimeStateSchema,
   reminderStatusSchema,
   reminderVisibilitySchema,
   type ReminderDefinition,
-  type ReminderDraftUpdate,
+  type OccurrenceDraftUpdate,
   type ReminderOccurrence,
   type ReminderRuntime,
 } from "../reminder-domain.js";
@@ -66,7 +66,12 @@ export class OccurrenceUpdateForbiddenError extends Error {
 }
 
 export class OccurrenceUpdateConflictError extends Error {
-  constructor(readonly reason: "not_actionable" | "not_current") {
+  constructor(
+    readonly reason:
+      | "not_actionable"
+      | "not_current"
+      | "legacy_lead_requires_selection",
+  ) {
     super(`Cannot update occurrence: ${reason}`);
     this.name = "OccurrenceUpdateConflictError";
   }
@@ -179,6 +184,7 @@ export function rowToOccurrence(data: Record<string, unknown>): ReminderOccurren
     currency: nullableString(getField(data, "currency")),
     visibility: reminderVisibilitySchema.parse(getField(data, "visibility")),
     timezone: String(getField(data, "timezone")),
+    leadMinutes: nullableNumber(getField(data, "lead_minutes")),
     repeatIntervalMinutes: Number(getField(data, "repeat_interval_minutes")),
     ignoreQuietHours: Boolean(getField(data, "ignore_quiet_hours")),
     escalation: escalationPolicySchema.parse(
@@ -190,6 +196,7 @@ export function rowToOccurrence(data: Record<string, unknown>): ReminderOccurren
           }
         : { enabled: false },
     ),
+    watcherUserIds: parseJsonDocument<number[]>(getField(data, "watcher_user_ids"), []),
     nextNotificationAt: parseYdbTimestamp(getField(data, "next_notification_at")),
     notificationSequence: Number(getField(data, "notification_sequence")),
     snoozedBy: nullableNumber(getField(data, "snoozed_by")),
@@ -349,7 +356,13 @@ export class OccurrencesRepository {
           DECLARE $actor_user_id AS Int64;
           DECLARE $limit AS Uint64;
           SELECT history.* FROM (
-            SELECT occurrence.* FROM reminder_occurrences AS occurrence
+            SELECT occurrence.*,
+              COALESCE(
+                occurrence.completed_at,
+                occurrence.cancelled_at,
+                occurrence.updated_at
+              ) AS history_action_at
+            FROM reminder_occurrences AS occurrence
             INNER JOIN reminders AS reminder
               ON occurrence.workspace_id = reminder.workspace_id
               AND occurrence.reminder_id = reminder.reminder_id
@@ -361,7 +374,8 @@ export class OccurrencesRepository {
                 OR occurrence.responsible_user_id = $actor_user_id
               )
           ) AS history
-          ORDER BY history.workspace_id, history.due_at DESC, history.occurrence_id DESC
+          ORDER BY history.workspace_id, history.history_action_at DESC,
+            history.occurrence_id DESC
           LIMIT $limit;
         `,
         {
@@ -377,11 +391,11 @@ export class OccurrencesRepository {
   async updateCurrentForActor(
     workspaceId: string,
     occurrenceId: string,
-    input: ReminderDraftUpdate,
+    input: OccurrenceDraftUpdate,
     actorUserId: number,
     now: Date = new Date(),
   ): Promise<ReminderOccurrence | null> {
-    const parsedInput = reminderDraftUpdateSchema.parse(input);
+    const parsedInput = occurrenceDraftUpdateSchema.parse(input);
     await this.runSession((session) =>
       withSerializableTransaction(session, async (transaction) => {
         const { resultSets } = await transaction.executeQuery(
@@ -427,9 +441,17 @@ export class OccurrencesRepository {
         if (!occurrenceRow) return;
 
         const occurrence = rowToOccurrence(occurrenceRow);
+        const preserveLegacyNotificationSchedule =
+          parsedInput.notificationPolicy.leadMinutes === null;
         const parsed = reminderDraftSchema.parse({
           ...parsedInput,
           kind: parsedInput.kind ?? occurrence.kind,
+          notificationPolicy: {
+            ...parsedInput.notificationPolicy,
+            // This value is used only for validating the rest of the draft.
+            // The legacy branch below preserves the stored scheduling state.
+            leadMinutes: parsedInput.notificationPolicy.leadMinutes ?? 0,
+          },
         });
         const actorIsManager = Boolean(
           actorRow &&
@@ -512,16 +534,26 @@ export class OccurrencesRepository {
           { defaultAllDayReminderTime: String(getField(workspaceRow, "default_all_day_reminder_time")) },
         );
         if (!deadline) throw new OccurrenceUpdateConflictError("not_actionable");
-        const reminderStartAt = calculateFirstNotificationAt(
-          deadline,
-          parsed.notificationPolicy.leadMinutes,
-          parsed.timezone,
-          {
-            startLocal: String(getField(workspaceRow, "quiet_hours_start")),
-            endLocal: String(getField(workspaceRow, "quiet_hours_end")),
-          },
-          { ignoreQuietHours: parsed.notificationPolicy.ignoreQuietHours, notBefore: now },
-        );
+        const deadlineIsUnchanged =
+          deadline.dueAt.getTime() === occurrence.dueAt.getTime() &&
+          deadline.dueLocalDate === occurrence.dueLocalDate &&
+          deadline.allDay === occurrence.allDay &&
+          parsed.timezone === occurrence.timezone;
+        if (preserveLegacyNotificationSchedule && !deadlineIsUnchanged) {
+          throw new OccurrenceUpdateConflictError("legacy_lead_requires_selection");
+        }
+        const reminderStartAt = preserveLegacyNotificationSchedule
+          ? occurrence.reminderStartAt
+          : calculateFirstNotificationAt(
+              deadline,
+              parsed.notificationPolicy.leadMinutes,
+              parsed.timezone,
+              {
+                startLocal: String(getField(workspaceRow, "quiet_hours_start")),
+                endLocal: String(getField(workspaceRow, "quiet_hours_end")),
+              },
+              { ignoreQuietHours: parsed.notificationPolicy.ignoreQuietHours, notBefore: now },
+            );
         const escalation = parsed.notificationPolicy.escalation;
 
         if (deadline.dueAt.getTime() !== occurrence.dueAt.getTime()) {
@@ -553,6 +585,17 @@ export class OccurrencesRepository {
           );
         }
 
+        const notificationScheduleAssignments = preserveLegacyNotificationSchedule
+          ? ""
+          : `
+              reminder_start_at = $reminder_start_at,
+              lead_minutes = $lead_minutes,
+              next_notification_at = $reminder_start_at,
+              notification_sequence = 0,
+              snoozed_by = NULL,
+              snoozed_at = NULL,
+              snooze_until = NULL,
+            `;
         await transaction.executeQuery(
           `
             DECLARE $workspace_id AS Utf8;
@@ -573,6 +616,7 @@ export class OccurrencesRepository {
             DECLARE $reminder_start_at AS Timestamp;
             DECLARE $status AS Utf8;
             DECLARE $timezone AS Utf8;
+            DECLARE $lead_minutes AS Uint32;
             DECLARE $repeat_interval_minutes AS Uint32;
             DECLARE $ignore_quiet_hours AS Bool;
             DECLARE $escalation_enabled AS Bool;
@@ -600,20 +644,15 @@ export class OccurrencesRepository {
               due_at = $due_at,
               due_local_date = $due_local_date,
               all_day = $all_day,
-              reminder_start_at = $reminder_start_at,
               status = $status,
               timezone = $timezone,
+              ${notificationScheduleAssignments}
               repeat_interval_minutes = $repeat_interval_minutes,
               ignore_quiet_hours = $ignore_quiet_hours,
               escalation_enabled = $escalation_enabled,
               escalation_delay_minutes = $escalation_delay_minutes,
               escalation_repeat_minutes = $escalation_repeat_minutes,
               watcher_user_ids = $watcher_user_ids,
-              next_notification_at = $reminder_start_at,
-              notification_sequence = 0,
-              snoozed_by = NULL,
-              snoozed_at = NULL,
-              snooze_until = NULL,
               message_sync_required = IF(latest_message_id IS NOT NULL, true, message_sync_required),
               updated_at = $now
             WHERE workspace_id = $workspace_id
@@ -649,6 +688,7 @@ export class OccurrencesRepository {
             $reminder_start_at: timestampValue(reminderStartAt),
             $status: TypedValues.utf8(deadline.dueAt <= now ? "overdue" : "pending"),
             $timezone: TypedValues.utf8(parsed.timezone),
+            $lead_minutes: TypedValues.uint32(parsed.notificationPolicy.leadMinutes),
             $repeat_interval_minutes: TypedValues.uint32(parsed.notificationPolicy.repeatIntervalMinutes),
             $ignore_quiet_hours: TypedValues.bool(parsed.notificationPolicy.ignoreQuietHours),
             $escalation_enabled: TypedValues.bool(escalation.enabled),
@@ -883,9 +923,11 @@ export class OccurrencesRepository {
           currency: reminder.currency,
           visibility: reminder.visibility,
           timezone: reminder.timezone,
+          leadMinutes: reminder.notificationPolicy.leadMinutes,
           repeatIntervalMinutes: reminder.notificationPolicy.repeatIntervalMinutes,
           ignoreQuietHours: reminder.notificationPolicy.ignoreQuietHours,
           escalation: reminder.notificationPolicy.escalation,
+          watcherUserIds: reminder.watcherUserIds,
           nextNotificationAt: runtime.nextReminderStartAt,
           notificationSequence: 0,
           snoozedBy: null,
@@ -930,6 +972,7 @@ export class OccurrencesRepository {
             DECLARE $currency AS Utf8?;
             DECLARE $visibility AS Utf8;
             DECLARE $timezone AS Utf8;
+            DECLARE $lead_minutes AS Uint32;
             DECLARE $repeat_interval_minutes AS Uint32;
             DECLARE $ignore_quiet_hours AS Bool;
             DECLARE $escalation_enabled AS Bool;
@@ -955,7 +998,7 @@ export class OccurrencesRepository {
               due_at, due_local_date, all_day, reminder_start_at, status,
               notification_state, assignment_mode, responsible_user_id,
               kind, title, description, action_url, amount_minor, currency, visibility,
-              timezone, repeat_interval_minutes, ignore_quiet_hours,
+              timezone, lead_minutes, repeat_interval_minutes, ignore_quiet_hours,
               escalation_enabled, escalation_delay_minutes,
               escalation_repeat_minutes, watcher_user_ids, next_notification_at,
               notification_sequence, message_sync_required,
@@ -966,7 +1009,7 @@ export class OccurrencesRepository {
               $due_at, $due_local_date, $all_day, $reminder_start_at, $status,
               $notification_state, $assignment_mode, $responsible_user_id,
               $kind, $title, $description, $action_url, $amount_minor, $currency, $visibility,
-              $timezone, $repeat_interval_minutes, $ignore_quiet_hours,
+              $timezone, $lead_minutes, $repeat_interval_minutes, $ignore_quiet_hours,
               $escalation_enabled, $escalation_delay_minutes,
               $escalation_repeat_minutes, $watcher_user_ids, $next_notification_at,
               $notification_sequence, $message_sync_required,
@@ -1010,6 +1053,7 @@ export class OccurrencesRepository {
             $currency: optionalUtf8(occurrence.currency),
             $visibility: TypedValues.utf8(occurrence.visibility),
             $timezone: TypedValues.utf8(occurrence.timezone),
+            $lead_minutes: TypedValues.uint32(reminder.notificationPolicy.leadMinutes),
             $repeat_interval_minutes: TypedValues.uint32(
               occurrence.repeatIntervalMinutes,
             ),

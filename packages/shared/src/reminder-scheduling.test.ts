@@ -8,8 +8,10 @@ import {
   calculateNextNotificationAt,
   calculateSnoozedNotificationAt,
   getNextScheduledDeadline,
+  InvalidSnoozeSelectionError,
   isWithinQuietHours,
   previewScheduledDeadlines,
+  resolveSnoozeAt,
 } from "./reminder-scheduling.js";
 
 const quietHours = { startLocal: "22:00", endLocal: "08:00" };
@@ -359,5 +361,127 @@ describe("notification timing", () => {
 
     expect(first.toISOString()).toBe("2026-08-26T15:00:00.000Z");
     expect(next.toISOString()).toBe("2026-08-27T15:00:00.000Z");
+  });
+});
+
+describe("resolveSnoozeAt", () => {
+  it("resolves named presets in the occurrence timezone", () => {
+    const reference = new Date("2026-08-26T12:00:00.000Z");
+
+    expect(resolveSnoozeAt(
+      { type: "preset", preset: "one_hour" },
+      reference,
+      "Europe/Moscow",
+      quietHours,
+    ).requestedAt.toISOString()).toBe("2026-08-26T13:00:00.000Z");
+    expect(resolveSnoozeAt(
+      { type: "preset", preset: "evening" },
+      reference,
+      "Europe/Moscow",
+      quietHours,
+    ).requestedAt.toISOString()).toBe("2026-08-26T15:00:00.000Z");
+    expect(resolveSnoozeAt(
+      { type: "preset", preset: "tomorrow_morning" },
+      reference,
+      "Europe/Moscow",
+      quietHours,
+      { tomorrowMorningLocalTime: "07:30" },
+    ).requestedAt.toISOString()).toBe("2026-08-27T04:30:00.000Z");
+  });
+
+  it("moves evening to the next local day when less than fifteen minutes remain", () => {
+    const result = resolveSnoozeAt(
+      { type: "preset", preset: "evening" },
+      new Date("2026-08-26T14:46:00.000Z"),
+      "Europe/Moscow",
+      quietHours,
+    );
+
+    expect(result.requestedAt.toISOString()).toBe("2026-08-27T15:00:00.000Z");
+  });
+
+  it("keeps one hour as elapsed time across a daylight-saving jump", () => {
+    const result = resolveSnoozeAt(
+      { type: "preset", preset: "one_hour" },
+      new Date("2026-03-29T00:30:00.000Z"),
+      "Europe/Berlin",
+      quietHours,
+    );
+
+    expect(result.requestedAt.toISOString()).toBe("2026-03-29T01:30:00.000Z");
+  });
+
+  it("resolves strict custom local time and reports quiet-hour adjustment", () => {
+    const result = resolveSnoozeAt(
+      { type: "custom", localDate: "2026-08-26", localTime: "23:00" },
+      new Date("2026-08-26T12:00:00.000Z"),
+      "Europe/Moscow",
+      quietHours,
+    );
+
+    expect(result).toMatchObject({
+      adjustedForQuietHours: true,
+      timezone: "Europe/Moscow",
+    });
+    expect(result.requestedAt.toISOString()).toBe("2026-08-26T20:00:00.000Z");
+    expect(result.effectiveAt.toISOString()).toBe("2026-08-27T05:00:00.000Z");
+  });
+
+  it("rejects nonexistent and ambiguous custom wall times", () => {
+    expect(() => resolveSnoozeAt(
+      { type: "custom", localDate: "2026-03-29", localTime: "02:30" },
+      new Date("2026-03-28T00:00:00.000Z"),
+      "Europe/Berlin",
+      quietHours,
+    )).toThrowError(expect.objectContaining({
+      reason: "nonexistent_local_time",
+    }) as InvalidSnoozeSelectionError);
+    expect(() => resolveSnoozeAt(
+      { type: "custom", localDate: "2026-10-25", localTime: "02:30" },
+      new Date("2026-10-24T00:00:00.000Z"),
+      "Europe/Berlin",
+      quietHours,
+    )).toThrowError(expect.objectContaining({
+      reason: "ambiguous_local_time",
+    }) as InvalidSnoozeSelectionError);
+  });
+
+  it("keeps tomorrow-morning presets actionable across daylight-saving transitions", () => {
+    const spring = resolveSnoozeAt(
+      { type: "preset", preset: "tomorrow_morning" },
+      new Date("2026-03-28T12:00:00.000Z"),
+      "Europe/Berlin",
+      quietHours,
+      { tomorrowMorningLocalTime: "02:30" },
+    );
+    const autumn = resolveSnoozeAt(
+      { type: "preset", preset: "tomorrow_morning" },
+      new Date("2026-10-24T12:00:00.000Z"),
+      "Europe/Berlin",
+      quietHours,
+      { tomorrowMorningLocalTime: "02:30" },
+    );
+
+    expect(spring.requestedAt.toISOString()).toBe("2026-03-29T01:00:00.000Z");
+    expect(autumn.requestedAt.toISOString()).toBe("2026-10-25T00:30:00.000Z");
+  });
+
+  it("enforces the requested-time window while retaining legacy quiet-hour behavior", () => {
+    const reference = new Date("2026-08-01T20:00:00.000Z");
+    expect(() => resolveSnoozeAt(
+      { type: "custom", localDate: "2026-08-01", localTime: "23:14" },
+      reference,
+      "Europe/Moscow",
+      quietHours,
+    )).toThrowError(expect.objectContaining({ reason: "too_soon" }) as Error);
+
+    const maximum = resolveSnoozeAt(
+      { type: "duration", minutes: 43_200 },
+      reference,
+      "Europe/Moscow",
+      quietHours,
+    );
+    expect(maximum.requestedAt.toISOString()).toBe("2026-08-31T20:00:00.000Z");
+    expect(maximum.effectiveAt.toISOString()).toBe("2026-09-01T05:00:00.000Z");
   });
 });

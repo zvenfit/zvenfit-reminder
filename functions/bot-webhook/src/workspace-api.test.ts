@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  InvalidSnoozeSelectionError,
+  OccurrenceUpdateConflictError,
   PrivateChatUnavailableError,
   ReminderCreateForbiddenError,
   ScheduleHasNoFutureDeadlineError,
@@ -35,6 +37,28 @@ function actor(role: WorkspaceMember["role"] = "member") {
     role,
     status: "active",
   } as WorkspaceMember;
+}
+
+function occurrenceUpdateBody(leadMinutes: number | null, dueLocalDate = "2026-08-25") {
+  return {
+    title: "Сделать сегодня",
+    description: null,
+    actionUrl: null,
+    amountMinor: null,
+    currency: null,
+    visibility: "group",
+    assignment: { mode: "person", responsibleUserId: 20 },
+    watcherUserIds: [30],
+    dueLocalDate,
+    timing: { kind: "timed", timeLocal: "20:30" },
+    timezone: "Europe/Moscow",
+    notificationPolicy: {
+      leadMinutes,
+      repeatIntervalMinutes: 360,
+      ignoreQuietHours: false,
+      escalation: { enabled: false },
+    },
+  };
 }
 
 function dependencies(member: WorkspaceMember | null = actor()) {
@@ -372,25 +396,7 @@ describe("handleWorkspaceApi", () => {
         httpMethod: "PATCH",
         path: "/api/occurrences/occurrence-a",
         headers: workspaceHeaders,
-        body: JSON.stringify({
-          title: "Сделать сегодня",
-          description: null,
-          actionUrl: null,
-          amountMinor: null,
-          currency: null,
-          visibility: "group",
-          assignment: { mode: "person", responsibleUserId: 20 },
-          watcherUserIds: [],
-          dueLocalDate: "2026-08-25",
-          timing: { kind: "timed", timeLocal: "20:30" },
-          timezone: "Europe/Moscow",
-          notificationPolicy: {
-            leadMinutes: 0,
-            repeatIntervalMinutes: 360,
-            ignoreQuietHours: false,
-            escalation: { enabled: false },
-          },
-        }),
+        body: JSON.stringify(occurrenceUpdateBody(0)),
       },
       config,
       initData,
@@ -412,6 +418,56 @@ describe("handleWorkspaceApi", () => {
       }),
       20,
     );
+  });
+
+  it("passes the explicit legacy lead sentinel only to occurrence updates", async () => {
+    const deps = dependencies(actor("organizer"));
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/occurrences/occurrence-a",
+        headers: workspaceHeaders,
+        body: JSON.stringify(occurrenceUpdateBody(null)),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(200);
+    expect(deps.occurrences.updateCurrentForActor).toHaveBeenCalledWith(
+      "workspace-a",
+      "occurrence-a",
+      expect.objectContaining({
+        watcherUserIds: [30],
+        notificationPolicy: expect.objectContaining({ leadMinutes: null }),
+      }),
+      20,
+    );
+  });
+
+  it("explains when a legacy occurrence deadline needs an explicit lead", async () => {
+    const deps = dependencies(actor("organizer"));
+    vi.mocked(deps.occurrences.updateCurrentForActor).mockRejectedValueOnce(
+      new OccurrenceUpdateConflictError("legacy_lead_requires_selection"),
+    );
+
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "PATCH",
+        path: "/api/occurrences/occurrence-a",
+        headers: workspaceHeaders,
+        body: JSON.stringify(occurrenceUpdateBody(null, "2026-08-26")),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(409);
+    expect(JSON.parse(response?.body ?? "{}")).toMatchObject({
+      code: "legacy_lead_requires_selection",
+    });
   });
 
   it("completes an occurrence through the shared action service", async () => {
@@ -455,6 +511,156 @@ describe("handleWorkspaceApi", () => {
 
     expect(response?.statusCode).toBe(400);
     expect(deps.occurrenceActions.execute).not.toHaveBeenCalled();
+  });
+
+  it("normalizes legacy empty and duration snooze payloads", async () => {
+    for (const [body, snooze] of [
+      ["{}", { type: "preset", preset: "one_hour" }],
+      [JSON.stringify({ minutes: 360 }), { type: "duration", minutes: 360 }],
+    ] as const) {
+      const deps = dependencies();
+      const response = await handleWorkspaceApi(
+        {
+          httpMethod: "POST",
+          path: "/api/occurrences/occurrence-a/snooze",
+          headers: workspaceHeaders,
+          body,
+        },
+        config,
+        initData,
+        deps,
+      );
+
+      expect(response?.statusCode).toBe(200);
+      expect(deps.occurrenceActions.execute).toHaveBeenCalledWith(expect.objectContaining({
+        action: "snooze",
+        snooze,
+      }));
+    }
+  });
+
+  it("passes canonical preset and custom snooze selections unchanged", async () => {
+    for (const snooze of [
+      { type: "preset" as const, preset: "evening" as const },
+      {
+        type: "custom" as const,
+        localDate: "2026-08-27",
+        localTime: "18:30",
+      },
+    ]) {
+      const deps = dependencies();
+      await handleWorkspaceApi(
+        {
+          httpMethod: "POST",
+          path: "/api/occurrences/occurrence-a/snooze",
+          headers: workspaceHeaders,
+          body: JSON.stringify(snooze),
+        },
+        config,
+        initData,
+        deps,
+      );
+
+      expect(deps.occurrenceActions.execute).toHaveBeenCalledWith(expect.objectContaining({
+        action: "snooze",
+        snooze,
+      }));
+    }
+  });
+
+  it("strictly rejects mixed snooze payloads and client-supplied timezone", async () => {
+    for (const body of [
+      { type: "preset", preset: "one_hour", minutes: 60 },
+      {
+        type: "custom",
+        localDate: "2026-08-27",
+        localTime: "18:30",
+        timezone: "UTC",
+      },
+      null,
+    ]) {
+      const deps = dependencies();
+      const response = await handleWorkspaceApi(
+        {
+          httpMethod: "POST",
+          path: "/api/occurrences/occurrence-a/snooze",
+          headers: workspaceHeaders,
+          body: JSON.stringify(body),
+        },
+        config,
+        initData,
+        deps,
+      );
+
+      expect(response?.statusCode).toBe(400);
+      expect(deps.occurrenceActions.execute).not.toHaveBeenCalled();
+    }
+  });
+
+  it("returns additive server-resolved snooze metadata", async () => {
+    const deps = dependencies();
+    deps.occurrenceActions.execute = vi.fn().mockResolvedValue({
+      action: "snooze",
+      occurrence: { occurrenceId: "occurrence-a", snoozeUntil: new Date("2026-08-27T05:00:00.000Z") },
+      snooze: {
+        requestedAt: new Date("2026-08-26T20:00:00.000Z"),
+        effectiveAt: new Date("2026-08-27T05:00:00.000Z"),
+        adjustedForQuietHours: true,
+        timezone: "Europe/Moscow",
+      },
+    });
+
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "POST",
+        path: "/api/occurrences/occurrence-a/snooze",
+        headers: workspaceHeaders,
+        body: JSON.stringify({
+          type: "custom",
+          localDate: "2026-08-26",
+          localTime: "23:00",
+        }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(JSON.parse(response?.body ?? "{}").snooze).toEqual({
+      requestedAt: "2026-08-26T20:00:00.000Z",
+      effectiveAt: "2026-08-27T05:00:00.000Z",
+      adjustedForQuietHours: true,
+      timezone: "Europe/Moscow",
+    });
+  });
+
+  it("maps contextual snooze validation failures to a stable 400", async () => {
+    const deps = dependencies();
+    deps.occurrenceActions.execute = vi.fn().mockRejectedValue(
+      new InvalidSnoozeSelectionError("ambiguous_local_time"),
+    );
+
+    const response = await handleWorkspaceApi(
+      {
+        httpMethod: "POST",
+        path: "/api/occurrences/occurrence-a/snooze",
+        headers: workspaceHeaders,
+        body: JSON.stringify({
+          type: "custom",
+          localDate: "2026-10-25",
+          localTime: "02:30",
+        }),
+      },
+      config,
+      initData,
+      deps,
+    );
+
+    expect(response?.statusCode).toBe(400);
+    expect(JSON.parse(response?.body ?? "{}")).toMatchObject({
+      code: "validation_failed",
+      reason: "ambiguous_local_time",
+    });
   });
 
   it("updates a member role through the owner-scoped repository transition", async () => {

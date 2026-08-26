@@ -22,9 +22,16 @@ interface Time24FieldProps {
   value: string;
   onChange(value: string): void;
   required?: boolean;
+  disabled?: boolean;
 }
 
-export function Time24Field({ label, value, onChange, required = false }: Time24FieldProps) {
+export function Time24Field({
+  label,
+  value,
+  onChange,
+  required = false,
+  disabled = false,
+}: Time24FieldProps) {
   const [draft, setDraft] = useState(value);
 
   useEffect(() => setDraft(value), [value]);
@@ -39,6 +46,7 @@ export function Time24Field({ label, value, onChange, required = false }: Time24
         pattern="(?:[01][0-9]|2[0-3]):[0-5][0-9]"
         placeholder="00:00"
         required={required}
+        disabled={disabled}
         title="Введите время в формате ЧЧ:ММ от 00:00 до 23:59"
         type="text"
         value={draft}

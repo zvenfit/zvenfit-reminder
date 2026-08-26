@@ -3,9 +3,11 @@ import {
   DEFAULT_ESCALATION_DELAY_MINUTES,
   DEFAULT_ESCALATION_REPEAT_MINUTES,
   DEFAULT_REPEAT_INTERVAL_MINUTES,
+  occurrenceDraftUpdateSchema,
   reminderDraftSchema,
   reminderDraftUpdateSchema,
   scheduleSpecSchema,
+  snoozeSelectionSchema,
 } from "./reminder-domain.js";
 
 const minimalDraft = {
@@ -107,6 +109,22 @@ describe("reminderDraftSchema", () => {
     expect(result.kind).toBeUndefined();
   });
 
+  it("accepts a nullable lead only for occurrence compatibility updates", () => {
+    const input = {
+      ...minimalDraft,
+      notificationPolicy: {
+        leadMinutes: null,
+        repeatIntervalMinutes: 360,
+        ignoreQuietHours: false,
+        escalation: { enabled: false as const },
+      },
+    };
+
+    expect(occurrenceDraftUpdateSchema.parse(input).notificationPolicy.leadMinutes)
+      .toBeNull();
+    expect(reminderDraftUpdateSchema.safeParse(input).success).toBe(false);
+  });
+
   it("requires HTTPS for payment links while retaining HTTP task links", () => {
     expect(reminderDraftSchema.safeParse({
       ...minimalDraft,
@@ -199,5 +217,37 @@ describe("scheduleSpecSchema", () => {
         weekdays: [1, 1],
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("snoozeSelectionSchema", () => {
+  it("accepts named presets, custom local time, and bounded legacy durations", () => {
+    expect(snoozeSelectionSchema.parse({
+      type: "preset",
+      preset: "tomorrow_morning",
+    })).toEqual({ type: "preset", preset: "tomorrow_morning" });
+    expect(snoozeSelectionSchema.parse({
+      type: "custom",
+      localDate: "2026-08-27",
+      localTime: "18:30",
+    })).toEqual({ type: "custom", localDate: "2026-08-27", localTime: "18:30" });
+    expect(snoozeSelectionSchema.safeParse({ type: "duration", minutes: 15 }).success)
+      .toBe(true);
+    expect(snoozeSelectionSchema.safeParse({ type: "duration", minutes: 43_200 }).success)
+      .toBe(true);
+  });
+
+  it("rejects malformed, mixed, or out-of-range selections", () => {
+    for (const value of [
+      { type: "preset", preset: "later" },
+      { type: "preset", preset: "one_hour", minutes: 60 },
+      { type: "custom", localDate: "2026-02-30", localTime: "18:30" },
+      { type: "custom", localDate: "2026-08-27", localTime: "24:00" },
+      { type: "duration", minutes: 14 },
+      { type: "duration", minutes: 43_201 },
+      { type: "duration", minutes: 60.5 },
+    ]) {
+      expect(snoozeSelectionSchema.safeParse(value).success).toBe(false);
+    }
   });
 });

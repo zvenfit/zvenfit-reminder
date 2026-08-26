@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { ReminderOccurrence } from "../reminder-domain.js";
+import type { ReminderOccurrence, SnoozeSelection } from "../reminder-domain.js";
 import {
   adjustForQuietHours,
   calculateFirstNotificationAt,
-  calculateSnoozedNotificationAt,
   getNextScheduledDeadline,
+  resolveSnoozeAt,
+  type SnoozeResolution,
 } from "../reminder-scheduling.js";
 import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
 import { prepareOccurrenceMutation } from "./delivery-guard.js";
@@ -39,6 +40,11 @@ export interface CompletionFinalization {
   nextDueAt: Date | null;
   nextReminderStartAt: Date | null;
   occurrence: ReminderOccurrence;
+}
+
+export interface SnoozeOccurrenceResult {
+  occurrence: ReminderOccurrence;
+  snooze: SnoozeResolution;
 }
 
 export class OccurrenceNotActionableError extends Error {
@@ -90,9 +96,9 @@ export class OccurrenceActionsRepository {
     workspaceId: string,
     occurrenceId: string,
     actorUserId: number,
-    requestedAt: Date,
+    selection: SnoozeSelection,
     now: Date = new Date(),
-  ): Promise<ReminderOccurrence | null> {
+  ): Promise<SnoozeOccurrenceResult | null> {
     assertActorUserId(actorUserId);
     return this.runSession((session) =>
       withSerializableTransaction(session, async (transaction) => {
@@ -122,7 +128,8 @@ export class OccurrenceActionsRepository {
               )
             LIMIT 1;
 
-            SELECT quiet_hours_start, quiet_hours_end, status FROM workspaces
+            SELECT quiet_hours_start, quiet_hours_end,
+              default_all_day_reminder_time, status FROM workspaces
             WHERE workspace_id = $workspace_id
             LIMIT 1;
           `,
@@ -148,16 +155,22 @@ export class OccurrenceActionsRepository {
         ) {
           throw new OccurrenceNotActionableError(occurrenceId);
         }
-        const snoozeUntil = calculateSnoozedNotificationAt(
-          requestedAt,
+        const snooze = resolveSnoozeAt(
+          selection,
           now,
           occurrence.timezone,
           {
             startLocal: String(getField(workspaceRow, "quiet_hours_start")),
             endLocal: String(getField(workspaceRow, "quiet_hours_end")),
           },
-          occurrence.ignoreQuietHours,
+          {
+            ignoreQuietHours: occurrence.ignoreQuietHours,
+            tomorrowMorningLocalTime: String(
+              getField(workspaceRow, "default_all_day_reminder_time"),
+            ),
+          },
         );
+        const snoozeUntil = snooze.effectiveAt;
 
         await transaction.executeQuery(
           `
@@ -203,20 +216,30 @@ export class OccurrenceActionsRepository {
             $overdue_status: TypedValues.utf8("overdue"),
             $event_id: TypedValues.utf8(randomUUID()),
             $payload: TypedValues.jsonDocument(
-              JSON.stringify({ snoozeUntil: snoozeUntil.toISOString() }),
+              JSON.stringify({
+                selection,
+                requestedAt: snooze.requestedAt.toISOString(),
+                effectiveAt: snooze.effectiveAt.toISOString(),
+                snoozeUntil: snoozeUntil.toISOString(),
+                adjustedForQuietHours: snooze.adjustedForQuietHours,
+                timezone: snooze.timezone,
+              }),
             ),
           },
         );
 
         return {
-          ...occurrence,
-          stateRevision: occurrence.stateRevision + 1,
-          status: occurrence.dueAt <= now ? "overdue" : occurrence.status,
-          nextNotificationAt: snoozeUntil,
-          snoozedBy: actorUserId,
-          snoozedAt: now,
-          snoozeUntil,
-          updatedAt: now,
+          occurrence: {
+            ...occurrence,
+            stateRevision: occurrence.stateRevision + 1,
+            status: occurrence.dueAt <= now ? "overdue" : occurrence.status,
+            nextNotificationAt: snoozeUntil,
+            snoozedBy: actorUserId,
+            snoozedAt: now,
+            snoozeUntil,
+            updatedAt: now,
+          },
+          snooze,
         };
       }),
     );

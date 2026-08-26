@@ -54,16 +54,27 @@ interface ApiOccurrence {
   reminderId: string;
   kind: "task" | "payment";
   dueAt: string;
+  dueLocalDate?: string;
+  allDay?: boolean;
+  reminderStartAt?: string;
   title: string;
   description: string | null;
   amountMinor: number | null;
   currency: string | null;
   visibility: "group" | "private";
   assignment: { mode: "person"; responsibleUserId: number } | { mode: "anyone" };
+  watcherUserIds: number[];
   status: "pending" | "overdue" | "completed" | "cancelled";
   timezone: string;
+  leadMinutes: number | null;
+  repeatIntervalMinutes?: number;
+  ignoreQuietHours?: boolean;
+  escalation?:
+    | { enabled: false }
+    | { enabled: true; delayMinutes: number; repeatMinutes: number };
   nextNotificationAt: string | null;
   undoUntil: string | null;
+  snoozeUntil?: string | null;
   actionUrl?: string | null;
   completedBy?: number | null;
   completedByDisplayName?: string | null;
@@ -95,6 +106,10 @@ interface ApiState {
   historyFailuresRemaining?: number;
   historyDelayMs?: number;
   createFailuresRemaining?: number;
+  snoozeDelayMs?: number;
+  snoozeRequestedAt?: string;
+  snoozeEffectiveAt?: string;
+  snoozeAdjustedForQuietHours?: boolean;
 }
 
 const now = "2026-08-14T09:00:00.000Z";
@@ -153,14 +168,21 @@ function occurrence(
     reminderId: occurrenceId,
     kind: "task",
     dueAt: "2026-08-14T12:00:00.000Z",
+    dueLocalDate: "2026-08-14",
+    allDay: false,
+    reminderStartAt: now,
     title,
     description: null,
     amountMinor: null,
     currency: null,
     visibility: "group",
     assignment: { mode: "person", responsibleUserId: 10 },
+    watcherUserIds: [],
     status: "pending",
     timezone: "Europe/Moscow",
+    leadMinutes: 0,
+    repeatIntervalMinutes: 360,
+    ignoreQuietHours: false,
     nextNotificationAt: now,
     undoUntil: null,
     ...overrides,
@@ -314,7 +336,14 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
         state.historyFailuresRemaining = (state.historyFailuresRemaining ?? 1) - 1;
         return fulfill({ error: "History query failed", code: "history_unavailable" }, 500);
       }
-      return fulfill({ occurrences: state.occurrences[selected].filter((item) => item.status === "completed" || item.status === "cancelled") });
+      const occurrences = state.occurrences[selected]
+        .filter((item) => item.status === "completed" || item.status === "cancelled")
+        .sort((left, right) => new Date(
+          right.completedAt ?? right.cancelledAt ?? right.updatedAt ?? right.dueAt,
+        ).getTime() - new Date(
+          left.completedAt ?? left.cancelledAt ?? left.updatedAt ?? left.dueAt,
+        ).getTime());
+      return fulfill({ occurrences });
     }
     if (method === "POST" && path === "/api/reminders") {
       if ((state.createFailuresRemaining ?? 0) > 0) {
@@ -388,7 +417,23 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
         item.status = "pending";
         item.undoUntil = null;
       }
-      if (actionMatch[2] === "snooze") item.nextNotificationAt = "2026-08-14T10:00:00.000Z";
+      if (actionMatch[2] === "snooze") {
+        if ((state.snoozeDelayMs ?? 0) > 0) {
+          await new Promise((resolve) => setTimeout(resolve, state.snoozeDelayMs));
+        }
+        const effectiveAt = state.snoozeEffectiveAt ?? "2026-08-27T05:00:00.000Z";
+        item.nextNotificationAt = effectiveAt;
+        item.snoozeUntil = effectiveAt;
+        return fulfill({
+          occurrence: item,
+          snooze: {
+            requestedAt: state.snoozeRequestedAt,
+            effectiveAt,
+            adjustedForQuietHours: state.snoozeAdjustedForQuietHours ?? false,
+            timezone: item.timezone,
+          },
+        });
+      }
       return fulfill({ occurrence: item });
     }
     const occurrenceUpdateMatch = path.match(/^\/api\/occurrences\/([^/]+)$/);
@@ -396,6 +441,16 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       const item = state.occurrences[selected].find((candidate) => candidate.occurrenceId === occurrenceUpdateMatch[1]);
       if (!item) return fulfill({ error: "Not found" }, 404);
       Object.assign(item, body, { updatedAt: new Date().toISOString() });
+      const notificationPolicy = body?.notificationPolicy as Record<string, unknown> | undefined;
+      if (notificationPolicy && notificationPolicy.leadMinutes !== null) {
+        item.leadMinutes = Number(notificationPolicy.leadMinutes);
+      }
+      if (notificationPolicy?.repeatIntervalMinutes != null) {
+        item.repeatIntervalMinutes = Number(notificationPolicy.repeatIntervalMinutes);
+      }
+      if (notificationPolicy?.ignoreQuietHours != null) {
+        item.ignoreQuietHours = Boolean(notificationPolicy.ignoreQuietHours);
+      }
       return fulfill({ occurrence: item });
     }
     return fulfill({ error: `Unhandled E2E route: ${method} ${path}` }, 501);
@@ -406,6 +461,7 @@ async function installTelegram(page: Page): Promise<void> {
   await page.route("https://telegram.org/js/telegram-web-app.js*", (route) =>
     route.fulfill({ contentType: "application/javascript", body: "" }));
   await page.addInitScript(() => {
+    const backHandlers = new Set<() => void>();
     Object.defineProperty(window, "Telegram", {
       configurable: true,
       value: {
@@ -414,6 +470,13 @@ async function installTelegram(page: Page): Promise<void> {
           initDataUnsafe: { user: { id: 10, first_name: "Анна" } },
           ready() {},
           expand() {},
+          BackButton: {
+            show() {},
+            hide() {},
+            onClick(handler: () => void) { backHandlers.add(handler); },
+            offClick(handler: () => void) { backHandlers.delete(handler); },
+            trigger() { backHandlers.forEach((handler) => handler()); },
+          },
           themeParams: {},
           showAlert() {},
         },
@@ -488,6 +551,67 @@ test("keeps the first screen readable at the 320px Telegram width", async ({ pag
 
   await page.getByRole("button", { name: "План", exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("keeps revised supporting copy readable and primary actions AA-contrasted", async ({ page }) => {
+  const state = createState();
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await openApp(page, state);
+
+  const homeCopySizes = await page.locator(
+    ".bottom-navigation button, .rail-signal > span, .rail-signal > small",
+  ).evaluateAll((elements) => elements.map((element) =>
+    Number.parseFloat(getComputedStyle(element).fontSize)));
+  expect(Math.min(...homeCopySizes)).toBeGreaterThanOrEqual(12);
+
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  const darkPrimaryContrast = await page.getByRole("button", { name: "Создать поручение" })
+    .evaluate((element) => {
+      const channels = (value: string) => value.match(/[\d.]+/gu)?.slice(0, 3).map(Number) ?? [];
+      const luminance = (value: string) => {
+        const [red = 0, green = 0, blue = 0] = channels(value).map((channel) => {
+          const normalized = channel / 255;
+          return normalized <= 0.04045
+            ? normalized / 12.92
+            : ((normalized + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+      };
+      const style = getComputedStyle(element);
+      const foreground = luminance(style.color);
+      const background = luminance(style.backgroundColor);
+      return (Math.max(foreground, background) + 0.05) /
+        (Math.min(foreground, background) + 0.05);
+    });
+  expect(darkPrimaryContrast).toBeGreaterThanOrEqual(4.5);
+
+  const formCopySizes = await page.locator(
+    ".form-preview__plan dt, .form-preview__plan dd, .form-submit-bar small",
+  ).evaluateAll((elements) => elements.map((element) =>
+    Number.parseFloat(getComputedStyle(element).fontSize)));
+  expect(Math.min(...formCopySizes)).toBeGreaterThanOrEqual(12);
+
+  await page.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  const lightSecondaryContrast = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    const channels = (value: string) => value.match(/[\da-f]{2}/giu)?.map((channel) =>
+      Number.parseInt(channel, 16)) ?? [];
+    const luminance = (value: string) => {
+      const [red = 0, green = 0, blue = 0] = channels(value).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    };
+    const foreground = luminance(root.getPropertyValue("--ink-faint").trim());
+    const background = luminance(root.getPropertyValue("--canvas").trim());
+    return (Math.max(foreground, background) + 0.05) /
+      (Math.min(foreground, background) + 0.05);
+  });
+  expect(lightSecondaryContrast).toBeGreaterThanOrEqual(4.5);
 });
 
 test("shows the dashboard structure while the initial workspace is loading", async ({ page }) => {
@@ -742,6 +866,55 @@ test("uses explicit 24-hour time fields", async ({ page }) => {
   await expect(page.getByText(/AM|PM/)).toHaveCount(0);
 });
 
+test("separates the deadline from notification policy in the form preview", async ({ page }) => {
+  const state = createState();
+  await page.setViewportSize({ width: 320, height: 568 });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  await expect(page.getByRole("heading", { name: "Когда нужно выполнить" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Когда начать напоминать" })).toBeVisible();
+  await page.getByLabel("Дата").fill("2099-08-15");
+  await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("1440");
+  await page.getByRole("combobox", { name: "Повтор уведомлений", exact: true }).selectOption("180");
+
+  const preview = page.getByLabel("Предпросмотр напоминания");
+  await expect(preview).toContainText("Срок");
+  await expect(preview).toContainText("За 1 день до срока");
+  await expect(preview).toContainText("Каждые 3 часа, пока задача не выполнена");
+  await expect(preview).toContainText("22:00–08:00");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .toBe(true);
+
+  await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Проверить договор");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  expect(state.requests.find((request) =>
+    request.method === "POST" && request.path === "/api/reminders"))
+    .toMatchObject({
+      body: {
+        schedule: { frequency: "once" },
+        notificationPolicy: { leadMinutes: 1_440, repeatIntervalMinutes: 180 },
+      },
+    });
+});
+
+test("shows an immediate effective first signal when the selected lead is already past", async ({ page }) => {
+  const state = createState();
+  await page.clock.install({ time: new Date("2026-08-26T10:30:00.000Z") });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  await page.getByLabel("Дата").fill("2026-08-26");
+  await page.getByRole("textbox", { name: "Время" }).fill("14:00");
+  await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("60");
+
+  const preview = page.getByLabel("Предпросмотр напоминания");
+  await expect(preview).toContainText("Сразу после сохранения");
+  await expect(preview).toContainText("выбранное время уже прошло");
+  await expect(preview).not.toContainText("За 1 час до срока");
+});
+
 test("creates a payment with payment-specific fields and semantics", async ({ page }) => {
   const state = createState();
   await openApp(page, state);
@@ -751,7 +924,8 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
   await expect(page.getByRole("textbox", { name: "Что нужно оплатить" })).toBeVisible();
   await page.getByText("Дополнительные настройки", { exact: true }).click();
   await expect(page.getByRole("spinbutton", { name: /Сумма/ })).toHaveValue("");
-  await expect(page.getByRole("heading", { name: "Пока не оплачено" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Когда нужно оплатить" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Когда начать напоминать" })).toBeVisible();
 
   await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Домашний интернет");
   await page.getByRole("spinbutton", { name: /Сумма/ }).fill("890.50");
@@ -873,11 +1047,37 @@ test("lets a member create only a personal reminder for themselves", async ({ pa
 
 test("snoozes, completes, and undoes an occurrence", async ({ page }) => {
   const state = createState();
+  state.snoozeDelayMs = 400;
+  state.snoozeRequestedAt = "2026-08-27T04:00:00.000Z";
+  state.snoozeEffectiveAt = "2026-08-27T05:00:00.000Z";
+  state.snoozeAdjustedForQuietHours = true;
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
 
-  await card.getByRole("button", { name: "Напомнить через час" }).click();
-  await expect(page.getByText("Следующий сигнал — через час")).toBeVisible();
+  await card.getByRole("button", { name: "Напомнить позже" }).click();
+  const dialog = page.getByRole("dialog", { name: "Напомнить позже" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("group", { name: "Быстрый выбор времени" }))
+    .toContainText("Через час");
+  await expect(dialog.getByRole("button", { name: /Завтра утром/ }))
+    .toContainText(/завтра|августа/);
+
+  await dialog.getByRole("button", { name: /Через час/ }).click();
+  await expect(dialog).toHaveAttribute("aria-busy", "true");
+  await expect(dialog.getByRole("button", { name: "Закрыть выбор времени" })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: /Завтра утром/ })).toBeDisabled();
+  await expect(dialog.getByRole("status")).toContainText("Сохраняем новое время");
+  await expect(dialog).toHaveCount(0);
+  const confirmation = page.getByRole("status");
+  await expect(confirmation).toContainText("Тихие часы перенесли сигнал с");
+  await expect(confirmation).toContainText("07:00");
+  await expect(confirmation).toContainText("08:00");
+  expect(state.requests.filter((request) =>
+    request.method === "POST" && request.path === "/api/occurrences/internet/snooze"))
+    .toEqual([expect.objectContaining({
+      body: { type: "preset", preset: "one_hour" },
+    })]);
+
   await card.getByRole("button", { name: "Отметить оплату" }).click();
   await expect(page.getByText("Можно отменить в течение 10 минут")).toBeVisible();
   await expect(card).toHaveCount(0);
@@ -885,17 +1085,91 @@ test("snoozes, completes, and undoes an occurrence", async ({ page }) => {
   await expect(page.getByText("Оплатить интернет")).toBeVisible();
 });
 
+test("uses one accessible snooze picker in Tasks and closes it with Telegram Back", async ({ page }) => {
+  const state = createState();
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await openApp(page, state);
+  const trigger = page.getByRole("article")
+    .filter({ hasText: "Оплатить интернет" })
+    .getByRole("button", { name: "Напомнить позже" });
+
+  await trigger.click();
+  await expect(page.getByRole("dialog", { name: "Напомнить позже" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .toBe(true);
+  await page.evaluate(() => {
+    (window as unknown as {
+      Telegram: { WebApp: { BackButton: { trigger(): void } } };
+    }).Telegram.WebApp.BackButton.trigger();
+  });
+
+  await expect(page.getByRole("dialog", { name: "Напомнить позже" })).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  expect(state.requests.some((request) => request.path.endsWith("/snooze"))).toBe(false);
+});
+
+test("submits a custom local date and time from occurrence detail", async ({ page }) => {
+  const state = createState();
+  await page.setViewportSize({ width: 412, height: 700 });
+  await page.emulateMedia({ colorScheme: "light" });
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Оплатить интернет/ }).click();
+  await page.getByRole("button", { name: "Напомнить позже" }).click();
+  const dialog = page.getByRole("dialog", { name: "Напомнить позже" });
+  await dialog.getByRole("button", { name: /Выбрать дату и время/ }).click();
+  const dateInput = dialog.getByLabel("Дата");
+  const customDate = await dateInput.inputValue();
+  await dateInput.fill(customDate);
+  await dialog.getByRole("textbox", { name: "Время следующего сигнала" }).fill("17:45");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .toBe(true);
+  await dialog.getByRole("button", { name: "Напомнить в это время" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  expect(state.requests.find((request) =>
+    request.method === "POST" && request.path === "/api/occurrences/internet/snooze"))
+    .toMatchObject({
+      body: { type: "custom", localDate: customDate, localTime: "17:45" },
+    });
+});
+
 test("opens one calm detail screen with deadline, next signal, and actions", async ({ page }) => {
   const state = createState();
+  const passport = state.occurrences.team.find((item) => item.occurrenceId === "passport")!;
+  passport.nextNotificationAt = "2027-01-01T06:00:00.000Z";
+  await page.setViewportSize({ width: 412, height: 700 });
+  await page.emulateMedia({ colorScheme: "light" });
   await openApp(page, state);
 
   await page.getByRole("tab", { name: "Вся группа" }).click();
-  await page.getByRole("button", { name: /Забрать паспорт/ }).click();
+  const card = page.getByRole("article").filter({ hasText: "Забрать паспорт" });
+  await expect(card.locator(".rail-signal b")).toContainText("2027");
+  await expect(card.locator(".rail-signal b")).toContainText("09:00");
+  await card.getByRole("button", { name: /Забрать паспорт/ }).click();
 
   await expect(page.getByRole("heading", { name: "Забрать паспорт" })).toBeVisible();
   await expect(page.getByText(/Просрочено на/).first()).toBeVisible();
   await expect(page.getByText("Следующий сигнал", { exact: true })).toBeVisible();
+  await expect(page.locator(".detail-fact--signal b")).toContainText("2027");
+  await expect(page.locator(".detail-fact--signal b")).toContainText("09:00");
+  await expect(page.locator(".detail-fact--signal small")).toContainText("С учётом тихих часов");
   await expect(page.getByRole("button", { name: "Отметить выполнение" })).toBeVisible();
+});
+
+test("updates a relative next signal when its scheduled instant passes", async ({ page }) => {
+  const state = createState();
+  await page.clock.install({ time: new Date("2026-08-26T09:00:00.000Z") });
+  const internet = state.occurrences.team.find((item) => item.occurrenceId === "internet")!;
+  internet.nextNotificationAt = "2026-08-26T09:00:20.000Z";
+  await openApp(page, state);
+
+  const signal = page.getByRole("article").filter({ hasText: "Оплатить интернет" })
+    .locator(".rail-signal small");
+  await expect(signal).toContainText("Через 1 мин");
+  await page.clock.fastForward(30_001);
+  await expect(signal).toContainText("Ожидает отправки");
 });
 
 test("shows three concrete future dates for a recurring plan", async ({ page }) => {
@@ -922,43 +1196,208 @@ test("edits only one current occurrence without changing the series", async ({ p
   const state = createState();
   const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
   item.reminderId = "meters";
+  item.kind = "task";
   item.title = "Передать показания сейчас";
+  item.timezone = "Europe/Berlin";
+  item.escalation = { enabled: true, delayMinutes: 90, repeatMinutes: 180 };
   await openApp(page, state);
 
   await page.getByRole("button", { name: /Передать показания сейчас/ }).click();
   await page.getByRole("button", { name: "Изменить" }).click();
   await expect(page.getByRole("radio", { name: /Только этот срок/ })).toHaveAttribute("aria-checked", "true");
-  await expect(page.getByRole("heading", { name: "Когда он должен быть выполнен" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Когда нужно выполнить" })).toBeVisible();
   await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Передать показания сегодня");
   await page.getByRole("button", { name: "Сохранить этот срок" }).click();
 
   expect(state.requests.find((request) =>
     request.method === "PATCH" && request.path === "/api/occurrences/internet"))
-    .toMatchObject({ body: { title: "Передать показания сегодня", dueLocalDate: expect.any(String) } });
+    .toMatchObject({
+      body: {
+        title: "Передать показания сегодня",
+        dueLocalDate: expect.any(String),
+        timezone: "Europe/Berlin",
+        notificationPolicy: {
+          escalation: { enabled: true, delayMinutes: 90, repeatMinutes: 180 },
+        },
+      },
+    });
   expect(state.reminders.team.find((reminder) => reminder.reminderId === "meters")?.title)
     .toBe("Передать показания");
 });
 
+test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
+  const state = createState();
+  const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
+  item.reminderId = "meters";
+  item.kind = "payment";
+  item.title = "Разовый платёж за счётчики";
+  item.amountMinor = 2_500;
+  item.currency = "RUB";
+  item.assignment = { mode: "person", responsibleUserId: 10 };
+  item.watcherUserIds = [30];
+  item.leadMinutes = 1_440;
+  item.repeatIntervalMinutes = 180;
+  item.ignoreQuietHours = true;
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Разовый платёж за счётчики/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  const occurrenceTitle = page.getByRole("textbox", { name: "Что нужно оплатить" });
+  await expect(occurrenceTitle).toHaveValue("Разовый платёж за счётчики");
+  await expect(page.getByRole("combobox", { name: "Первый сигнал", exact: true }))
+    .toHaveValue("1440");
+  await page.getByText("Добавить наблюдателей", { exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: /Я/ })).toBeChecked();
+  await occurrenceTitle.fill("Черновик только этого платежа");
+  await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("10080");
+
+  await page.getByRole("radio", { name: /Этот и следующие/ }).click();
+  await expect(page.getByRole("textbox", { name: "Что нужно сделать" }))
+    .toHaveValue("Передать показания");
+  await expect(page.getByRole("combobox", { name: "Первый сигнал", exact: true }))
+    .toHaveValue("0");
+  await expect(page.getByRole("checkbox", { name: /Анна/ })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: /Я/ })).not.toBeChecked();
+  await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Серия показаний без утечки");
+
+  await page.getByRole("radio", { name: /Только этот срок/ }).click();
+  await expect(page.getByRole("textbox", { name: "Что нужно оплатить" }))
+    .toHaveValue("Черновик только этого платежа");
+  await expect(page.getByRole("combobox", { name: "Первый сигнал", exact: true }))
+    .toHaveValue("10080");
+
+  await page.getByRole("radio", { name: /Этот и следующие/ }).click();
+  await page.getByRole("button", { name: "Сохранить серию" }).click();
+
+  expect(state.requests.find((request) =>
+    request.method === "PATCH" && request.path === "/api/reminders/meters"))
+    .toMatchObject({
+      body: {
+        kind: "task",
+        title: "Серия показаний без утечки",
+        watcherUserIds: [10],
+        notificationPolicy: {
+          leadMinutes: 0,
+          repeatIntervalMinutes: 360,
+          ignoreQuietHours: false,
+        },
+      },
+    });
+});
+
+test("requires a concrete lead before moving a legacy occurrence deadline", async ({ page }) => {
+  const state = createState();
+  const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
+  item.reminderId = "meters";
+  item.title = "Старый срок без lead policy";
+  item.leadMinutes = null;
+  item.reminderStartAt = "2026-08-14T09:00:00.000Z";
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Старый срок без lead policy/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  const lead = page.getByRole("combobox", { name: "Первый сигнал", exact: true });
+  await expect(lead).toHaveValue("preserve");
+  await expect(lead.getByRole("option", { name: /Не менять/ })).toContainText("12:00");
+
+  await page.getByLabel("Дата").fill("2026-08-15");
+  await page.getByRole("button", { name: "Сохранить этот срок" }).click();
+  await expect(page.getByRole("alert")).toContainText(/выберите, когда отправить первый сигнал/i);
+  expect(state.requests.some((request) =>
+    request.method === "PATCH" && request.path === "/api/occurrences/internet")).toBe(false);
+
+  await lead.selectOption("60");
+  await page.getByRole("button", { name: "Сохранить этот срок" }).click();
+  expect(state.requests.find((request) =>
+    request.method === "PATCH" && request.path === "/api/occurrences/internet"))
+    .toMatchObject({ body: { notificationPolicy: { leadMinutes: 60 } } });
+});
+
+test("keeps an all-day occurrence all-day when editing only that deadline", async ({ page }) => {
+  const state = createState();
+  const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
+  item.reminderId = "meters";
+  item.title = "Сверить документы за день";
+  item.dueAt = "2026-08-28T20:59:59.999Z";
+  item.dueLocalDate = "2026-08-28";
+  item.allDay = true;
+  item.reminderStartAt = "2026-08-28T06:00:00.000Z";
+  await page.setViewportSize({ width: 412, height: 700 });
+  await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Сверить документы за день/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  const allDay = page.getByRole("checkbox", { name: /Весь день/ });
+  await expect(allDay).toBeChecked();
+  await expect(page.getByLabel("Предпросмотр напоминания")).toContainText("В день срока, в 09:00");
+  await page.getByRole("button", { name: "Сохранить этот срок" }).click();
+
+  expect(state.requests.find((request) =>
+    request.method === "PATCH" && request.path === "/api/occurrences/internet"))
+    .toMatchObject({
+      body: {
+        dueLocalDate: "2026-08-28",
+        timing: { kind: "allDay" },
+      },
+    });
+});
+
 test("keeps completed and cancelled facts in an auditable history", async ({ page }) => {
   const state = createState();
-  state.occurrences.team.push(occurrence("meters-july", "Передать показания", {
+  state.occurrences.team.push(occurrence("meters-july", "Передать очень длинные показания по всем счётчикам клуба", {
     reminderId: "meters",
     status: "completed",
+    dueAt: "2026-07-12T10:00:00.000Z",
     completedBy: 20,
     completedByDisplayName: "Иван",
-    completedAt: "2026-08-12T10:30:00.000Z",
+    completedAt: "2026-08-20T12:30:00.000Z",
     createdAt: "2026-08-10T10:00:00.000Z",
-    updatedAt: "2026-08-12T10:30:00.000Z",
+    updatedAt: "2026-08-20T12:30:00.000Z",
+    assignment: { mode: "person", responsibleUserId: 10 },
   }));
+  state.occurrences.team.push(occurrence("meters-cancelled", "Отменить дублирующее напоминание", {
+    reminderId: "meters",
+    status: "cancelled",
+    dueAt: "2026-08-25T10:00:00.000Z",
+    cancelledBy: 10,
+    cancelledAt: "2026-08-19T09:00:00.000Z",
+    cancellationReason: "reminder_archived",
+    updatedAt: "2026-08-19T09:00:00.000Z",
+    assignment: { mode: "person", responsibleUserId: 20 },
+  }));
+  await page.setViewportSize({ width: 320, height: 568 });
   await openApp(page, state);
 
   await page.getByRole("button", { name: "История", exact: true }).click();
-  const history = page.getByRole("button", { name: /Передать показания.*Выполнено.*Иван/ });
-  await expect(history).toBeVisible();
-  await history.click();
+  const rows = page.locator(".history-row");
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText("Передать очень длинные показания");
+  await expect(rows.nth(0)).toContainText("Выполнение отмечено: Иван");
+  await expect(rows.nth(0)).toContainText("Ответственный: Анна");
+  await expect(rows.nth(1)).toContainText("Повтор отменён: Анна");
+  await expect(rows.nth(1)).toContainText("Ответственный: Иван");
+  await expect(rows.nth(1)).not.toContainText("reminder_archived");
+  await expect(rows.nth(1)).not.toContainText("Причина:");
+  const longTitle = rows.nth(0).locator(".history-row__copy > b");
+  expect(await longTitle.evaluate((element) => ({
+    lineClamp: getComputedStyle(element).webkitLineClamp,
+    overflow: getComputedStyle(element).overflow,
+  }))).toEqual({ lineClamp: "none", overflow: "visible" });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+    .toBe(true);
+
+  await rows.nth(0).click();
   await expect(page.getByText("История этого повтора", { exact: true })).toBeVisible();
   await expect(page.getByText(/Выполнение отметил/)).toBeVisible();
   await expect(page.getByText(/Иван/).last()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Отметить выполнение" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Назад" }).click();
+
+  await page.locator(".history-row").nth(1).click();
+  await expect(page.getByText("Причина: Серия архивирована")).toBeVisible();
+  await expect(page.getByText(/reminder_archived/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Напомнить позже" })).toHaveCount(0);
 });
 
 test("hides Undo when its completion window expires", async ({ page }) => {
@@ -1073,7 +1512,7 @@ test("keeps the creator actions after the creator becomes an ordinary member", a
 
   const card = page.getByRole("article").filter({ hasText: "Передать показания" }).first();
   await expect(card.getByRole("button", { name: "Отметить выполнение" })).toBeVisible();
-  await expect(card.getByRole("button", { name: "Напомнить через час" })).toBeVisible();
+  await expect(card.getByRole("button", { name: "Напомнить позже" })).toBeVisible();
 });
 
 test("does not offer occurrence actions to an unrelated ordinary member", async ({ page }) => {
@@ -1088,7 +1527,7 @@ test("does not offer occurrence actions to an unrelated ordinary member", async 
   const card = page.getByRole("article").filter({ hasText: "Чужое поручение" });
 
   await expect(card.getByRole("button", { name: "Отметить выполнение" })).toHaveCount(0);
-  await expect(card.getByRole("button", { name: "Напомнить через час" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Напомнить позже" })).toHaveCount(0);
 });
 
 test("updates group rhythm and confirms ownership transfer", async ({ page }) => {

@@ -587,6 +587,7 @@ describe("RemindersRepository", () => {
       query.includes("'reminder.updated'"));
     expect(write?.[0]).toContain("UPDATE reminder_occurrences");
     expect(write?.[0]).toContain("kind = $kind");
+    expect(write?.[0]).toContain("lead_minutes = $lead_minutes");
     expect(write?.[0]).toContain("watcher_user_ids = $watcher_user_ids");
     expect(write?.[0]).toContain("notification_state = 'waiting'");
     expect(write?.[0]).toContain("$now");

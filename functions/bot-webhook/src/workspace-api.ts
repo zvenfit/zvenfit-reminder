@@ -1,6 +1,9 @@
 import {
   DeliveryInProgressError,
   InactiveWorkspaceMemberError,
+  InvalidSnoozeSelectionError,
+  MAX_SNOOZE_MINUTES,
+  MIN_SNOOZE_MINUTES,
   OccurrenceNotActionableError,
   OccurrenceUpdateConflictError,
   OccurrenceUpdateForbiddenError,
@@ -23,14 +26,17 @@ import {
   WorkspacesRepository,
   UndoWindowExpiredError,
   canCreateReminder,
+  occurrenceDraftUpdateSchema,
   reminderDraftSchema,
   reminderDraftUpdateSchema,
+  snoozeSelectionSchema,
   workspaceMemberDisplayNameUpdateSchema,
   workspaceSettingsSchema,
   type AppConfig,
   type ParsedInitData,
+  type SnoozeSelection,
 } from "@zvenfit-reminder/shared";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import {
@@ -72,6 +78,20 @@ export interface WorkspaceApiDependencies {
   memberAvatar: MemberAvatarLoader;
   memberEnrollment: MemberEnrollmentPublisher;
 }
+
+const snoozeApiBodySchema = z.union([
+  snoozeSelectionSchema,
+  z
+    .object({
+      minutes: z.number().int().min(MIN_SNOOZE_MINUTES).max(MAX_SNOOZE_MINUTES),
+    })
+    .strict()
+    .transform(({ minutes }): SnoozeSelection => ({ type: "duration", minutes })),
+  z
+    .object({})
+    .strict()
+    .transform((): SnoozeSelection => ({ type: "preset", preset: "one_hour" })),
+]);
 
 function createDependencies(config: AppConfig): WorkspaceApiDependencies {
   return {
@@ -279,7 +299,7 @@ export async function handleWorkspaceApi(
       timing,
       ...draftBody
     } = body as Record<string, unknown>;
-    const parsedDraft = reminderDraftUpdateSchema.safeParse({
+    const parsedDraft = occurrenceDraftUpdateSchema.safeParse({
       ...draftBody,
       schedule: {
         version: 1,
@@ -319,9 +339,15 @@ export async function handleWorkspaceApi(
         return jsonResponse(403, { error: "Cannot edit this occurrence", code: "forbidden" });
       }
       if (error instanceof OccurrenceUpdateConflictError) {
+        const legacyLeadRequiresSelection =
+          error.reason === "legacy_lead_requires_selection";
         return jsonResponse(409, {
-          error: "This occurrence can no longer be edited",
-          code: "update_conflict",
+          error: legacyLeadRequiresSelection
+            ? "Choose when notifications should start after changing the deadline"
+            : "This occurrence can no longer be edited",
+          code: legacyLeadRequiresSelection
+            ? "legacy_lead_requires_selection"
+            : "update_conflict",
         });
       }
       if (error instanceof PrivateChatUnavailableError) {
@@ -596,34 +622,44 @@ export async function handleWorkspaceApi(
   if (method === "POST" && occurrenceActionMatch) {
     const occurrenceId = decodeURIComponent(occurrenceActionMatch[1]);
     const routeAction = occurrenceActionMatch[2];
-    let snoozeMinutes = 60;
+    let snooze: SnoozeSelection | undefined;
     if (routeAction === "snooze") {
+      let body: unknown;
       try {
-        const body = JSON.parse(event.body ?? "{}");
-        snoozeMinutes = body.minutes ?? 60;
+        body = JSON.parse(event.body ?? "{}");
       } catch {
         return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
       }
-      if (!Number.isInteger(snoozeMinutes) || snoozeMinutes < 15 || snoozeMinutes > 43_200) {
+      const parsed = snoozeApiBodySchema.safeParse(body);
+      if (!parsed.success) {
         return jsonResponse(400, {
-          error: "Snooze duration must be between 15 minutes and 30 days",
+          error: "Invalid snooze selection",
           code: "validation_failed",
         });
       }
+      snooze = parsed.data;
     }
     try {
-      const result = await dependencies.occurrenceActions.execute({
+      const actionBase = {
         source: "mini-app",
         workspaceId: workspace.workspaceId,
-        action: routeAction === "complete" ? "done" : routeAction === "snooze" ? "snooze" : "undo",
         occurrenceId,
         actorUserId: actor.userId,
         actorDisplayName: [initData.user.first_name, initData.user.last_name]
           .filter(Boolean)
           .join(" ") || "Участник",
-        ...(routeAction === "snooze" ? { snoozeMinutes } : {}),
+      } as const;
+      const result = await dependencies.occurrenceActions.execute(
+        routeAction === "snooze"
+          ? { ...actionBase, action: "snooze", snooze: snooze! }
+          : routeAction === "complete"
+            ? { ...actionBase, action: "done" }
+            : { ...actionBase, action: "undo" },
+      );
+      return jsonResponse(200, {
+        occurrence: result.occurrence,
+        ...(result.snooze ? { snooze: result.snooze } : {}),
       });
-      return jsonResponse(200, { occurrence: result.occurrence });
     } catch (error) {
       if (error instanceof DeliveryInProgressError) {
         return jsonResponse(409, {
@@ -642,6 +678,13 @@ export async function handleWorkspaceApi(
       }
       if (error instanceof OccurrenceNotActionableError) {
         return jsonResponse(409, { error: "Reminder state has already changed", code: "not_actionable" });
+      }
+      if (error instanceof InvalidSnoozeSelectionError) {
+        return jsonResponse(400, {
+          error: "Invalid snooze selection",
+          code: "validation_failed",
+          reason: error.reason,
+        });
       }
       throw error;
     }

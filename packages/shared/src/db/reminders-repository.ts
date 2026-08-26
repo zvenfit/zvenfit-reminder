@@ -1104,6 +1104,7 @@ export class RemindersRepository {
               visibility = $visibility, assignment_mode = $assignment_mode,
               responsible_user_id = $responsible_user_id,
               timezone = $timezone,
+              lead_minutes = $lead_minutes,
               repeat_interval_minutes = $repeat_interval_minutes,
               ignore_quiet_hours = $ignore_quiet_hours,
               escalation_enabled = $escalation_enabled,

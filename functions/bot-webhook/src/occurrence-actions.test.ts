@@ -3,6 +3,7 @@ import type {
   AppConfig,
   ReminderDefinition,
   ReminderOccurrence,
+  SnoozeSelection,
   WorkspaceMember,
 } from "@zvenfit-reminder/shared";
 import {
@@ -99,16 +100,29 @@ function dependencies(item = occurrence(), actor = member()) {
         _workspaceId: string,
         _occurrenceId: string,
         actorUserId: number,
-        snoozeUntil: Date,
+        selection: SnoozeSelection,
         now: Date,
-      ) => (current = {
-        ...item,
-        stateRevision: item.stateRevision + 1,
-        snoozedBy: actorUserId,
-        snoozedAt: now,
-        snoozeUntil,
-        nextNotificationAt: snoozeUntil,
-      })),
+      ) => {
+        const requestedAt = new Date(now.getTime() + 60 * 60 * 1_000);
+        current = {
+          ...item,
+          stateRevision: item.stateRevision + 1,
+          snoozedBy: actorUserId,
+          snoozedAt: now,
+          snoozeUntil: requestedAt,
+          nextNotificationAt: requestedAt,
+        };
+        return {
+          occurrence: current,
+          snooze: {
+            requestedAt,
+            effectiveAt: requestedAt,
+            adjustedForQuietHours: false,
+            timezone: "Europe/Moscow",
+          },
+          selection,
+        };
+      }),
       undoCompletion: vi.fn(async () => (current = {
         ...item,
         stateRevision: item.stateRevision + 1,
@@ -155,7 +169,7 @@ describe("executeOccurrenceAction", () => {
     );
   });
 
-  it("snoozes for one hour and leaves quiet-hour adjustment to the repository", async () => {
+  it("defaults legacy Telegram snooze actions to the one-hour preset", async () => {
     const deps = dependencies();
     const now = new Date("2026-08-13T12:00:00.000Z");
 
@@ -177,9 +191,42 @@ describe("executeOccurrenceAction", () => {
       "workspace-a",
       "occurrence-a",
       20,
-      new Date("2026-08-13T13:00:00.000Z"),
+      { type: "preset", preset: "one_hour" },
       now,
     );
+  });
+
+  it("passes a custom local selection through without resolving it in the action service", async () => {
+    const deps = dependencies();
+    const now = new Date("2026-08-13T12:00:00.000Z");
+    const snooze = {
+      type: "custom" as const,
+      localDate: "2026-08-14",
+      localTime: "09:30",
+    };
+
+    const result = await executeOccurrenceAction(
+      config,
+      {
+        source: "mini-app",
+        workspaceId: "workspace-a",
+        action: "snooze",
+        snooze,
+        occurrenceId: "occurrence-a",
+        actorUserId: 20,
+        actorDisplayName: "Иван",
+        now,
+      },
+      deps,
+    );
+
+    expect(deps.actions.snooze).toHaveBeenCalledWith(
+      "workspace-a", "occurrence-a", 20, snooze, now,
+    );
+    expect(result.snooze).toMatchObject({
+      effectiveAt: new Date("2026-08-13T13:00:00.000Z"),
+      timezone: "Europe/Moscow",
+    });
   });
 
   it("does not expose a private occurrence to a workspace owner", async () => {
@@ -357,7 +404,7 @@ describe("executeOccurrenceAction", () => {
       "token",
       -100123,
       777,
-      expect.stringContaining("✅ Выполнено"),
+      expect.stringContaining("Выполнено"),
       expect.anything(),
     );
   });
