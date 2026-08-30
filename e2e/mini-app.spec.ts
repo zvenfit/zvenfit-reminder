@@ -106,7 +106,7 @@ interface ApiState {
   historyFailuresRemaining?: number;
   historyDelayMs?: number;
   createFailuresRemaining?: number;
-  snoozeDelayMs?: number;
+  snoozeResponseGate?: Promise<void>;
   snoozeRequestedAt?: string;
   snoozeEffectiveAt?: string;
   snoozeAdjustedForQuietHours?: boolean;
@@ -420,9 +420,7 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
         item.undoUntil = null;
       }
       if (actionMatch[2] === "snooze") {
-        if ((state.snoozeDelayMs ?? 0) > 0) {
-          await new Promise((resolve) => setTimeout(resolve, state.snoozeDelayMs));
-        }
+        await state.snoozeResponseGate;
         const effectiveAt = state.snoozeEffectiveAt ?? "2026-08-27T05:00:00.000Z";
         item.nextNotificationAt = effectiveAt;
         item.snoozeUntil = effectiveAt;
@@ -1415,7 +1413,10 @@ test("lets a member create only a personal reminder for themselves", async ({ pa
 
 test("snoozes, completes, and undoes an occurrence", async ({ page }) => {
   const state = createState();
-  state.snoozeDelayMs = 400;
+  let releaseSnoozeResponse!: () => void;
+  state.snoozeResponseGate = new Promise<void>((resolve) => {
+    releaseSnoozeResponse = resolve;
+  });
   state.snoozeRequestedAt = "2026-08-27T04:00:00.000Z";
   state.snoozeEffectiveAt = "2026-08-27T05:00:00.000Z";
   state.snoozeAdjustedForQuietHours = true;
@@ -1431,10 +1432,14 @@ test("snoozes, completes, and undoes an occurrence", async ({ page }) => {
     .toContainText(/завтра|августа/);
 
   await dialog.getByRole("button", { name: /Через час/ }).click();
-  await expect(dialog).toHaveAttribute("aria-busy", "true");
-  await expect(dialog.getByRole("button", { name: "Закрыть выбор времени" })).toBeDisabled();
-  await expect(dialog.getByRole("button", { name: /Завтра утром/ })).toBeDisabled();
-  await expect(dialog.getByRole("status")).toContainText("Сохраняем новое время");
+  try {
+    await expect(dialog).toHaveAttribute("aria-busy", "true");
+    await expect(dialog.getByRole("button", { name: "Закрыть выбор времени" })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: /Завтра утром/ })).toBeDisabled();
+    await expect(dialog.getByRole("status")).toContainText("Сохраняем новое время");
+  } finally {
+    releaseSnoozeResponse();
+  }
   await expect(dialog).toHaveCount(0);
   const confirmation = page.getByRole("status");
   await expect(confirmation).toContainText("Тихие часы перенесли сигнал с");
@@ -1479,7 +1484,10 @@ test("uses one accessible snooze picker in Tasks and closes it with Telegram Bac
 
 test("submits a custom local date and time from occurrence detail", async ({ page }) => {
   const state = createState();
-  state.snoozeDelayMs = 500;
+  let releaseSnoozeResponse!: () => void;
+  state.snoozeResponseGate = new Promise<void>((resolve) => {
+    releaseSnoozeResponse = resolve;
+  });
   await page.clock.install({ time: new Date("2026-08-30T09:00:00.000Z") });
   await page.setViewportSize({ width: 412, height: 700 });
   await page.emulateMedia({ colorScheme: "light" });
@@ -1511,23 +1519,27 @@ test("submits a custom local date and time from occurrence detail", async ({ pag
     .toBe(true);
   const confirmCustomTime = dialog.getByRole("button", { name: "Напомнить в это время" });
   await confirmCustomTime.click();
-  await expect(dialog).toHaveAttribute("aria-busy", "true");
-  await expect(dateInput).toBeDisabled();
-  await expect(nativeDateInput).toBeDisabled();
-  const disabledDateStyle = await dateInput.evaluate((element) => {
-    const style = getComputedStyle(element);
-    return {
-      color: style.color,
-      cursor: style.cursor,
-      opacity: style.opacity,
-      textFill: style.getPropertyValue("-webkit-text-fill-color"),
-    };
-  });
-  expect(disabledDateStyle.cursor).toBe("not-allowed");
-  expect(disabledDateStyle.opacity).toBe("1");
-  expect(disabledDateStyle.textFill).toBe(disabledDateStyle.color);
-  await expect(dialog.locator(".calendar-date-control__picker"))
-    .toHaveCSS("cursor", "not-allowed");
+  try {
+    await expect(dialog).toHaveAttribute("aria-busy", "true");
+    await expect(dateInput).toBeDisabled();
+    await expect(nativeDateInput).toBeDisabled();
+    const disabledDateStyle = await dateInput.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        color: style.color,
+        cursor: style.cursor,
+        opacity: style.opacity,
+        textFill: style.getPropertyValue("-webkit-text-fill-color"),
+      };
+    });
+    expect(disabledDateStyle.cursor).toBe("not-allowed");
+    expect(disabledDateStyle.opacity).toBe("1");
+    expect(disabledDateStyle.textFill).toBe(disabledDateStyle.color);
+    await expect(dialog.locator(".calendar-date-control__picker"))
+      .toHaveCSS("cursor", "not-allowed");
+  } finally {
+    releaseSnoozeResponse();
+  }
 
   await expect(dialog).toHaveCount(0);
   expect(state.requests.find((request) =>
@@ -1831,14 +1843,17 @@ test("keeps completed and cancelled facts in an auditable history", async ({ pag
 
 test("hides Undo when its completion window expires", async ({ page }) => {
   const state = createState();
-  const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
-  item.undoUntil = new Date(Date.now() + 800).toISOString();
+  const completionAt = "2026-08-30T12:00:00.000Z";
+  state.completionAt = completionAt;
+  await page.clock.install({ time: new Date(completionAt) });
   await openApp(page, state);
   const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
+  const undo = page.getByRole("button", { name: "Отменить" });
 
   await card.getByRole("button", { name: "Отметить оплату" }).click();
-  await expect(page.getByRole("button", { name: "Отменить" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Отменить" })).toHaveCount(0, { timeout: 3000 });
+  await expect(undo).toBeVisible();
+  await page.clock.fastForward(10 * 60 * 1000 + 1);
+  await expect(undo).toHaveCount(0);
 });
 
 test("dismisses stale Undo after the server rejects it", async ({ page }) => {
