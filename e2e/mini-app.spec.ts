@@ -110,6 +110,7 @@ interface ApiState {
   snoozeRequestedAt?: string;
   snoozeEffectiveAt?: string;
   snoozeAdjustedForQuietHours?: boolean;
+  completionAt?: string;
 }
 
 const now = "2026-08-14T09:00:00.000Z";
@@ -404,11 +405,12 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       const item = state.occurrences[selected].find((candidate) => candidate.occurrenceId === actionMatch[1]);
       if (!item) return fulfill({ error: "Not found" }, 404);
       if (actionMatch[2] === "complete") {
+        const completedAt = new Date(state.completionAt ?? Date.now());
         item.status = "completed";
-        item.undoUntil ??= new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        item.undoUntil ??= new Date(completedAt.getTime() + 10 * 60 * 1000).toISOString();
         item.completedBy = 10;
         item.completedByDisplayName = "Анна";
-        item.completedAt = new Date().toISOString();
+        item.completedAt = completedAt.toISOString();
       }
       if (actionMatch[2] === "undo-completion" && state.undoErrorCode) {
         return fulfill({ error: "Undo window expired", code: state.undoErrorCode }, 409);
@@ -830,10 +832,15 @@ test("retries a failed member refresh without leaving the roster", async ({ page
 
 test("renames a member only inside the selected workspace and keeps the Telegram identity", async ({ page }) => {
   const state = createState();
+  await page.setViewportSize({ width: 320, height: 700 });
   await openApp(page, state);
   await page.getByRole("button", { name: /Участники/ }).click();
 
-  await page.getByRole("button", { name: "Переименовать Я" }).click();
+  const editName = page.getByRole("button", { name: "Переименовать Я" });
+  const editNameBox = await editName.boundingBox();
+  expect(editNameBox?.width ?? 0).toBeGreaterThanOrEqual(44);
+  expect(editNameBox?.height ?? 0).toBeGreaterThanOrEqual(44);
+  await editName.click();
   await expect(page.getByText("Telegram-профиль останется «Я».")).toBeVisible();
   await page.getByLabel("Имя в этой группе").fill("Алексей Тренер");
   await page.getByRole("button", { name: "Сохранить" }).click();
@@ -849,6 +856,31 @@ test("renames a member only inside the selected workspace and keeps the Telegram
   await page.getByLabel("Найти участника").fill("Я");
   await expect(roster).toContainText("Алексей Тренер");
   await page.getByRole("button", { name: "Переименовать Алексей Тренер" }).click();
+  const editor = page.locator(".member-name-editor");
+  await expect(editor.getByRole("button")).toHaveCount(3);
+  const editorLayout = await editor.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    return {
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      buttons: [...element.querySelectorAll("button")].map((button) => {
+        const buttonBounds = button.getBoundingClientRect();
+        return {
+          left: buttonBounds.left - bounds.left,
+          right: buttonBounds.right - bounds.left,
+          height: buttonBounds.height,
+        };
+      }),
+    };
+  });
+  // The focused input halo may add up to 3px of visual overflow inside the panel.
+  expect(editorLayout.scrollWidth).toBeLessThanOrEqual(editorLayout.clientWidth + 3);
+  for (const button of editorLayout.buttons) {
+    expect(button.left).toBeGreaterThanOrEqual(0);
+    expect(button.right).toBeLessThanOrEqual(editorLayout.clientWidth + 1);
+    expect(button.height).toBeGreaterThanOrEqual(44);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole("button", { name: "Как в Telegram" }).click();
   await expect(roster).toContainText("Я");
   await expect(page.getByText("Имя из Telegram восстановлено")).toBeVisible();
@@ -866,6 +898,264 @@ test("uses explicit 24-hour time fields", async ({ page }) => {
   await expect(page.getByText(/AM|PM/)).toHaveCount(0);
 });
 
+test("shows and focuses an inline title error without submitting whitespace", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const title = page.locator("#reminder-title");
+  await title.fill("   ");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+
+  await expect(page.locator("#reminder-title-error")).toHaveText("Напишите, что нужно сделать.");
+  await expect(title).toHaveAttribute("aria-invalid", "true");
+  await expect(title).toBeFocused();
+  expect(state.requests.some((request) =>
+    request.method === "POST" && request.path === "/api/reminders")).toBe(false);
+});
+
+test("builds schedule defaults in the workspace timezone across midnight", async ({ page }) => {
+  const state = createState();
+  await page.clock.install({ time: new Date("2026-08-30T21:30:00.000Z") });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  await expect(page.locator("#reminder-date")).toHaveAttribute("type", "text");
+  await expect(page.locator("#reminder-date")).toHaveValue("01.09.2026");
+  await expect(page.locator("#reminder-date-native")).toHaveValue("2026-09-01");
+  await expect(page.locator("#reminder-date-native")).toHaveAttribute("min", "2026-08-31");
+
+  await page.getByRole("radio", { name: "По неделям" }).click();
+  await expect(page.locator("#reminder-start-date")).toHaveValue("31.08.2026");
+  await expect(page.locator("#reminder-start-date-native")).toHaveValue("2026-08-31");
+  const weekdays = page.locator("#reminder-weekdays");
+  await expect(weekdays.getByRole("button", { name: "Пн" })).toHaveAttribute("aria-pressed", "true");
+  await expect(weekdays.getByRole("button", { name: "Вс" })).toHaveAttribute("aria-pressed", "false");
+});
+
+test("keeps an impossible DD.MM.YYYY draft visible and rejects it inline", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.locator("#reminder-title").fill("Проверить календарь");
+
+  const date = page.locator("#reminder-date");
+  const dateControl = page.locator(".calendar-date-control").filter({ has: date });
+  const dateLayerGeometry = await dateControl.evaluate((control) => {
+    const text = control.querySelector<HTMLInputElement>(".calendar-date-control__text")!;
+    const picker = control.querySelector<HTMLElement>(".calendar-date-control__picker")!;
+    const native = control.querySelector<HTMLInputElement>(".calendar-date-control__native")!;
+    return [text, picker, native].map((element) => {
+      const bounds = element.getBoundingClientRect();
+      return { top: bounds.top, bottom: bounds.bottom, height: bounds.height };
+    });
+  });
+  for (const layer of dateLayerGeometry.slice(1)) {
+    expect(Math.abs(layer.top - dateLayerGeometry[0].top)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(layer.bottom - dateLayerGeometry[0].bottom)).toBeLessThanOrEqual(0.5);
+    expect(Math.abs(layer.height - dateLayerGeometry[0].height)).toBeLessThanOrEqual(0.5);
+  }
+  await date.fill("31.02.2027");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+
+  await expect(date).toHaveValue("31.02.2027");
+  await expect(date).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator("#reminder-date-error")).toHaveText("Такой даты не существует.");
+  const nativePicker = page.locator("#reminder-date-native");
+  await expect(nativePicker).toHaveAttribute("aria-invalid", "true");
+  await expect(nativePicker).toHaveAttribute("aria-describedby", "reminder-date-error");
+  await expect.poll(() => dateControl.evaluate((control) => {
+    const text = control.querySelector<HTMLElement>(".calendar-date-control__text")!;
+    const picker = control.querySelector<HTMLElement>(".calendar-date-control__picker")!;
+    const textBorder = getComputedStyle(text).borderTopColor;
+    return getComputedStyle(picker).borderLeftColor === textBorder &&
+      getComputedStyle(picker).color === textBorder;
+  })).toBe(true);
+  await expect(date).toBeFocused();
+  expect(state.requests.some((request) =>
+    request.method === "POST" && request.path === "/api/reminders")).toBe(false);
+});
+
+test("matches interval units and limits and rejects an impossible yearly date", async ({ page }) => {
+  const state = createState();
+  await page.setViewportSize({ width: 320, height: 700 });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const interval = page.locator("#reminder-interval");
+  const intervalUnit = page.locator(".interval-input b");
+  for (const width of [320, 412]) {
+    await page.setViewportSize({ width, height: 700 });
+    const frequencyLayout = await page.locator(".frequency-strip").evaluate((strip) => {
+      const stripBounds = strip.getBoundingClientRect();
+      const chips = [...strip.querySelectorAll<HTMLElement>(".frequency-chip")]
+        .map((chip) => chip.getBoundingClientRect());
+      return {
+        clientWidth: strip.clientWidth,
+        scrollWidth: strip.scrollWidth,
+        stripCenter: stripBounds.left + stripBounds.width / 2,
+        widths: chips.map((chip) => chip.width),
+        heights: chips.map((chip) => chip.height),
+        lastCenter: chips.at(-1)!.left + chips.at(-1)!.width / 2,
+      };
+    });
+    expect(frequencyLayout.scrollWidth).toBeLessThanOrEqual(frequencyLayout.clientWidth);
+    expect(Math.max(...frequencyLayout.widths) - Math.min(...frequencyLayout.widths))
+      .toBeLessThanOrEqual(1);
+    expect(Math.min(...frequencyLayout.heights)).toBeGreaterThanOrEqual(44);
+    expect(Math.abs(frequencyLayout.lastCenter - frequencyLayout.stripCenter)).toBeLessThanOrEqual(1);
+  }
+  await page.setViewportSize({ width: 320, height: 700 });
+
+  await page.getByRole("radio", { name: "Ежедневно" }).click();
+  const intervalStyle = await interval.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      appearance: style.appearance,
+      fontFamily: style.fontFamily,
+      fontVariantNumeric: style.fontVariantNumeric,
+    };
+  });
+  expect(intervalStyle.appearance).toBe("textfield");
+  expect(intervalStyle.fontFamily).toContain("IBM Plex Mono");
+  expect(intervalStyle.fontVariantNumeric).toContain("tabular-nums");
+  for (const scenario of [
+    { frequency: "Ежедневно", maximum: "365", unit: "день" },
+    { frequency: "По неделям", maximum: "52", unit: "неделя" },
+    { frequency: "По месяцам", maximum: "120", unit: "месяц" },
+    { frequency: "По годам", maximum: "20", unit: "год" },
+  ]) {
+    await page.getByRole("radio", { name: scenario.frequency }).click();
+    await expect(interval).toHaveAttribute("min", "1");
+    await expect(interval).toHaveAttribute("max", scenario.maximum);
+    await expect(intervalUnit).toHaveText(scenario.unit);
+  }
+
+  const yearlyDay = page.getByRole("spinbutton", { name: "День" });
+  const yearlyDayStyle = await yearlyDay.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      appearance: style.appearance,
+      fontFamily: style.fontFamily,
+      fontVariantNumeric: style.fontVariantNumeric,
+    };
+  });
+  expect(yearlyDayStyle.appearance).toBe("textfield");
+  expect(yearlyDayStyle.fontFamily).toContain("IBM Plex Mono");
+  expect(yearlyDayStyle.fontVariantNumeric).toContain("tabular-nums");
+  await yearlyDay.fill("31");
+  await page.getByRole("combobox", { name: "Месяц" }).selectOption("2");
+
+  await expect(yearlyDay).toHaveAttribute("max", "29");
+  await expect(yearlyDay).toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator("#reminder-yearly-date-error"))
+    .toHaveText("Для выбранного месяца допустимо от 1 до 29.");
+
+  await page.getByRole("radio", { name: "Ежедневно" }).click();
+  await page.locator("#reminder-title").fill("Проверить интервал");
+  await interval.fill("0");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  const intervalError = page.locator("#reminder-interval-error");
+  const intervalHint = page.locator("#reminder-interval-hint");
+  await expect(interval).toHaveAttribute(
+    "aria-describedby",
+    "reminder-interval-error reminder-interval-hint",
+  );
+  await expect(intervalError).toContainText("Введите целое число от 1 до 365");
+  const [errorBox, hintBox] = await Promise.all([
+    intervalError.boundingBox(),
+    intervalHint.boundingBox(),
+  ]);
+  expect(errorBox!.y).toBeLessThan(hintBox!.y);
+});
+
+test("keeps an invalid time draft visible and explains the valid range inline", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  await page.locator("#reminder-title").fill("Проверить расписание");
+  const time = page.locator("#reminder-time");
+  await time.fill("25:00");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+
+  await expect(time).toHaveValue("25:00");
+  await expect(time).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText("Введите время от 00:00 до 23:59", { exact: true })).toBeVisible();
+  expect(state.requests.some((request) =>
+    request.method === "POST" && request.path === "/api/reminders")).toBe(false);
+});
+
+test("opens additional settings and focuses an invalid payment link", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByRole("radio", { name: "Платёж" }).click();
+  await page.locator("#reminder-title").fill("Оплатить подписку");
+
+  const details = page.locator("details.additional-fields");
+  await details.getByText("Дополнительные настройки", { exact: true }).click();
+  const actionUrl = page.locator("#reminder-action-url");
+  await actionUrl.fill("http://example.com/pay");
+  await details.getByText("Дополнительные настройки", { exact: true }).click();
+  await expect(details).not.toHaveAttribute("open", "");
+
+  await page.getByRole("button", { name: "Создать платёж" }).click();
+  await expect(details).toHaveAttribute("open", "");
+  await expect(page.locator("#reminder-action-url-error"))
+    .toHaveText("Для оплаты нужна безопасная ссылка, которая начинается с https://.");
+  await expect(actionUrl).toBeFocused();
+  expect(state.requests.some((request) =>
+    request.method === "POST" && request.path === "/api/reminders")).toBe(false);
+});
+
+test("explains how the quiet-hours switch changes signal delivery", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const switchControl = page.locator('input[aria-describedby="quiet-hours-behavior"]');
+  const behavior = page.locator("#quiet-hours-behavior");
+  await expect(switchControl).not.toBeChecked();
+  await expect(behavior).toHaveText("Сигналы с 22:00 до 08:00 будут перенесены на 08:00.");
+
+  await switchControl.check();
+  await expect(behavior).toHaveText("Сигналы будут приходить и с 22:00 до 08:00.");
+});
+
+test("disables quiet-hours delivery when the group has no quiet period", async ({ page }) => {
+  const state = createState();
+  state.workspaces[0].quietHoursStart = "00:00";
+  state.workspaces[0].quietHoursEnd = "00:00";
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  const switchControl = page.locator('input[aria-describedby="quiet-hours-behavior"]');
+  await expect(switchControl).toBeDisabled();
+  await expect(switchControl).not.toBeChecked();
+  await expect(page.locator("#quiet-hours-behavior")).toHaveText("Тихие часы в группе выключены.");
+  await expect(page.getByLabel("Предпросмотр напоминания"))
+    .toContainText("Тихие часы в группе выключены.");
+});
+
+test("keeps weekly targets touch-sized without horizontal overflow at 320px", async ({ page }) => {
+  const state = createState();
+  await page.setViewportSize({ width: 320, height: 568 });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByRole("radio", { name: "По неделям" }).click();
+
+  const targetSizes = await page.locator("#reminder-weekdays button").evaluateAll((buttons) =>
+    buttons.map((button) => {
+      const bounds = button.getBoundingClientRect();
+      return { width: bounds.width, height: bounds.height };
+    }));
+  expect(targetSizes).toHaveLength(7);
+  expect(Math.min(...targetSizes.map((target) => target.width))).toBeGreaterThanOrEqual(44);
+  expect(Math.min(...targetSizes.map((target) => target.height))).toBeGreaterThanOrEqual(44);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("separates the deadline from notification policy in the form preview", async ({ page }) => {
   const state = createState();
   await page.setViewportSize({ width: 320, height: 568 });
@@ -873,16 +1163,30 @@ test("separates the deadline from notification policy in the form preview", asyn
   await openApp(page, state);
   await page.getByRole("button", { name: "Новое напоминание" }).click();
 
-  await expect(page.getByRole("heading", { name: "Когда нужно выполнить" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Когда начать напоминать" })).toBeVisible();
-  await page.getByLabel("Дата").fill("2099-08-15");
+  await expect(page.getByRole("heading", { name: "Как часто появляется новый срок?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Как напоминать об открытом сроке?" })).toBeVisible();
+  const calendarIcon = page.locator(".calendar-date-control__picker");
+  await calendarIcon.scrollIntoViewIfNeeded();
+  const calendarTarget = await page.locator("#reminder-date-native").boundingBox();
+  expect(calendarTarget?.width).toBeGreaterThanOrEqual(44);
+  expect(calendarTarget?.height).toBeGreaterThanOrEqual(44);
+  expect(await calendarIcon.evaluate((icon) => {
+    const bounds = icon.getBoundingClientRect();
+    return document.elementFromPoint(
+      bounds.left + bounds.width / 2,
+      bounds.top + bounds.height / 2,
+    )?.id;
+  })).toBe("reminder-date-native");
+  await page.getByLabel("Дата", { exact: true }).fill("15.08.2099");
   await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("1440");
-  await page.getByRole("combobox", { name: "Повтор уведомлений", exact: true }).selectOption("180");
+  await page.getByRole("combobox", { name: "Повтор сигнала", exact: true }).selectOption("180");
 
   const preview = page.getByLabel("Предпросмотр напоминания");
-  await expect(preview).toContainText("Срок");
+  await expect(preview).toContainText("Ритм задачи");
+  await expect(preview).toContainText("Это один отдельный срок");
   await expect(preview).toContainText("За 1 день до срока");
-  await expect(preview).toContainText("Каждые 3 часа, пока задача не выполнена");
+  await expect(preview).toContainText("Ритм сигналов");
+  await expect(preview).toContainText("Каждые 3 часа — до отметки «Выполнено» для этого срока");
   await expect(preview).toContainText("22:00–08:00");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
     .toBe(true);
@@ -893,10 +1197,55 @@ test("separates the deadline from notification policy in the form preview", asyn
     request.method === "POST" && request.path === "/api/reminders"))
     .toMatchObject({
       body: {
-        schedule: { frequency: "once" },
+        schedule: { frequency: "once", date: "2099-08-15" },
         notificationPolicy: { leadMinutes: 1_440, repeatIntervalMinutes: 180 },
       },
     });
+});
+
+test("explains recurring task scope before and after completion", async ({ page }) => {
+  const state = createState();
+  state.reminders.team.unshift(reminder("team", "internet", "Оплатить интернет", {
+    kind: "payment",
+    schedule: {
+      version: 1,
+      frequency: "daily",
+      startDate: "2026-08-14",
+      interval: 1,
+      timing: { kind: "timed", timeLocal: "15:00" },
+    },
+  }));
+  state.completionAt = "2026-08-14T13:00:00.000Z";
+  await page.clock.install({ time: new Date("2026-08-14T13:00:00.000Z") });
+  await openApp(page, state);
+
+  const card = page.getByRole("article").filter({ hasText: "Оплатить интернет" });
+  await expect(card).toContainText("Каждый день · 15:00");
+  await expect(card).toContainText("Это один срок серии");
+  await card.getByRole("button", { name: "Отметить этот срок оплаченным" }).click();
+
+  const confirmation = page.getByRole("status").filter({ hasText: "Этот срок оплачен" });
+  await expect(confirmation).toContainText("Следующий срок: 15 авг. · 15:00");
+  await expect(confirmation).toContainText("Можно отменить в течение 10 минут");
+});
+
+test("names task rhythm and signal rhythm independently for a recurring form", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+  await page.getByRole("radio", { name: "Ежедневно" }).click();
+  await page.getByRole("combobox", { name: "Повтор сигнала", exact: true }).selectOption("720");
+  await expect(page.getByText("Каждый новый срок нужно закрывать отдельно.")).toBeVisible();
+  await expect(page.getByText(/Каждая задача серии живёт отдельно/)).toBeVisible();
+
+  const preview = page.getByLabel("Предпросмотр напоминания");
+  await expect(preview).toContainText("Каждый срок серии закрывается отдельно");
+  await expect(preview).toContainText("Ритм задачи");
+  await expect(preview).toContainText("Каждый день · 09:00");
+  await expect(preview).toContainText("Ритм сигналов");
+  await expect(preview).toContainText("Каждые 12 часов");
+  await expect(preview).toContainText("до отметки «Выполнено» для этого срока");
 });
 
 test("shows an immediate effective first signal when the selected lead is already past", async ({ page }) => {
@@ -905,7 +1254,7 @@ test("shows an immediate effective first signal when the selected lead is alread
   await openApp(page, state);
   await page.getByRole("button", { name: "Новое напоминание" }).click();
 
-  await page.getByLabel("Дата").fill("2026-08-26");
+  await page.getByLabel("Дата", { exact: true }).fill("26.08.2026");
   await page.getByRole("textbox", { name: "Время" }).fill("14:00");
   await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("60");
 
@@ -923,12 +1272,31 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
   await page.getByRole("radio", { name: /Платёж/ }).click();
   await expect(page.getByRole("textbox", { name: "Что нужно оплатить" })).toBeVisible();
   await page.getByText("Дополнительные настройки", { exact: true }).click();
-  await expect(page.getByRole("spinbutton", { name: /Сумма/ })).toHaveValue("");
-  await expect(page.getByRole("heading", { name: "Когда нужно оплатить" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Когда начать напоминать" })).toBeVisible();
+  const amount = page.getByRole("spinbutton", { name: /Сумма/ });
+  await expect(amount).toHaveValue("");
+  const amountStyle = await amount.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      appearance: style.appearance,
+      fontFamily: style.fontFamily,
+      fontVariantNumeric: style.fontVariantNumeric,
+    };
+  });
+  expect(amountStyle.appearance).toBe("textfield");
+  expect(amountStyle.fontFamily).toContain("IBM Plex Mono");
+  expect(amountStyle.fontVariantNumeric).toContain("tabular-nums");
+
+  const details = page.locator("textarea");
+  const initialDetailsHeight = (await details.boundingBox())!.height;
+  await details.fill("Строка 1\nСтрока 2\nСтрока 3\nСтрока 4\nСтрока 5\nСтрока 6");
+  const expandedDetailsHeight = (await details.boundingBox())!.height;
+  expect(expandedDetailsHeight).toBeGreaterThan(initialDetailsHeight);
+  await expect(details).toHaveCSS("resize", "none");
+  await expect(page.getByRole("heading", { name: "Как часто появляется новый срок?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Как напоминать об открытом сроке?" })).toBeVisible();
 
   await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Домашний интернет");
-  await page.getByRole("spinbutton", { name: /Сумма/ }).fill("890.50");
+  await amount.fill("890.50");
   await page.getByRole("textbox", { name: /Ссылка на оплату/ }).fill("https://example.com/pay");
   await page.getByRole("button", { name: "Создать платёж" }).click();
 
@@ -1111,6 +1479,8 @@ test("uses one accessible snooze picker in Tasks and closes it with Telegram Bac
 
 test("submits a custom local date and time from occurrence detail", async ({ page }) => {
   const state = createState();
+  state.snoozeDelayMs = 500;
+  await page.clock.install({ time: new Date("2026-08-30T09:00:00.000Z") });
   await page.setViewportSize({ width: 412, height: 700 });
   await page.emulateMedia({ colorScheme: "light" });
   await openApp(page, state);
@@ -1119,13 +1489,45 @@ test("submits a custom local date and time from occurrence detail", async ({ pag
   await page.getByRole("button", { name: "Напомнить позже" }).click();
   const dialog = page.getByRole("dialog", { name: "Напомнить позже" });
   await dialog.getByRole("button", { name: /Выбрать дату и время/ }).click();
-  const dateInput = dialog.getByLabel("Дата");
-  const customDate = await dateInput.inputValue();
-  await dateInput.fill(customDate);
+  const dateInput = dialog.getByLabel("Дата", { exact: true });
+  const nativeDateInput = dialog.locator("#snooze-custom-date-native");
+  const customDate = await nativeDateInput.getAttribute("max");
+  expect(customDate).not.toBeNull();
+  await dateInput.fill("30.09.2026");
+  await dialog.getByRole("textbox", { name: "Время следующего сигнала" }).focus();
+  await expect(dialog.getByText("Выберите дату не позже 29.09.2026."))
+    .toBeVisible();
+  await dateInput.fill("01.10.2026");
+  await expect(dialog.getByText("Выберите дату не позже 29.09.2026."))
+    .toBeVisible();
+  await nativeDateInput.fill(customDate!);
+  await expect(dateInput).toHaveValue(
+    customDate!.split("-").reverse().join("."),
+  );
+  await expect(dialog.getByText("Выберите дату не позже 29.09.2026."))
+    .toHaveCount(0);
   await dialog.getByRole("textbox", { name: "Время следующего сигнала" }).fill("17:45");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
     .toBe(true);
-  await dialog.getByRole("button", { name: "Напомнить в это время" }).click();
+  const confirmCustomTime = dialog.getByRole("button", { name: "Напомнить в это время" });
+  await confirmCustomTime.click();
+  await expect(dialog).toHaveAttribute("aria-busy", "true");
+  await expect(dateInput).toBeDisabled();
+  await expect(nativeDateInput).toBeDisabled();
+  const disabledDateStyle = await dateInput.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      color: style.color,
+      cursor: style.cursor,
+      opacity: style.opacity,
+      textFill: style.getPropertyValue("-webkit-text-fill-color"),
+    };
+  });
+  expect(disabledDateStyle.cursor).toBe("not-allowed");
+  expect(disabledDateStyle.opacity).toBe("1");
+  expect(disabledDateStyle.textFill).toBe(disabledDateStyle.color);
+  await expect(dialog.locator(".calendar-date-control__picker"))
+    .toHaveCSS("cursor", "not-allowed");
 
   await expect(dialog).toHaveCount(0);
   expect(state.requests.find((request) =>
@@ -1225,6 +1627,26 @@ test("edits only one current occurrence without changing the series", async ({ p
     .toBe("Передать показания");
 });
 
+test("keeps occurrence editing stable when its date is cleared", async ({ page }) => {
+  const state = createState();
+  const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
+  item.reminderId = "meters";
+  item.kind = "task";
+  item.title = "Проверить дату отдельного срока";
+  await openApp(page, state);
+
+  await page.getByRole("button", { name: /Проверить дату отдельного срока/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  const date = page.locator("#reminder-occurrence-date");
+  await date.fill("");
+
+  await expect(page.getByLabel("Предпросмотр напоминания")).toContainText("Выберите дату срока");
+  await expect(page.getByRole("radio", { name: /Только этот срок/ })).toContainText("Дата не выбрана");
+  await page.getByRole("button", { name: "Сохранить этот срок" }).click();
+  await expect(page.locator("#reminder-occurrence-date-error")).toHaveText("Выберите дату срока.");
+  await expect(date).toBeFocused();
+});
+
 test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
   const state = createState();
   const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
@@ -1296,11 +1718,12 @@ test("requires a concrete lead before moving a legacy occurrence deadline", asyn
 
   await page.getByRole("button", { name: /Старый срок без lead policy/ }).click();
   await page.getByRole("button", { name: "Изменить" }).click();
+  await expect(page.locator("#reminder-occurrence-date")).toHaveValue("14.08.2026");
   const lead = page.getByRole("combobox", { name: "Первый сигнал", exact: true });
   await expect(lead).toHaveValue("preserve");
   await expect(lead.getByRole("option", { name: /Не менять/ })).toContainText("12:00");
 
-  await page.getByLabel("Дата").fill("2026-08-15");
+  await page.getByLabel("Дата", { exact: true }).fill("15.08.2026");
   await page.getByRole("button", { name: "Сохранить этот срок" }).click();
   await expect(page.getByRole("alert")).toContainText(/выберите, когда отправить первый сигнал/i);
   expect(state.requests.some((request) =>
@@ -1310,7 +1733,12 @@ test("requires a concrete lead before moving a legacy occurrence deadline", asyn
   await page.getByRole("button", { name: "Сохранить этот срок" }).click();
   expect(state.requests.find((request) =>
     request.method === "PATCH" && request.path === "/api/occurrences/internet"))
-    .toMatchObject({ body: { notificationPolicy: { leadMinutes: 60 } } });
+    .toMatchObject({
+      body: {
+        dueLocalDate: "2026-08-15",
+        notificationPolicy: { leadMinutes: 60 },
+      },
+    });
 });
 
 test("keeps an all-day occurrence all-day when editing only that deadline", async ({ page }) => {
@@ -1322,6 +1750,7 @@ test("keeps an all-day occurrence all-day when editing only that deadline", asyn
   item.dueLocalDate = "2026-08-28";
   item.allDay = true;
   item.reminderStartAt = "2026-08-28T06:00:00.000Z";
+  await page.clock.install({ time: new Date("2026-08-27T10:00:00.000Z") });
   await page.setViewportSize({ width: 412, height: 700 });
   await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
   await openApp(page, state);
@@ -1532,6 +1961,7 @@ test("does not offer occurrence actions to an unrelated ordinary member", async 
 
 test("updates group rhythm and confirms ownership transfer", async ({ page }) => {
   const state = createState();
+  await page.setViewportSize({ width: 320, height: 700 });
   await openApp(page, state);
 
   await page.getByRole("button", { name: /Ритм группы/ }).click();
@@ -1539,7 +1969,34 @@ test("updates group rhythm and confirms ownership transfer", async ({ page }) =>
   const timezonePreview = page.locator(".timezone-preview");
   await expect(timezonePreview).toContainText("Москва");
   await expect(timezonePreview).toContainText("UTC+3");
-  await page.getByLabel("Город или часовой пояс").fill("Asia/Yekaterinburg");
+  for (const scenario of [
+    { width: 320, theme: "dark" as const },
+    { width: 412, theme: "light" as const },
+  ]) {
+    await page.setViewportSize({ width: scenario.width, height: 700 });
+    await page.emulateMedia({ colorScheme: scenario.theme });
+    const previewLayout = await timezonePreview.evaluate((preview) => {
+      const city = preview.querySelector<HTMLElement>(".timezone-preview__place b")!
+        .getBoundingClientRect();
+      const badge = preview.querySelector<HTMLElement>(".timezone-preview__default")!
+        .getBoundingClientRect();
+      const overlaps = city.left < badge.right && city.right > badge.left &&
+        city.top < badge.bottom && city.bottom > badge.top;
+      return { overlaps };
+    });
+    expect(previewLayout.overlaps).toBe(false);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+      .toBe(true);
+  }
+  const timezone = page.getByLabel("Город или часовой пояс");
+  await timezone.fill("Mars/Olympus");
+  await page.getByRole("button", { name: "Сохранить настройки" }).click();
+  await expect(page.locator("#workspace-timezone-error"))
+    .toHaveText("Выберите корректный город или часовой пояс IANA.");
+  await expect(timezone).toBeFocused();
+  expect(state.requests.some((request) =>
+    request.method === "PATCH" && request.path === "/api/workspace/settings")).toBe(false);
+  await timezone.fill("Asia/Yekaterinburg");
   await expect(timezonePreview).toContainText("Екатеринбург");
   await expect(timezonePreview).toContainText("UTC+5");
   await page.getByLabel("Начало тишины").fill("23:00");
@@ -1559,6 +2016,39 @@ test("updates group rhythm and confirms ownership transfer", async ({ page }) =>
   await expect(page.getByText("Владелец группы изменён")).toBeVisible();
   expect(state.workspaces[0]).toMatchObject({ ownerUserId: 20, role: "organizer" });
   expect(state.members.team.find((member) => member.userId === 20)?.role).toBe("owner");
+});
+
+test("updates the live timezone clock and allows equal quiet-hour boundaries", async ({ page }) => {
+  const state = createState();
+  await page.clock.install({ time: new Date("2026-08-30T12:00:00.000Z") });
+  await openApp(page, state);
+  await page.getByRole("button", { name: /Ритм группы/ }).click();
+
+  const currentTime = page.locator(".timezone-preview__clock b");
+  await expect(currentTime).toHaveText("15:00");
+  await page.clock.fastForward(60_000);
+  await expect(currentTime).toHaveText("15:01");
+
+  const quietStart = page.getByLabel("Начало тишины");
+  const quietEnd = page.getByLabel("Конец тишины");
+  const rhythmMap = page.locator(".rhythm-map");
+  await quietStart.fill("08:00");
+  await quietEnd.fill("22:00");
+  await expect(rhythmMap).toHaveClass(/rhythm-map--same-day/);
+  expect(await page.locator(".rhythm-map__night").evaluate((night) =>
+    getComputedStyle(night, "::after").display)).toBe("none");
+
+  await quietEnd.fill("08:00");
+  await expect(rhythmMap).toHaveClass(/rhythm-map--disabled/);
+  await expect(page.getByText("Одинаковое время выключает тихие часы для всей группы."))
+    .toBeVisible();
+  await page.getByRole("button", { name: "Сохранить настройки" }).click();
+
+  await expect(page.getByText("Ритм группы обновлён")).toBeVisible();
+  expect(state.workspaces[0]).toMatchObject({
+    quietHoursStart: "08:00",
+    quietHoursEnd: "08:00",
+  });
 });
 
 test("warns before assigning a personal reminder to a user without a private chat", async ({ page }) => {

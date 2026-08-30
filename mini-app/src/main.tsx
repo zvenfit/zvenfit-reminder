@@ -1,4 +1,13 @@
-import { StrictMode, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import {
+  StrictMode,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   ApiError,
@@ -50,6 +59,13 @@ import {
   DEFAULT_TIMEZONE,
 } from "./timezones";
 import { isLocalTime24, Time24Field } from "./time-24-field";
+import {
+  intervalMetadataFor,
+  isoWeekdayInTimezone,
+  localCalendarDate,
+  maxValidYearlyDay,
+} from "./reminder-form-utils";
+import { CalendarDateField } from "./calendar-date-field";
 import { MemberAvatar, PersonSelect } from "./person-select";
 import { UiIcon } from "./ui-icon";
 import "@fontsource-variable/onest/wght.css";
@@ -62,6 +78,16 @@ type View = MainView | "detail" | "create" | "settings" | "members";
 type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
 type DetailTarget = { kind: "occurrence" | "reminder"; id: string };
+
+function resizeDetailsTextarea(textarea: HTMLTextAreaElement | null): void {
+  if (!textarea) return;
+
+  const maximumHeight = 240;
+  textarea.style.height = "auto";
+  const nextHeight = Math.min(textarea.scrollHeight, maximumHeight);
+  textarea.style.height = `${nextHeight}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maximumHeight ? "auto" : "hidden";
+}
 type EditScope = "occurrence" | "series";
 
 const PRESERVE_LEGACY_LEAD = "preserve";
@@ -100,19 +126,43 @@ interface SettingsFormState {
   defaultAllDayReminderTime: string;
 }
 
+type ReminderFormErrorKey =
+  | "title"
+  | "amount"
+  | "actionUrl"
+  | "responsible"
+  | "date"
+  | "startDate"
+  | "occurrenceDate"
+  | "interval"
+  | "weekdays"
+  | "monthlyDay"
+  | "yearlyDate"
+  | "leadMinutes";
+
+type ReminderFormErrors = Partial<Record<ReminderFormErrorKey, string>>;
+
+const FORM_ERROR_FOCUS_ORDER: Array<[ReminderFormErrorKey, string]> = [
+  ["title", "#reminder-title"],
+  ["amount", "#reminder-amount"],
+  ["actionUrl", "#reminder-action-url"],
+  ["responsible", "#reminder-responsible"],
+  ["occurrenceDate", "#reminder-occurrence-date"],
+  ["date", "#reminder-date"],
+  ["startDate", "#reminder-start-date"],
+  ["interval", "#reminder-interval"],
+  ["weekdays", "#reminder-weekdays button"],
+  ["monthlyDay", "#reminder-monthly-day"],
+  ["yearlyDate", "#reminder-yearly-day"],
+  ["leadMinutes", "#reminder-lead-minutes"],
+];
+
 function cloneReminderForm(form: ReminderFormState): ReminderFormState {
   return {
     ...form,
     watcherUserIds: [...form.watcherUserIds],
     weekdays: [...form.weekdays],
   };
-}
-
-function localDateInputValue(date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
 }
 
 function timePosition(value: string): string {
@@ -130,6 +180,43 @@ const WEEKDAYS = [
   { value: 6, label: "Сб" },
   { value: 7, label: "Вс" },
 ];
+
+function intervalUnitLabel(frequency: Frequency, rawValue: string): string {
+  const forms: Record<Exclude<Frequency, "once">, [string, string, string]> = {
+    daily: ["день", "дня", "дней"],
+    weekly: ["неделя", "недели", "недель"],
+    monthly: ["месяц", "месяца", "месяцев"],
+    yearly: ["год", "года", "лет"],
+  };
+  if (frequency === "once") return "";
+  const value = Math.abs(Number(rawValue));
+  if (!Number.isInteger(value)) return forms[frequency][2];
+  const lastTwo = value % 100;
+  const last = value % 10;
+  const index = last === 1 && lastTwo !== 11
+    ? 0
+    : last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)
+      ? 1
+      : 2;
+  return forms[frequency][index];
+}
+
+function actionUrlValidationMessage(kind: ReminderKind, rawValue: string): string | null {
+  const value = rawValue.trim();
+  if (!value) return null;
+  try {
+    const protocol = new URL(value).protocol;
+    if (protocol !== "https:" && protocol !== "http:") {
+      return "Используйте ссылку, которая начинается с https:// или http://.";
+    }
+    if (kind === "payment" && protocol !== "https:") {
+      return "Для оплаты нужна безопасная ссылка, которая начинается с https://.";
+    }
+    return null;
+  } catch {
+    return "Введите полную ссылку, например https://example.com.";
+  }
+}
 
 function handleRovingControlKey(event: KeyboardEvent<HTMLElement>): void {
   if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
@@ -149,18 +236,14 @@ function handleRovingControlKey(event: KeyboardEvent<HTMLElement>): void {
   controls[nextIndex]?.click();
 }
 
-function localDate(daysFromToday = 0): string {
-  const date = new Date();
-  date.setHours(12, 0, 0, 0);
-  date.setDate(date.getDate() + daysFromToday);
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
-}
-
-function emptyForm(responsibleUserId?: number): ReminderFormState {
+function emptyForm(
+  responsibleUserId?: number,
+  timezone = DEFAULT_TIMEZONE,
+  reference = new Date(),
+): ReminderFormState {
+  const today = localCalendarDate(reference, timezone);
+  const tomorrow = localCalendarDate(reference, timezone, 1);
+  const [, month, day] = today.split("-");
   return {
     kind: "task",
     title: "",
@@ -173,16 +256,16 @@ function emptyForm(responsibleUserId?: number): ReminderFormState {
     responsibleUserId: responsibleUserId ? String(responsibleUserId) : "",
     watcherUserIds: [],
     frequency: "once",
-    date: localDate(1),
-    startDate: localDate(),
+    date: tomorrow,
+    startDate: today,
     timeLocal: "09:00",
     allDay: false,
     interval: "1",
-    weekdays: [new Date().getDay() || 7],
-    monthlyDay: String(new Date().getDate()),
+    weekdays: [isoWeekdayInTimezone(reference, timezone)],
+    monthlyDay: String(Number(day)),
     monthlyLastDay: false,
-    yearlyMonth: String(new Date().getMonth() + 1),
-    yearlyDay: String(new Date().getDate()),
+    yearlyMonth: String(Number(month)),
+    yearlyDay: String(Number(day)),
     leadMinutes: "0",
     repeatIntervalMinutes: "360",
     ignoreQuietHours: false,
@@ -192,6 +275,7 @@ function emptyForm(responsibleUserId?: number): ReminderFormState {
 function reminderForm(reminder: Reminder): ReminderFormState {
   const form = emptyForm(
     reminder.assignment.mode === "person" ? reminder.assignment.responsibleUserId : undefined,
+    reminder.timezone,
   );
   form.kind = reminder.kind;
   form.title = reminder.title;
@@ -495,6 +579,45 @@ function scheduleLabel(schedule: ScheduleSpec): string {
   }
 }
 
+function isRecurring(reminder: Reminder | undefined): reminder is Reminder {
+  return Boolean(reminder && reminder.schedule.frequency !== "once");
+}
+
+function completionActionLabel(
+  occurrence: ReminderOccurrence,
+  reminder: Reminder | undefined,
+): string {
+  if (!isRecurring(reminder)) {
+    return occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение";
+  }
+  return occurrence.kind === "payment"
+    ? "Отметить этот срок оплаченным"
+    : "Отметить этот срок выполненным";
+}
+
+function nextRecurringDeadlineLabel(
+  occurrence: ReminderOccurrence,
+  reminder: Reminder | undefined,
+): string | null {
+  if (!isRecurring(reminder)) return null;
+  const dueAt = new Date(occurrence.dueAt).getTime();
+  const completedAt = occurrence.completedAt
+    ? new Date(occurrence.completedAt).getTime()
+    : Number.NaN;
+  const referenceAt = Number.isFinite(completedAt) ? Math.max(dueAt, completedAt) : dueAt;
+  const nextDate = upcomingScheduleDates(
+    reminder.schedule,
+    reminder.timezone,
+    1,
+    new Date(referenceAt + 60_000),
+  )[0];
+  if (!nextDate) return null;
+  const time = reminder.schedule.timing.kind === "allDay"
+    ? "весь день"
+    : reminder.schedule.timing.timeLocal;
+  return `${formatScheduleDate(nextDate, true)} · ${time}`;
+}
+
 function formSchedulePreview(form: ReminderFormState): string {
   try {
     return scheduleLabel(buildSchedule(form));
@@ -516,16 +639,33 @@ function formUpcomingDates(
 }
 
 function buildSchedule(form: ReminderFormState): ScheduleSpec {
+  if (!form.allDay && !isLocalTime24(form.timeLocal)) {
+    throw new Error("Invalid time");
+  }
   const timing: DeadlineTiming = form.allDay
     ? { kind: "allDay" }
     : { kind: "timed", timeLocal: form.timeLocal };
-  const interval = Math.max(1, Number(form.interval));
+  if (form.frequency === "once") {
+    if (!form.date) throw new Error("Missing date");
+    return { version: 1, frequency: "once", date: form.date, timing };
+  }
+
+  if (!form.startDate) throw new Error("Missing start date");
+  const interval = Number(form.interval);
+  const intervalMetadata = intervalMetadataFor(form.frequency);
+  if (
+    !intervalMetadata ||
+    !Number.isInteger(interval) ||
+    interval < intervalMetadata.min ||
+    interval > intervalMetadata.max
+  ) {
+    throw new Error("Invalid interval");
+  }
   switch (form.frequency) {
-    case "once":
-      return { version: 1, frequency: "once", date: form.date, timing };
     case "daily":
       return { version: 1, frequency: "daily", startDate: form.startDate, timing, interval };
     case "weekly":
+      if (form.weekdays.length === 0) throw new Error("Missing weekdays");
       return {
         version: 1,
         frequency: "weekly",
@@ -535,6 +675,12 @@ function buildSchedule(form: ReminderFormState): ScheduleSpec {
         weekdays: [...form.weekdays].sort(),
       };
     case "monthly":
+      if (
+        !form.monthlyLastDay &&
+        (!Number.isInteger(Number(form.monthlyDay)) || Number(form.monthlyDay) < 1 || Number(form.monthlyDay) > 31)
+      ) {
+        throw new Error("Invalid monthly day");
+      }
       return {
         version: 1,
         frequency: "monthly",
@@ -546,6 +692,13 @@ function buildSchedule(form: ReminderFormState): ScheduleSpec {
           : { type: "dayOfMonth", value: Number(form.monthlyDay), overflow: "lastDay" },
       };
     case "yearly":
+      if (
+        !Number.isInteger(Number(form.yearlyDay)) ||
+        Number(form.yearlyDay) < 1 ||
+        Number(form.yearlyDay) > maxValidYearlyDay(Number(form.yearlyMonth))
+      ) {
+        throw new Error("Invalid yearly date");
+      }
       return {
         version: 1,
         frequency: "yearly",
@@ -672,12 +825,14 @@ function App() {
   const [detailReturnView, setDetailReturnView] = useState<MainView>("home");
   const [archiveTarget, setArchiveTarget] = useState<Reminder | null>(null);
   const [form, setForm] = useState<ReminderFormState>(() => emptyForm());
+  const [formErrors, setFormErrors] = useState<ReminderFormErrors>({});
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>({
     timezone: DEFAULT_TIMEZONE,
     quietHoursStart: "22:00",
     quietHoursEnd: "08:00",
     defaultAllDayReminderTime: "09:00",
   });
+  const [settingsTimezoneError, setSettingsTimezoneError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [hasLoadedDashboard, setHasLoadedDashboard] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -702,10 +857,12 @@ function App() {
   const [editingReminderId, setEditingReminderId] = useState<string | null>(null);
   const [editingOccurrenceId, setEditingOccurrenceId] = useState<string | null>(null);
   const [editScope, setEditScope] = useState<EditScope>("series");
-  const [occurrenceDate, setOccurrenceDate] = useState(localDate());
+  const [occurrenceDate, setOccurrenceDate] = useState(() =>
+    localCalendarDate(new Date(), DEFAULT_TIMEZONE));
   const [occurrenceTime, setOccurrenceTime] = useState("09:00");
   const [occurrenceAllDay, setOccurrenceAllDay] = useState(false);
   const editFormDraftsRef = useRef<Record<EditScope, ReminderFormState> | null>(null);
+  const detailsTextareaRef = useRef<HTMLTextAreaElement>(null);
   const [reassignment, setReassignment] = useState<Record<string, string>>({});
   const activeWorkspaceIdRef = useRef<string | null>(null);
   const refreshGenerationRef = useRef(0);
@@ -715,14 +872,17 @@ function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [undoableOccurrence, setUndoableOccurrence] = useState<ReminderOccurrence | null>(null);
   const [clockNow, setClockNow] = useState(() => new Date());
-  const timezoneReference = useMemo(() => new Date(), []);
   const timezoneOptions = useMemo(
-    () => view === "settings" ? buildTimezoneOptions(timezoneReference) : [],
-    [timezoneReference, view],
+    () => view === "settings" ? buildTimezoneOptions(clockNow) : [],
+    [clockNow, view],
   );
   const deviceTimezone = useMemo(() => detectDeviceTimezone(), []);
-  const selectedTimezone = describeTimezone(settingsForm.timezone, timezoneReference);
-  const deviceTimezonePresentation = describeTimezone(deviceTimezone, timezoneReference);
+  const selectedTimezone = describeTimezone(settingsForm.timezone, clockNow);
+  const deviceTimezonePresentation = describeTimezone(deviceTimezone, clockNow);
+
+  useEffect(() => {
+    resizeDetailsTextarea(detailsTextareaRef.current);
+  }, [form.description]);
 
   useEffect(() => {
     if (!undoableOccurrence?.undoUntil) return;
@@ -812,6 +972,76 @@ function App() {
   function clearError() {
     setError(null);
     setErrorRecovery(null);
+  }
+
+  function clearFormErrors(...keys: ReminderFormErrorKey[]) {
+    setFormErrors((current) => {
+      if (keys.length === 0) return {};
+      if (!keys.some((key) => current[key])) return current;
+      const next = { ...current };
+      keys.forEach((key) => delete next[key]);
+      return next;
+    });
+  }
+
+  function focusFirstFormError(errors: ReminderFormErrors) {
+    const selector = FORM_ERROR_FOCUS_ORDER.find(([key]) => errors[key])?.[1];
+    if (!selector) return;
+    window.requestAnimationFrame(() => {
+      const control = document.querySelector<HTMLElement>(selector);
+      const details = control?.closest<HTMLDetailsElement>("details");
+      if (details) details.open = true;
+      control?.scrollIntoView({ block: "center", behavior: "smooth" });
+      control?.focus({ preventScroll: true });
+    });
+  }
+
+  function handleReminderFormInvalid(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const target = event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+    const details = target.closest<HTMLDetailsElement>("details");
+    if (details) details.open = true;
+    const intervalMetadata = intervalMetadataFor(form.frequency);
+    const errorsById: Partial<Record<string, [ReminderFormErrorKey, string]>> = {
+      "reminder-title": ["title", "Напишите, что нужно сделать."],
+      "reminder-amount": ["amount", "Введите сумму не меньше нуля."],
+      "reminder-action-url": ["actionUrl", "Введите полную ссылку, например https://example.com."],
+      "reminder-interval": [
+        "interval",
+        intervalMetadata
+          ? `Введите целое число от ${intervalMetadata.min} до ${intervalMetadata.max}.`
+          : "Введите интервал.",
+      ],
+      "reminder-monthly-day": ["monthlyDay", "Введите день месяца от 1 до 31."],
+      "reminder-yearly-day": [
+        "yearlyDate",
+        `Для выбранного месяца допустимо от 1 до ${maxValidYearlyDay(Number(form.yearlyMonth))}.`,
+      ],
+    };
+    const fieldError = errorsById[target.id];
+    if (fieldError) {
+      setFormErrors((current) => ({ ...current, [fieldError[0]]: fieldError[1] }));
+    }
+    window.requestAnimationFrame(() => {
+      const firstInvalid = formElement.querySelector<HTMLElement>(":invalid");
+      firstInvalid?.scrollIntoView({ block: "center", behavior: "smooth" });
+      firstInvalid?.focus({ preventScroll: true });
+    });
+  }
+
+  function handleSettingsFormInvalid(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const target = event.target as HTMLInputElement;
+    if (target.id === "workspace-timezone") {
+      setSettingsTimezoneError("Выберите корректный город или часовой пояс IANA.");
+    }
+    window.requestAnimationFrame(() => {
+      const firstInvalid = formElement.querySelector<HTMLElement>(":invalid");
+      firstInvalid?.scrollIntoView({ block: "center", behavior: "smooth" });
+      firstInvalid?.focus({ preventScroll: true });
+    });
   }
 
   function showError(value: unknown, recovery: ErrorRecovery | null = null) {
@@ -1043,6 +1273,7 @@ function App() {
     setMemberSearch("");
     setConfirmingEnrollment(false);
     setNotice(null);
+    setFormErrors({});
     clearError();
     setHistoryError(null);
     setDashboardLoadError(null);
@@ -1062,7 +1293,11 @@ function App() {
       return;
     }
     const defaultResponsible = actorId ?? members[0]?.userId;
-    const nextForm = emptyForm(defaultResponsible);
+    const nextForm = emptyForm(
+      defaultResponsible,
+      selectedWorkspace?.timezone ?? DEFAULT_TIMEZONE,
+      clockNow,
+    );
     if (actor?.role !== "owner" && actor?.role !== "organizer") {
       nextForm.visibility = "private";
       nextForm.assignmentMode = "person";
@@ -1073,6 +1308,7 @@ function App() {
     setEditingOccurrenceId(null);
     editFormDraftsRef.current = null;
     setEditScope("series");
+    setFormErrors({});
     clearError();
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1120,6 +1356,7 @@ function App() {
         : localDeadline.time);
       setOccurrenceAllDay(isAllDay);
     }
+    setFormErrors({});
     clearError();
     setView("create");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1135,6 +1372,7 @@ function App() {
     drafts[editScope] = cloneReminderForm(form);
     setForm(cloneReminderForm(drafts[nextScope]));
     setEditScope(nextScope);
+    setFormErrors({});
     clearError();
   }
 
@@ -1144,6 +1382,7 @@ function App() {
     setSettingsForm(workspaceSettings(workspace));
     setOwnershipTarget("");
     setConfirmingOwnership(false);
+    setSettingsTimezoneError(null);
     clearError();
     setView("settings");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1217,6 +1456,15 @@ function App() {
   }
 
   async function saveWorkspaceSettings() {
+    if (!selectedTimezone) {
+      setSettingsTimezoneError("Выберите корректный город или часовой пояс IANA.");
+      window.requestAnimationFrame(() => {
+        const control = document.querySelector<HTMLInputElement>("#workspace-timezone");
+        control?.scrollIntoView({ block: "center", behavior: "smooth" });
+        control?.focus({ preventScroll: true });
+      });
+      return;
+    }
     setSettingsSaving(true);
     clearError();
     try {
@@ -1224,6 +1472,7 @@ function App() {
       setWorkspaces((current) => current.map((item) =>
         item.workspaceId === workspace.workspaceId ? workspace : item));
       setSettingsForm(workspaceSettings(workspace));
+      setSettingsTimezoneError(null);
       setNotice("Ритм группы обновлён");
       window.setTimeout(() => setNotice(null), 2600);
     } catch (requestError) {
@@ -1274,23 +1523,88 @@ function App() {
   }
 
   function toggleWeekday(weekday: number) {
-    setForm((current) => ({
-      ...current,
-      weekdays: current.weekdays.includes(weekday)
-        ? current.weekdays.filter((day) => day !== weekday)
-        : [...current.weekdays, weekday],
-    }));
+    const weekdays = form.weekdays.includes(weekday)
+      ? form.weekdays.filter((day) => day !== weekday)
+      : [...form.weekdays, weekday];
+    setForm({ ...form, weekdays });
+    if (weekdays.length > 0) clearFormErrors("weekdays");
+  }
+
+  function changeFormFrequency(frequency: Frequency) {
+    setForm({ ...form, frequency });
+    setFormErrors((current) => {
+      const next = { ...current };
+      (["date", "startDate", "interval", "weekdays", "monthlyDay", "yearlyDate"] as ReminderFormErrorKey[])
+        .forEach((key) => delete next[key]);
+      const metadata = intervalMetadataFor(frequency);
+      const interval = Number(form.interval);
+      if (
+        metadata &&
+        (!form.interval.trim() || !Number.isInteger(interval) || interval < metadata.min || interval > metadata.max)
+      ) {
+        next.interval = `Введите целое число от ${metadata.min} до ${metadata.max}.`;
+      }
+      return next;
+    });
   }
 
   async function submitReminder() {
-    if (!form.title.trim()) return;
-    if (form.assignmentMode === "person" && !form.responsibleUserId) {
-      showError("Выберите ответственного.");
-      return;
+    const validationErrors: ReminderFormErrors = {};
+    if (!form.title.trim()) {
+      validationErrors.title = "Напишите, что нужно сделать.";
     }
-    if (form.frequency === "weekly" && form.weekdays.length === 0) {
-      showError("Выберите хотя бы один день недели.");
-      return;
+    if (
+      form.kind === "payment" &&
+      form.amountRub.trim() &&
+      (!Number.isFinite(Number(form.amountRub)) || Number(form.amountRub) < 0)
+    ) {
+      validationErrors.amount = "Введите сумму не меньше нуля.";
+    }
+    const actionUrlError = actionUrlValidationMessage(form.kind, form.actionUrl);
+    if (actionUrlError) validationErrors.actionUrl = actionUrlError;
+    if (
+      form.assignmentMode === "person" &&
+      (!form.responsibleUserId || !members.some((member) => String(member.userId) === form.responsibleUserId))
+    ) {
+      validationErrors.responsible = "Выберите участника из списка.";
+    }
+    const occurrenceOnly = Boolean(editingOccurrenceId && editScope === "occurrence");
+    if (occurrenceOnly) {
+      if (!occurrenceDate) validationErrors.occurrenceDate = "Выберите дату срока.";
+    } else if (form.frequency === "once") {
+      if (!form.date) validationErrors.date = "Выберите дату срока.";
+    } else {
+      if (!form.startDate) validationErrors.startDate = "Выберите дату начала серии.";
+      const intervalMetadata = intervalMetadataFor(form.frequency);
+      const interval = Number(form.interval);
+      if (
+        !intervalMetadata ||
+        !form.interval.trim() ||
+        !Number.isInteger(interval) ||
+        interval < intervalMetadata.min ||
+        interval > intervalMetadata.max
+      ) {
+        validationErrors.interval = intervalMetadata
+          ? `Введите целое число от ${intervalMetadata.min} до ${intervalMetadata.max}.`
+          : "Введите интервал.";
+      }
+      if (form.frequency === "weekly" && form.weekdays.length === 0) {
+        validationErrors.weekdays = "Выберите хотя бы один день недели.";
+      }
+      if (
+        form.frequency === "monthly" &&
+        !form.monthlyLastDay &&
+        (!Number.isInteger(Number(form.monthlyDay)) || Number(form.monthlyDay) < 1 || Number(form.monthlyDay) > 31)
+      ) {
+        validationErrors.monthlyDay = "Введите день месяца от 1 до 31.";
+      }
+      if (form.frequency === "yearly") {
+        const maximumDay = maxValidYearlyDay(Number(form.yearlyMonth));
+        const yearlyDay = Number(form.yearlyDay);
+        if (!Number.isInteger(yearlyDay) || yearlyDay < 1 || yearlyDay > maximumDay) {
+          validationErrors.yearlyDate = `Для выбранного месяца допустимо от 1 до ${maximumDay}.`;
+        }
+      }
     }
     const editingOccurrence = editingOccurrenceId
       ? [...occurrences, ...historyOccurrences].find((occurrence) =>
@@ -1307,10 +1621,16 @@ function App() {
         occurrenceAllDay !== originalAllDay ||
         (!occurrenceAllDay && occurrenceTime !== originalDeadline.time);
       if (deadlineChanged) {
-        showError("Срок изменился. Выберите, когда отправить первый сигнал.");
-        return;
+        validationErrors.leadMinutes = "Срок изменился. Выберите, когда отправить первый сигнал.";
       }
     }
+    if (Object.keys(validationErrors).length > 0) {
+      setFormErrors(validationErrors);
+      clearError();
+      focusFirstFormError(validationErrors);
+      return;
+    }
+    setFormErrors({});
     setSaving(true);
     clearError();
     const amount = form.amountRub.trim() ? Math.round(Number(form.amountRub) * 100) : null;
@@ -1339,7 +1659,9 @@ function App() {
       notificationPolicy: {
         leadMinutes: form.leadMinutes === PRESERVE_LEGACY_LEAD ? 0 : Number(form.leadMinutes),
         repeatIntervalMinutes: Number(form.repeatIntervalMinutes),
-        ignoreQuietHours: form.ignoreQuietHours,
+        ignoreQuietHours: selectedWorkspace?.quietHoursStart === selectedWorkspace?.quietHoursEnd
+          ? false
+          : form.ignoreQuietHours,
         escalation: editingOccurrenceId && editScope === "occurrence"
           ? editingOccurrence?.escalation ?? editingReminder?.notificationPolicy.escalation ?? {
               enabled: true,
@@ -1654,7 +1976,7 @@ function App() {
   const planUnavailable = resourceUnavailable("plan");
   const membersUnavailable = resourceUnavailable("members");
   const selectedWorkspaceTimezone = selectedWorkspace
-    ? describeTimezone(selectedWorkspace.timezone, timezoneReference)
+    ? describeTimezone(selectedWorkspace.timezone, clockNow)
     : null;
   const snoozeTarget = snoozeTargetId
     ? occurrences.find((occurrence) => occurrence.occurrenceId === snoozeTargetId)
@@ -1930,6 +2252,7 @@ function App() {
                       <div>
                         {member.displayNameOverride ? (
                           <button
+                            className="member-name-editor__reset"
                             type="button"
                             disabled={updatingDisplayName}
                             onClick={() => void saveMemberDisplayName(member, null)}
@@ -2008,6 +2331,11 @@ function App() {
 
   if (view === "settings" && selectedWorkspace) {
     const targetMember = members.find((member) => String(member.userId) === ownershipTarget);
+    const quietHoursMode = settingsForm.quietHoursStart === settingsForm.quietHoursEnd
+      ? "disabled"
+      : settingsForm.quietHoursStart < settingsForm.quietHoursEnd
+        ? "same-day"
+        : "overnight";
     return (
       <main className="app app--form app--settings">
         <header className="topbar">
@@ -2030,13 +2358,14 @@ function App() {
 
         <form
           className="reminder-form"
+          onInvalid={handleSettingsFormInvalid}
           onSubmit={(event) => {
             event.preventDefault();
             void saveWorkspaceSettings();
           }}
         >
           <section
-            className="rhythm-map"
+            className={`rhythm-map rhythm-map--${quietHoursMode}`}
             aria-label="Карта ритма группы"
             style={{
               "--quiet-start": timePosition(settingsForm.quietHoursStart),
@@ -2045,7 +2374,7 @@ function App() {
             } as CSSProperties}
           >
             <div className="rhythm-map__heading">
-              <span><small>Тишина</small><b>{settingsForm.quietHoursStart} → {settingsForm.quietHoursEnd}</b></span>
+              <span><small>Тишина</small><b>{quietHoursMode === "disabled" ? "Выключена" : `${settingsForm.quietHoursStart} → ${settingsForm.quietHoursEnd}`}</b></span>
               <span><small>Напоминания на весь день</small><b>{settingsForm.defaultAllDayReminderTime}</b></span>
             </div>
             <div className="rhythm-map__line" aria-hidden="true">
@@ -2063,16 +2392,28 @@ function App() {
               <span className="timezone-input-wrap">
                 <span className="timezone-input-wrap__mark" aria-hidden="true"><UiIcon name="location" /></span>
                 <input
+                  id="workspace-timezone"
+                  aria-label="Город или часовой пояс"
                   list="timezone-options"
                   required
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="Например, Москва или Europe/Berlin"
                   value={settingsForm.timezone}
-                  aria-describedby="timezone-help"
-                  onChange={(event) => setSettingsForm({ ...settingsForm, timezone: event.target.value })}
+                  aria-describedby={`timezone-help${settingsTimezoneError ? " workspace-timezone-error" : ""}`}
+                  aria-invalid={Boolean(settingsTimezoneError) || undefined}
+                  onBlur={(event) => {
+                    if (!describeTimezone(event.currentTarget.value, clockNow)) {
+                      setSettingsTimezoneError("Выберите корректный город или часовой пояс IANA.");
+                    }
+                  }}
+                  onChange={(event) => {
+                    setSettingsForm({ ...settingsForm, timezone: event.target.value });
+                    setSettingsTimezoneError(null);
+                  }}
                 />
               </span>
+              {settingsTimezoneError ? <span className="field-error" id="workspace-timezone-error" role="alert">{settingsTimezoneError}</span> : null}
               <datalist id="timezone-options">
                 {timezoneOptions.map((timezone) => (
                   <option key={timezone.id} value={timezone.id} label={timezone.optionLabel} />
@@ -2098,7 +2439,10 @@ function App() {
                 className="timezone-device"
                 type="button"
                 aria-pressed={settingsForm.timezone === deviceTimezone}
-                onClick={() => setSettingsForm({ ...settingsForm, timezone: deviceTimezone })}
+                onClick={() => {
+                  setSettingsForm({ ...settingsForm, timezone: deviceTimezone });
+                  setSettingsTimezoneError(null);
+                }}
               >
                 <span className="timezone-device__icon" aria-hidden="true"><UiIcon name="target" /></span>
                 <span>
@@ -2121,6 +2465,7 @@ function App() {
               <label className="field">
                 <span>Начало тишины</span>
                 <Time24Field
+                  id="quiet-hours-start"
                   label="Начало тишины"
                   required
                   value={settingsForm.quietHoursStart}
@@ -2130,6 +2475,7 @@ function App() {
               <label className="field">
                 <span>Конец тишины</span>
                 <Time24Field
+                  id="quiet-hours-end"
                   label="Конец тишины"
                   required
                   value={settingsForm.quietHoursEnd}
@@ -2139,6 +2485,7 @@ function App() {
               <label className="field field--wide">
                 <span>Напоминать о событиях «на весь день»</span>
                 <Time24Field
+                  id="all-day-reminder-time"
                   label="Время напоминаний на весь день"
                   required
                   value={settingsForm.defaultAllDayReminderTime}
@@ -2149,6 +2496,9 @@ function App() {
                 />
               </label>
             </div>
+            <p className="timezone-help">{quietHoursMode === "disabled"
+              ? "Одинаковое время выключает тихие часы для всей группы."
+              : `Сигналы внутри интервала ${settingsForm.quietHoursStart}–${settingsForm.quietHoursEnd} переносятся на ${settingsForm.quietHoursEnd}.`}</p>
           </section>
 
           {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
@@ -2228,6 +2578,7 @@ function App() {
     const canSnooze = Boolean(occurrence && (
       occurrence.visibility === "private" ? isCreator || isResponsible : isCreator || isManager || isResponsible
     ));
+    const recurringReminder = isRecurring(reminder);
     const nextDates = reminder ? upcomingScheduleDates(reminder.schedule, reminder.timezone, 3) : [];
     const nextSignal = occurrence?.nextNotificationAt
       ? nextSignalPresentation(occurrence.nextNotificationAt, detailTimezone, clockNow)
@@ -2304,7 +2655,7 @@ function App() {
           {occurrence ? (
             <div><span>Срок</span><b>{formatMoment(occurrence.dueAt, detailTimezone, true)}</b><small>{occurrence.status === "overdue" ? `Просрочено на ${relativeDuration(occurrence.dueAt)}` : occurrence.status === "pending" ? `Через ${relativeDuration(occurrence.dueAt)}` : occurrenceStatusLabel(occurrence)}</small></div>
           ) : null}
-          {reminder ? <div><span>Ритм</span><b>{scheduleLabel(reminder.schedule)}</b><small>{reminder.status === "paused" ? "Новые сигналы приостановлены" : "Повторяется автоматически"}</small></div> : null}
+          {reminder ? <div><span>Ритм задачи</span><b>{scheduleLabel(reminder.schedule)}</b><small>{reminder.status === "paused" ? "Новые сроки приостановлены" : recurringReminder ? "Каждый срок закрывается отдельно" : "Один отдельный срок"}</small></div> : null}
           <div><span>Ответственный</span><b>{responsibleUserId ? memberName(responsible) : "Любой участник"}</b><small>{responsible?.username ? `@${responsible.username}` : responsibleUserId ? "Участник группы" : "Кто отметит первым"}</small></div>
           {nextSignal && occurrence && occurrence.status !== "completed" && occurrence.status !== "cancelled" ? (
             <div className="detail-fact--signal"><span>Следующий сигнал</span><b>{nextSignal.exact}</b><small>{nextSignal.relative} · {occurrence.ignoreQuietHours ? "Разрешён в тихие часы" : "С учётом тихих часов"}</small></div>
@@ -2315,8 +2666,9 @@ function App() {
 
         {occurrence && (occurrence.status === "pending" || occurrence.status === "overdue") && (canAct || canSnooze) ? (
           <section className="detail-actions" aria-label="Действия с напоминанием">
+            {recurringReminder ? <p className="detail-action-scope"><UiIcon name="repeat" /><span><b>{scheduleLabel(reminder.schedule)}</b><small>Сейчас вы закроете только этот срок. Серия продолжится.</small></span></p> : null}
             {canAct ? <button className="primary-action" type="button" disabled={actingOccurrenceId === occurrence.occurrenceId} onClick={() => void completeOccurrenceAction(occurrence.occurrenceId)}>
-              {occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение"}
+              {completionActionLabel(occurrence, reminder)}
             </button> : null}
             {canSnooze ? <div className="detail-snooze">
               <button
@@ -2371,8 +2723,8 @@ function App() {
         <section className="main-view-intro">
           <div><p className="eyebrow">Будущие сроки</p><h1>План</h1><p>Серии и три ближайших повтора — без завершённых задач.</p></div>
           <div className="scope-switch" role="tablist" aria-label="Область плана" onKeyDown={handleRovingControlKey}>
-            <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
-            <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
+            <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} tabIndex={scope === "mine" ? 0 : -1} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
+            <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} tabIndex={scope === "group" ? 0 : -1} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
           </div>
         </section>
         {dashboardLoadError && planUnavailable ? (
@@ -2425,8 +2777,8 @@ function App() {
         <section className="main-view-intro">
           <div><p className="eyebrow">Журнал действий</p><h1>История</h1><p>Что завершили или отменили, кто это сделал и когда.</p></div>
           <div className="scope-switch" role="tablist" aria-label="Область истории" onKeyDown={handleRovingControlKey}>
-            <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
-            <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
+            <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} tabIndex={scope === "mine" ? 0 : -1} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
+            <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} tabIndex={scope === "group" ? 0 : -1} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
           </div>
         </section>
         {error ? <RequestErrorBanner message={error} recovery={errorRecovery} /> : null}
@@ -2480,19 +2832,28 @@ function App() {
       ? [...occurrences, ...historyOccurrences].find((occurrence) =>
           occurrence.occurrenceId === editingOccurrenceId)
       : undefined;
-    const reminderTimezone = reminders.find((reminder) =>
-      reminder.reminderId === editingReminderId)?.timezone;
+    const editingReminder = reminders.find((reminder) =>
+      reminder.reminderId === editingReminderId);
+    const reminderTimezone = editingReminder?.timezone;
     const previewTimezone = editingOccurrenceId && editScope === "occurrence"
       ? editingOccurrence?.timezone ?? reminderTimezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow"
       : reminderTimezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow";
+    const minimumScheduleDate = localCalendarDate(clockNow, previewTimezone);
+    const intervalMetadata = intervalMetadataFor(form.frequency);
+    const yearlyMaximumDay = maxValidYearlyDay(Number(form.yearlyMonth));
+    const quietHoursStart = selectedWorkspace?.quietHoursStart ?? "22:00";
+    const quietHoursEnd = selectedWorkspace?.quietHoursEnd ?? "08:00";
+    const quietHoursDisabled = quietHoursStart === quietHoursEnd;
     const previewDates = editingOccurrenceId && editScope === "occurrence"
-      ? [occurrenceDate]
+      ? occurrenceDate ? [occurrenceDate] : []
       : formUpcomingDates(form, previewTimezone, clockNow);
     const occurrenceOnly = Boolean(editingOccurrenceId && editScope === "occurrence");
     const previewAllDay = occurrenceOnly ? occurrenceAllDay : form.allDay;
     const allDayAnchorTime = selectedWorkspace?.defaultAllDayReminderTime ?? "09:00";
     const deadlinePreview = occurrenceOnly
-      ? `${formatScheduleDate(occurrenceDate)} · ${occurrenceAllDay ? "весь день" : occurrenceTime}`
+      ? occurrenceDate
+        ? `${formatScheduleDate(occurrenceDate)} · ${occurrenceAllDay ? "весь день" : occurrenceTime}`
+        : "Выберите дату срока"
       : formSchedulePreview(form);
     const firstSignalPreview = form.leadMinutes === PRESERVE_LEGACY_LEAD
       ? editingOccurrence?.reminderStartAt
@@ -2508,7 +2869,7 @@ function App() {
             timezone: previewTimezone,
             quietHoursStart: selectedWorkspace?.quietHoursStart ?? "22:00",
             quietHoursEnd: selectedWorkspace?.quietHoursEnd ?? "08:00",
-            ignoreQuietHours: form.ignoreQuietHours,
+            ignoreQuietHours: quietHoursDisabled ? false : form.ignoreQuietHours,
             allDay: previewAllDay,
             now: clockNow,
           }).label
@@ -2516,14 +2877,19 @@ function App() {
             allDay: previewAllDay,
             allDayAnchorTime,
           });
-    const repeatSignalPreview = `${repeatNotificationLabel(Number(form.repeatIntervalMinutes))}, пока ${
-      form.kind === "payment" ? "оплата не отмечена" : "задача не выполнена"
-    }`;
-    const quietHoursPreview = form.ignoreQuietHours
-      ? "Сигналы разрешены и в тихие часы."
-      : selectedWorkspace?.quietHoursStart === selectedWorkspace?.quietHoursEnd
-        ? "Тихие часы в группе выключены."
-        : `Если сигнал попадёт в тихие часы ${selectedWorkspace?.quietHoursStart ?? "22:00"}–${selectedWorkspace?.quietHoursEnd ?? "08:00"}, бот перенесёт его на их окончание.`;
+    const repeatSignalPreview = `${repeatNotificationLabel(Number(form.repeatIntervalMinutes))} — до отметки «${
+      form.kind === "payment" ? "Оплачено" : "Выполнено"
+    }» для этого срока`;
+    const previewScope = occurrenceOnly
+      ? "Изменится только этот срок."
+      : form.frequency === "once"
+        ? "Это один отдельный срок."
+        : "Каждый срок серии закрывается отдельно.";
+    const quietHoursPreview = quietHoursDisabled
+      ? "Тихие часы в группе выключены."
+      : form.ignoreQuietHours
+        ? `Сигналы будут приходить и с ${quietHoursStart} до ${quietHoursEnd}.`
+        : `Если сигнал попадёт в тихие часы ${quietHoursStart}–${quietHoursEnd}, бот перенесёт его на ${quietHoursEnd}.`;
     return (
       <main className="app app--form">
         <header className="topbar">
@@ -2550,22 +2916,27 @@ function App() {
               ? "Изменится только открытый сейчас срок. Ритм серии и следующие повторы останутся прежними."
               : "Новые параметры применятся к текущему незавершённому напоминанию и следующим повторам. История не изменится."
             : form.kind === "payment"
-              ? "Бот будет возвращать напоминание, пока ответственный не отметит оплату."
-              : "Бот будет возвращать напоминание, пока ответственный не отметит выполнение."}</p>
+              ? form.frequency === "once"
+                ? "Бот будет возвращать сигналы, пока ответственный не отметит этот платёж."
+                : "Каждый платёж серии живёт отдельно: отметка закроет только его, а следующий появится по расписанию."
+              : form.frequency === "once"
+                ? "Бот будет возвращать сигналы, пока ответственный не отметит эту задачу."
+                : "Каждая задача серии живёт отдельно: отметка закроет только её, а следующая появится по расписанию."}</p>
         </section>
 
         {editingOccurrenceId ? (
           <section className="edit-scope" aria-labelledby="edit-scope-title">
             <div><p className="eyebrow">Область изменений</p><h2 id="edit-scope-title">Что именно изменить?</h2></div>
             <div className="edit-scope__options" role="radiogroup" aria-label="Область редактирования" onKeyDown={handleRovingControlKey}>
-              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} onClick={() => changeEditScope("occurrence")}><b>Только этот срок</b><small>{formatScheduleDate(occurrenceDate)}</small></button>
-              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} onClick={() => changeEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
+              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} tabIndex={editScope === "occurrence" ? 0 : -1} onClick={() => changeEditScope("occurrence")}><b>Только этот срок</b><small>{occurrenceDate ? formatScheduleDate(occurrenceDate) : "Дата не выбрана"}</small></button>
+              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} tabIndex={editScope === "series" ? 0 : -1} onClick={() => changeEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
             </div>
           </section>
         ) : null}
 
         <form
           className="reminder-form"
+          onInvalid={handleReminderFormInvalid}
           onSubmit={(event) => {
             event.preventDefault();
             void submitReminder();
@@ -2579,6 +2950,7 @@ function App() {
                   aria-checked={form.kind === "task"}
                   className={form.kind === "task" ? "kind-option is-selected" : "kind-option"}
                   role="radio"
+                  tabIndex={form.kind === "task" ? 0 : -1}
                   type="button"
                   onClick={() => setForm({ ...form, kind: "task" })}
                 >
@@ -2589,6 +2961,7 @@ function App() {
                   aria-checked={form.kind === "payment"}
                   className={form.kind === "payment" ? "kind-option is-selected" : "kind-option"}
                   role="radio"
+                  tabIndex={form.kind === "payment" ? 0 : -1}
                   type="button"
                   onClick={() => setForm({ ...form, kind: "payment" })}
                 >
@@ -2600,15 +2973,22 @@ function App() {
             <label className="field field--hero">
               <span>{form.kind === "payment" ? "Что нужно оплатить" : "Что нужно сделать"}</span>
               <input
-                autoFocus
+                id="reminder-title"
+                aria-label={form.kind === "payment" ? "Что нужно оплатить" : "Что нужно сделать"}
+                aria-describedby={formErrors.title ? "reminder-title-error" : undefined}
+                aria-invalid={Boolean(formErrors.title) || undefined}
                 maxLength={200}
                 placeholder={form.kind === "payment"
                   ? "Например, домашний интернет"
                   : "Например, передать показания"}
                 value={form.title}
-                onChange={(event) => setForm({ ...form, title: event.target.value })}
+                onChange={(event) => {
+                  setForm({ ...form, title: event.target.value });
+                  clearFormErrors("title");
+                }}
                 required
               />
+              {formErrors.title ? <span className="field-error" id="reminder-title-error" role="alert">{formErrors.title}</span> : null}
             </label>
             <details className="additional-fields">
               <summary>Дополнительные настройки</summary>
@@ -2618,40 +2998,60 @@ function App() {
                     <span>Сумма <small>можно добавить позже</small></span>
                     <span className="amount-input">
                       <input
+                        id="reminder-amount"
+                        aria-label="Сумма"
+                        aria-describedby={formErrors.amount ? "reminder-amount-error" : undefined}
+                        aria-invalid={Boolean(formErrors.amount) || undefined}
                         inputMode="decimal"
                         min="0"
                         step="0.01"
                         type="number"
                         placeholder="0"
                         value={form.amountRub}
-                        onChange={(event) => setForm({ ...form, amountRub: event.target.value })}
+                        onChange={(event) => {
+                          setForm({ ...form, amountRub: event.target.value });
+                          clearFormErrors("amount");
+                        }}
                       />
                       <b>{form.currency === "RUB" ? "₽" : form.currency}</b>
                     </span>
+                    {formErrors.amount ? <span className="field-error" id="reminder-amount-error" role="alert">{formErrors.amount}</span> : null}
                   </label>
                 ) : null}
                 <label className="field">
                   <span>{form.kind === "payment" ? "Получатель или детали" : "Детали"} <small>необязательно</small></span>
                   <textarea
+                    ref={detailsTextareaRef}
                     rows={3}
                     maxLength={2000}
                     placeholder={form.kind === "payment"
                       ? "Реквизиты, назначение или комментарий"
                       : "Инструкция или контекст"}
                     value={form.description}
-                    onChange={(event) => setForm({ ...form, description: event.target.value })}
+                    onChange={(event) => {
+                      resizeDetailsTextarea(event.currentTarget);
+                      setForm({ ...form, description: event.target.value });
+                    }}
                   />
                 </label>
                 <label className="field">
                   <span>{form.kind === "payment" ? "Ссылка на оплату" : "Ссылка"} <small>необязательно</small></span>
                   <input
+                    id="reminder-action-url"
+                    aria-label={form.kind === "payment" ? "Ссылка на оплату" : "Ссылка"}
+                    aria-describedby={formErrors.actionUrl ? "reminder-action-url-error" : undefined}
+                    aria-invalid={Boolean(formErrors.actionUrl) || undefined}
                     inputMode="url"
                     maxLength={2048}
                     placeholder={form.kind === "payment" ? "https://…" : "Материалы или страница с деталями"}
                     type="url"
                     value={form.actionUrl}
-                    onChange={(event) => setForm({ ...form, actionUrl: event.target.value })}
+                    onChange={(event) => {
+                      setForm({ ...form, actionUrl: event.target.value });
+                      clearFormErrors("actionUrl");
+                    }}
                   />
+                  {formErrors.actionUrl ? <span className="field-error" id="reminder-action-url-error" role="alert">{formErrors.actionUrl}</span> : null}
                 </label>
               </div>
             </details>
@@ -2679,6 +3079,7 @@ function App() {
                 aria-checked={form.visibility === "group"}
                 className={form.visibility === "group" ? "choice-card is-selected" : "choice-card"}
                 role="radio"
+                tabIndex={canAssignGroup && form.visibility === "group" ? 0 : -1}
                 type="button"
                 disabled={!canAssignGroup}
                 onClick={() => setForm({ ...form, visibility: "group" })}
@@ -2690,13 +3091,14 @@ function App() {
                 aria-checked={form.visibility === "private"}
                 className={form.visibility === "private" ? "choice-card is-selected" : "choice-card"}
                 role="radio"
+                tabIndex={!canAssignGroup || form.visibility === "private" ? 0 : -1}
                 type="button"
                 onClick={() =>
                   setForm({ ...form, visibility: "private", assignmentMode: "person", watcherUserIds: [] })
                 }
               >
                 <span className="choice-icon"><UiIcon name="private" /></span>
-                <span><b>Личное</b><small>Только участникам</small></span>
+                <span><b>Личное</b><small>Видно вам и ответственному</small></span>
               </button>
             </div>
 
@@ -2707,16 +3109,24 @@ function App() {
             <div className="field">
               <span>Ответственный</span>
               <PersonSelect
+                id="reminder-responsible"
+                invalid={Boolean(formErrors.responsible)}
+                describedBy={formErrors.responsible ? "reminder-responsible-error" : undefined}
                 members={members.filter((member) => canAssignGroup || member.userId === actorId)}
                 value={form.assignmentMode === "anyone" ? "anyone" : form.responsibleUserId}
                 actorId={actorId}
                 includeAnyone={form.visibility === "group"}
-                onChange={(value) => setForm({
-                  ...form,
-                  assignmentMode: value === "anyone" ? "anyone" : "person",
-                  responsibleUserId: value === "anyone" ? "" : value,
-                })}
+                onChange={(value) => {
+                  setForm({
+                    ...form,
+                    assignmentMode: value === "anyone" ? "anyone" : "person",
+                    responsibleUserId: value === "anyone" ? "" : value,
+                    watcherUserIds: value === "anyone" ? [] : form.watcherUserIds,
+                  });
+                  clearFormErrors("responsible");
+                }}
               />
+              {formErrors.responsible ? <span className="field-error" id="reminder-responsible-error" role="alert">{formErrors.responsible}</span> : null}
               {form.visibility === "private" && selectedResponsible && !selectedResponsible.privateChatAvailable ? (
                 <small className="field-warning">Нужно, чтобы {selectedResponsible.displayName} сначала отправил боту /start.</small>
               ) : null}
@@ -2750,16 +3160,38 @@ function App() {
               <p className="eyebrow">Срок этого повтора</p>
               <h2>{form.kind === "payment" ? "Когда нужно оплатить" : "Когда нужно выполнить"}</h2>
               <div className="schedule-grid">
-                <label className="field"><span>Дата</span><input type="date" value={occurrenceDate} onChange={(event) => setOccurrenceDate(event.target.value)} required /></label>
-                <label className="toggle-row field--wide"><span><b>Весь день</b><small>Срок — до конца дня, первый сигнал — от {allDayAnchorTime}</small></span><input type="checkbox" checked={occurrenceAllDay} onChange={(event) => setOccurrenceAllDay(event.target.checked)} /></label>
-                {!occurrenceAllDay ? <label className="field field--wide"><span>Время</span><Time24Field label="Время" required value={occurrenceTime} onChange={setOccurrenceTime} /></label> : null}
+                <div className="field">
+                  <label htmlFor="reminder-occurrence-date">Дата</label>
+                  <CalendarDateField
+                    id="reminder-occurrence-date"
+                    label="Дата"
+                    emptyMessage="Выберите дату срока."
+                    errorId="reminder-occurrence-date-error"
+                    externalError={formErrors.occurrenceDate}
+                    required
+                    value={occurrenceDate}
+                    onChange={(value) => {
+                      setOccurrenceDate(value);
+                      clearFormErrors("occurrenceDate", "leadMinutes");
+                    }}
+                  />
+                </div>
+                <label className="toggle-row field--wide"><span><b>Весь день</b><small>Срок — до конца дня, первый сигнал — от {allDayAnchorTime}</small></span><input type="checkbox" checked={occurrenceAllDay} onChange={(event) => {
+                  setOccurrenceAllDay(event.target.checked);
+                  clearFormErrors("leadMinutes");
+                }} /></label>
+                {!occurrenceAllDay ? <label className="field field--wide"><span>Время</span><Time24Field id="reminder-occurrence-time" label="Время" required value={occurrenceTime} onChange={(value) => {
+                  setOccurrenceTime(value);
+                  clearFormErrors("leadMinutes");
+                }} /></label> : null}
               </div>
             </section>
           ) : (
           <section className="form-panel">
-            <p className="eyebrow">Срок</p>
-            <h2>{form.kind === "payment" ? "Когда нужно оплатить" : "Когда нужно выполнить"}</h2>
-            <div className="frequency-strip" role="radiogroup" aria-label="Повтор срока" onKeyDown={handleRovingControlKey}>
+            <p className="eyebrow">Ритм задачи</p>
+            <h2>Как часто появляется новый срок?</h2>
+            <p className="form-panel__hint">{form.frequency === "once" ? "Будет один отдельный срок." : "Каждый новый срок нужно закрывать отдельно."}</p>
+            <div className="frequency-strip" role="radiogroup" aria-label="Как часто появляется новый срок" onKeyDown={handleRovingControlKey}>
               {([
                 ["once", "Один раз"],
                 ["daily", "Ежедневно"],
@@ -2772,8 +3204,9 @@ function App() {
                   className={form.frequency === value ? "frequency-chip is-selected" : "frequency-chip"}
                   key={value}
                   role="radio"
+                  tabIndex={form.frequency === value ? 0 : -1}
                   type="button"
-                  onClick={() => setForm({ ...form, frequency: value })}
+                  onClick={() => changeFormFrequency(value)}
                 >
                   {label}
                 </button>
@@ -2782,28 +3215,82 @@ function App() {
 
             <div className="schedule-grid">
               {form.frequency === "once" ? (
-                <label className="field">
-                  <span>Дата</span>
-                  <input type="date" min={localDateInputValue()} value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} required />
-                </label>
+                <div className="field">
+                  <label htmlFor="reminder-date">Дата</label>
+                  <CalendarDateField
+                    id="reminder-date"
+                    label="Дата"
+                    emptyMessage="Выберите дату срока."
+                    errorId="reminder-date-error"
+                    externalError={formErrors.date}
+                    min={editingReminderId ? undefined : minimumScheduleDate}
+                    required
+                    value={form.date}
+                    onChange={(value) => {
+                      setForm({ ...form, date: value });
+                      clearFormErrors("date");
+                    }}
+                  />
+                </div>
               ) : (
-                <label className="field">
-                  <span>Считать сроки с</span>
-                  <input type="date" value={form.startDate} onChange={(event) => setForm({ ...form, startDate: event.target.value })} required />
-                </label>
+                <div className="field">
+                  <label htmlFor="reminder-start-date">Считать сроки с</label>
+                  <CalendarDateField
+                    id="reminder-start-date"
+                    label="Считать сроки с"
+                    emptyMessage="Выберите дату начала серии."
+                    errorId="reminder-start-date-error"
+                    externalError={formErrors.startDate}
+                    required
+                    value={form.startDate}
+                    onChange={(value) => {
+                      setForm({ ...form, startDate: value });
+                      clearFormErrors("startDate");
+                    }}
+                  />
+                </div>
               )}
 
-              {form.frequency !== "once" ? (
+              {intervalMetadata ? (
                 <label className="field field--compact">
-                  <span>Интервал</span>
-                  <input min="1" max="120" type="number" value={form.interval} onChange={(event) => setForm({ ...form, interval: event.target.value })} />
+                  <span>Каждые</span>
+                  <span className="amount-input interval-input">
+                    <input
+                      id="reminder-interval"
+                      aria-label={`Интервал в ${intervalMetadata.unitLabel}`}
+                      aria-describedby={formErrors.interval
+                        ? "reminder-interval-error reminder-interval-hint"
+                        : "reminder-interval-hint"}
+                      aria-invalid={Boolean(formErrors.interval) || undefined}
+                      inputMode="numeric"
+                      min={intervalMetadata.min}
+                      max={intervalMetadata.max}
+                      step="1"
+                      required
+                      type="number"
+                      value={form.interval}
+                      onChange={(event) => {
+                        setForm({ ...form, interval: event.target.value });
+                        clearFormErrors("interval");
+                      }}
+                    />
+                    <b>{intervalUnitLabel(form.frequency, form.interval)}</b>
+                  </span>
+                  {formErrors.interval ? <span className="field-error" id="reminder-interval-error" role="alert">{formErrors.interval}</span> : null}
+                  <small id="reminder-interval-hint">От {intervalMetadata.min} до {intervalMetadata.max}</small>
                 </label>
               ) : null}
 
               {form.frequency === "weekly" ? (
                 <div className="field field--wide">
-                  <span>Дни недели</span>
-                  <div className="weekday-row">
+                  <span id="reminder-weekdays-label">Дни недели</span>
+                  <div
+                    className="weekday-row"
+                    id="reminder-weekdays"
+                    role="group"
+                    aria-labelledby="reminder-weekdays-label"
+                    aria-describedby={formErrors.weekdays ? "reminder-weekdays-error" : undefined}
+                  >
                     {WEEKDAYS.map((weekday) => (
                       <button
                         aria-pressed={form.weekdays.includes(weekday.value)}
@@ -2816,6 +3303,7 @@ function App() {
                       </button>
                     ))}
                   </div>
+                  {formErrors.weekdays ? <span className="field-error" id="reminder-weekdays-error" role="alert">{formErrors.weekdays}</span> : null}
                 </div>
               ) : null}
 
@@ -2824,23 +3312,35 @@ function App() {
                   <span>День месяца</span>
                   <div className="inline-fields">
                     <input
+                      id="reminder-monthly-day"
                       aria-label="День месяца"
+                      aria-describedby={formErrors.monthlyDay ? "reminder-monthly-day-error" : undefined}
+                      aria-invalid={Boolean(formErrors.monthlyDay) || undefined}
                       disabled={form.monthlyLastDay}
                       min="1"
                       max="31"
+                      step="1"
+                      required={!form.monthlyLastDay}
                       type="number"
                       value={form.monthlyDay}
-                      onChange={(event) => setForm({ ...form, monthlyDay: event.target.value })}
+                      onChange={(event) => {
+                        setForm({ ...form, monthlyDay: event.target.value });
+                        clearFormErrors("monthlyDay");
+                      }}
                     />
                     <label className="toggle-label">
                       <input
                         type="checkbox"
                         checked={form.monthlyLastDay}
-                        onChange={(event) => setForm({ ...form, monthlyLastDay: event.target.checked })}
+                        onChange={(event) => {
+                          setForm({ ...form, monthlyLastDay: event.target.checked });
+                          if (event.target.checked) clearFormErrors("monthlyDay");
+                        }}
                       />
                       Последний день
                     </label>
                   </div>
+                  {formErrors.monthlyDay ? <span className="field-error" id="reminder-monthly-day-error" role="alert">{formErrors.monthlyDay}</span> : null}
                 </div>
               ) : null}
 
@@ -2848,15 +3348,58 @@ function App() {
                 <div className="field field--wide">
                   <span>Дата каждый год</span>
                   <div className="inline-fields inline-fields--date">
-                    <input aria-label="День" min="1" max="31" type="number" value={form.yearlyDay} onChange={(event) => setForm({ ...form, yearlyDay: event.target.value })} />
-                    <select aria-label="Месяц" value={form.yearlyMonth} onChange={(event) => setForm({ ...form, yearlyMonth: event.target.value })}>
+                    <input
+                      id="reminder-yearly-day"
+                      aria-label="День"
+                      aria-describedby={formErrors.yearlyDate ? "reminder-yearly-date-error" : undefined}
+                      aria-invalid={Boolean(formErrors.yearlyDate) || undefined}
+                      min="1"
+                      max={yearlyMaximumDay}
+                      step="1"
+                      required
+                      type="number"
+                      value={form.yearlyDay}
+                      onChange={(event) => {
+                        const nextValue = event.target.value;
+                        const nextDay = Number(nextValue);
+                        setForm({ ...form, yearlyDay: nextValue });
+                        if (nextValue && (!Number.isInteger(nextDay) || nextDay < 1 || nextDay > yearlyMaximumDay)) {
+                          setFormErrors((current) => ({
+                            ...current,
+                            yearlyDate: `Для выбранного месяца допустимо от 1 до ${yearlyMaximumDay}.`,
+                          }));
+                        } else {
+                          clearFormErrors("yearlyDate");
+                        }
+                      }}
+                    />
+                    <select
+                      aria-label="Месяц"
+                      aria-describedby={formErrors.yearlyDate ? "reminder-yearly-date-error" : undefined}
+                      aria-invalid={Boolean(formErrors.yearlyDate) || undefined}
+                      value={form.yearlyMonth}
+                      onChange={(event) => {
+                        const nextMonth = event.target.value;
+                        const maximumDay = maxValidYearlyDay(Number(nextMonth));
+                        setForm({ ...form, yearlyMonth: nextMonth });
+                        if (Number(form.yearlyDay) > maximumDay) {
+                          setFormErrors((current) => ({
+                            ...current,
+                            yearlyDate: `Для выбранного месяца допустимо от 1 до ${maximumDay}.`,
+                          }));
+                        } else {
+                          clearFormErrors("yearlyDate");
+                        }
+                      }}
+                    >
                       {Array.from({ length: 12 }, (_, index) => (
                         <option key={index + 1} value={index + 1}>
-                          {new Intl.DateTimeFormat("ru-RU", { month: "long" }).format(new Date(2026, index, 1))}
+                          {new Intl.DateTimeFormat("ru-RU", { month: "long", timeZone: "UTC" }).format(new Date(Date.UTC(2026, index, 1)))}
                         </option>
                       ))}
                     </select>
                   </div>
+                  {formErrors.yearlyDate ? <span className="field-error" id="reminder-yearly-date-error" role="alert">{formErrors.yearlyDate}</span> : null}
                 </div>
               ) : null}
 
@@ -2868,6 +3411,7 @@ function App() {
                 <label className="field field--wide">
                   <span>Время</span>
                   <Time24Field
+                    id="reminder-time"
                     label="Время"
                     required
                     value={form.timeLocal}
@@ -2880,12 +3424,23 @@ function App() {
           )}
 
           <section className="form-panel">
-            <p className="eyebrow">Сигналы</p>
-            <h2>Когда начать напоминать</h2>
+            <p className="eyebrow">Ритм сигналов</p>
+            <h2>Как напоминать об открытом сроке?</h2>
+            <p className="form-panel__hint">Сигналы повторяются только для текущего срока и остановятся после отметки.</p>
             <div className="schedule-grid">
               <label className="field">
                 <span>Первый сигнал</span>
-                <select value={form.leadMinutes} onChange={(event) => setForm({ ...form, leadMinutes: event.target.value })}>
+                <select
+                  id="reminder-lead-minutes"
+                  aria-label="Первый сигнал"
+                  aria-describedby={formErrors.leadMinutes ? "reminder-lead-minutes-error" : undefined}
+                  aria-invalid={Boolean(formErrors.leadMinutes) || undefined}
+                  value={form.leadMinutes}
+                  onChange={(event) => {
+                    setForm({ ...form, leadMinutes: event.target.value });
+                    clearFormErrors("leadMinutes");
+                  }}
+                >
                   {form.leadMinutes === PRESERVE_LEGACY_LEAD ? (
                     <option value={PRESERVE_LEGACY_LEAD}>
                       {editingOccurrence?.reminderStartAt
@@ -2900,9 +3455,10 @@ function App() {
                     })}</option>
                   ))}
                 </select>
+                {formErrors.leadMinutes ? <span className="field-error" id="reminder-lead-minutes-error" role="alert">{formErrors.leadMinutes}</span> : null}
               </label>
               <label className="field">
-                <span>Повтор уведомлений</span>
+                <span>Повтор сигнала</span>
                 <select value={form.repeatIntervalMinutes} onChange={(event) => setForm({ ...form, repeatIntervalMinutes: event.target.value })}>
                   <option value="60">Каждый час</option>
                   <option value="180">Каждые 3 часа</option>
@@ -2912,10 +3468,18 @@ function App() {
                 </select>
               </label>
               <label className="toggle-row field--wide">
-                <span><b>Доставлять в тихие часы</b><small>{selectedWorkspace?.quietHoursStart === selectedWorkspace?.quietHoursEnd
-                  ? "Тихие часы в группе выключены"
-                  : `Не переносить сигналы из интервала ${selectedWorkspace?.quietHoursStart ?? "22:00"}–${selectedWorkspace?.quietHoursEnd ?? "08:00"}`}</small></span>
-                <input type="checkbox" checked={form.ignoreQuietHours} onChange={(event) => setForm({ ...form, ignoreQuietHours: event.target.checked })} />
+                <span><b>Доставлять в тихие часы</b><small id="quiet-hours-behavior">{quietHoursDisabled
+                  ? "Тихие часы в группе выключены."
+                  : form.ignoreQuietHours
+                    ? `Сигналы будут приходить и с ${quietHoursStart} до ${quietHoursEnd}.`
+                    : `Сигналы с ${quietHoursStart} до ${quietHoursEnd} будут перенесены на ${quietHoursEnd}.`}</small></span>
+                <input
+                  type="checkbox"
+                  aria-describedby="quiet-hours-behavior"
+                  disabled={quietHoursDisabled}
+                  checked={!quietHoursDisabled && form.ignoreQuietHours}
+                  onChange={(event) => setForm({ ...form, ignoreQuietHours: event.target.checked })}
+                />
               </label>
             </div>
           </section>
@@ -2925,11 +3489,11 @@ function App() {
           <section className="form-preview" aria-label="Предпросмотр напоминания">
             <p className="eyebrow">Как это будет работать</p>
             <h2>{form.title.trim() || "Название напоминания"}</h2>
-            <p>{previewResponsible}.</p>
+            <p>{previewResponsible}. {previewScope}</p>
             <dl className="form-preview__plan">
-              <div><dt>Срок</dt><dd>{deadlinePreview}</dd></div>
+              <div><dt>Ритм задачи</dt><dd>{deadlinePreview}</dd></div>
               <div><dt>Первый сигнал</dt><dd>{firstSignalPreview}</dd></div>
-              <div><dt>Дальше</dt><dd>{repeatSignalPreview}</dd></div>
+              <div><dt>Ритм сигналов</dt><dd>{repeatSignalPreview}</dd></div>
             </dl>
             <small>{quietHoursPreview}</small>
             {previewDates.length > 0 ? <div className="form-preview__dates" aria-label="Ближайшие даты">{previewDates.map((date, index) => <span className={index === 0 ? "is-next" : ""} key={date}>{formatScheduleDate(date, true)}</span>)}</div> : null}
@@ -2963,6 +3527,12 @@ function App() {
     day: "numeric",
     month: "long",
   }).format(new Date()).replace(/,\s*/gu, " · ");
+  const undoableReminder = undoableOccurrence
+    ? reminderMap.get(undoableOccurrence.reminderId)
+    : undefined;
+  const undoableNextDeadline = undoableOccurrence
+    ? nextRecurringDeadlineLabel(undoableOccurrence, undoableReminder)
+    : null;
   return (
     <main className="app app--home">
       <header className="home-header">
@@ -3013,8 +3583,8 @@ function App() {
       <section className="home-intro">
         <h1>Требует внимания</h1>
         <div className="scope-switch" role="tablist" aria-label="Область напоминаний" onKeyDown={handleRovingControlKey}>
-          <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
-          <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
+          <button aria-selected={scope === "mine"} className={scope === "mine" ? "is-selected" : ""} tabIndex={scope === "mine" ? 0 : -1} onClick={() => setScope("mine")} role="tab" type="button">Моя лента</button>
+          <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} tabIndex={scope === "group" ? 0 : -1} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
         </div>
       </section>
 
@@ -3028,7 +3598,13 @@ function App() {
       {notice ? <div className="notice-toast" role="status">{notice}</div> : null}
       {undoableOccurrence ? (
         <div className="undo-banner" role="status">
-          <span><b>{undoableOccurrence.kind === "payment" ? "Оплачено" : "Выполнено"}</b><small>Можно отменить в течение 10 минут</small></span>
+          <span>
+            <b>{isRecurring(undoableReminder)
+              ? undoableOccurrence.kind === "payment" ? "Этот срок оплачен" : "Этот срок выполнен"
+              : undoableOccurrence.kind === "payment" ? "Оплачено" : "Выполнено"}</b>
+            {undoableNextDeadline ? <small>Следующий срок: {undoableNextDeadline}</small> : null}
+            <small>Можно отменить в течение 10 минут</small>
+          </span>
           <button
             type="button"
             disabled={actingOccurrenceId === undoableOccurrence.occurrenceId}
@@ -3077,6 +3653,7 @@ function App() {
               const canSnooze = occurrence.visibility === "private"
                 ? isCreator || isResponsible
                 : isCreator || isManager || isResponsible;
+              const recurringDefinition = isRecurring(definition);
               return (
                 <article className={`rail-item rail-item--${occurrence.status}`} key={occurrence.occurrenceId}>
                   <span className="rail-node" />
@@ -3091,6 +3668,7 @@ function App() {
                     </div>
                     <button className="rail-card__title" type="button" onClick={() => openOccurrenceDetail(occurrence.occurrenceId)}>{occurrence.title}<UiIcon name="arrow-right" /></button>
                     <p>{occurrence.assignment.mode === "anyone" ? "Может выполнить любой" : `Ответственный · ${memberName(responsible)}`}</p>
+                    {recurringDefinition ? <div className="rail-rhythm"><UiIcon name="repeat" /><span><b>{scheduleLabel(definition.schedule)}</b><small>Это один срок серии</small></span></div> : null}
                     {nextSignal ? <div className="rail-signal"><span>Следующий сигнал</span><b>{nextSignal.exact}</b><small>{nextSignal.relative} · {occurrence.ignoreQuietHours ? "Разрешён в тихие часы" : "С учётом тихих часов"}</small></div> : null}
                     {canComplete || canSnooze ? <div className="rail-actions">
                       {canComplete ? <button
@@ -3099,7 +3677,7 @@ function App() {
                         disabled={actingOccurrenceId === occurrence.occurrenceId}
                         onClick={() => void completeOccurrenceAction(occurrence.occurrenceId)}
                       >
-                        {occurrence.kind === "payment" ? "Отметить оплату" : "Отметить выполнение"}
+                        {completionActionLabel(occurrence, definition)}
                       </button> : null}
                       {canSnooze ? <button
                         className="rail-action"

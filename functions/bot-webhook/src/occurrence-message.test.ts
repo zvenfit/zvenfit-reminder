@@ -55,6 +55,34 @@ describe("payment occurrence messages", () => {
     expect(rendered.callbackNotice).toBe("Оплачено");
   });
 
+  it("scopes recurring completion actions to the current deadline", () => {
+    const occurrence = {
+      ...paymentOccurrence(),
+      kind: "task" as const,
+    };
+    const presentation = {
+      schedule: {
+        version: 1 as const,
+        frequency: "daily" as const,
+        interval: 1,
+        startDate: "2026-08-25",
+        timing: { kind: "timed" as const, timeLocal: "18:00" },
+      },
+      nextOccurrenceAt: new Date("2026-08-26T15:00:00.000Z"),
+    };
+    const keyboard = occurrenceKeyboard(occurrence, presentation);
+    const rendered = renderOccurrenceAction(
+      { action: "done", occurrence, presentation },
+      { id: 20, displayName: "Иван" },
+    );
+
+    expect(keyboard.inline_keyboard[0]?.[0]?.text).toBe("✅ Выполнил этот срок");
+    expect(rendered.text).toContain("Этот срок выполнен:");
+    expect(rendered.text).toContain("Следующий срок: 26 августа в 18:00");
+    expect(rendered.keyboard.inline_keyboard[0]?.[0]?.text).toBe("↩️ Вернуть этот срок");
+    expect(rendered.callbackNotice).toBe("Этот срок выполнен");
+  });
+
   it("renders snooze without retaining the overdue primary state", () => {
     const occurrence = {
       ...paymentOccurrence(),

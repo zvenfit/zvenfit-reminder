@@ -2,6 +2,7 @@ import {
   DeliveriesRepository,
   OccurrenceActionsRepository,
   OccurrencesRepository,
+  RemindersRepository,
   WorkspacesRepository,
   buildOccurrenceMessage,
   occurrenceCallbackData,
@@ -12,6 +13,7 @@ import {
   type NotificationDelivery,
   type ReminderOccurrence,
   type ReservedDelivery,
+  type ScheduleSpec,
 } from "@zvenfit-reminder/shared";
 import { setDefaultResultOrder } from "node:dns";
 
@@ -66,6 +68,7 @@ interface TelegramClient {
 
 interface DispatcherDependencies {
   workspaces: Pick<WorkspacesRepository, "listActive">;
+  reminders?: Pick<RemindersRepository, "getById">;
   occurrences: Pick<
     OccurrencesRepository,
     "listRuntimeCandidates" | "materialize" |
@@ -189,6 +192,7 @@ async function editTelegramMessage(
 function createDependencies(config: AppConfig): DispatcherDependencies {
   return {
     workspaces: new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase),
+    reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
     occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
     actions: new OccurrenceActionsRepository(config.ydbEndpoint, config.ydbDatabase),
     deliveries: new DeliveriesRepository(config.ydbEndpoint, config.ydbDatabase),
@@ -196,12 +200,26 @@ function createDependencies(config: AppConfig): DispatcherDependencies {
   };
 }
 
-function deliveryKeyboard(occurrence: ReminderOccurrence): InlineKeyboardMarkup {
+function isRecurringSchedule(schedule: ScheduleSpec | undefined): boolean {
+  return schedule?.frequency !== undefined && schedule.frequency !== "once";
+}
+
+function deliveryKeyboard(
+  occurrence: ReminderOccurrence,
+  schedule?: ScheduleSpec,
+): InlineKeyboardMarkup {
+  const completionLabel = isRecurringSchedule(schedule)
+    ? occurrence.kind === "payment"
+      ? "✅ Оплатил этот срок"
+      : "✅ Выполнил этот срок"
+    : occurrence.kind === "payment"
+      ? "✅ Оплатил"
+      : "✅ Выполнил";
   return {
     inline_keyboard: [
       [
         {
-          text: occurrence.kind === "payment" ? "✅ Оплатил" : "✅ Выполнил",
+          text: completionLabel,
           callback_data: occurrenceCallbackData("done", occurrence.occurrenceId),
         },
         {
@@ -230,11 +248,16 @@ function deliveryKeyboard(occurrence: ReminderOccurrence): InlineKeyboardMarkup 
 function messageSyncKeyboard(
   occurrence: ReminderOccurrence,
   now: Date,
+  schedule?: ScheduleSpec,
 ): InlineKeyboardMarkup | null {
   if (occurrence.status === "completed" && occurrence.undoUntil && occurrence.undoUntil > now) {
     return {
       inline_keyboard: [[{
-        text: occurrence.kind === "payment" ? "↩️ Отменить оплату" : "↩️ Отменить выполнение",
+        text: isRecurringSchedule(schedule)
+          ? "↩️ Вернуть этот срок"
+          : occurrence.kind === "payment"
+            ? "↩️ Отменить оплату"
+            : "↩️ Отменить выполнение",
         callback_data: occurrenceCallbackData("undo", occurrence.occurrenceId),
       }]],
     };
@@ -243,13 +266,37 @@ function messageSyncKeyboard(
     occurrence.notificationState === "waiting" &&
     ["scheduled", "pending", "overdue"].includes(occurrence.status)
   ) {
-    return deliveryKeyboard(occurrence);
+    return deliveryKeyboard(occurrence, schedule);
   }
   return null;
 }
 
-function messageSyncText(occurrence: ReminderOccurrence, now: Date): string {
-  return buildOccurrenceMessage(occurrence, now);
+function messageSyncText(
+  occurrence: ReminderOccurrence,
+  now: Date,
+  schedule?: ScheduleSpec,
+  nextOccurrenceAt?: Date | null,
+): string {
+  return buildOccurrenceMessage(occurrence, now, { schedule, nextOccurrenceAt });
+}
+
+async function loadReminderSchedule(
+  dependencies: DispatcherDependencies,
+  occurrence: Pick<ReminderOccurrence, "workspaceId" | "reminderId">,
+): Promise<ScheduleSpec | undefined> {
+  if (!dependencies.reminders) {
+    return undefined;
+  }
+  try {
+    return (await dependencies.reminders.getById(
+      occurrence.workspaceId,
+      occurrence.reminderId,
+    ))?.schedule;
+  } catch {
+    // Recurrence copy is presentation-only: a transient read failure must not
+    // prevent an already validated notification from being sent or updated.
+    return undefined;
+  }
 }
 
 function sanitizedErrorCode(error: unknown): string {
@@ -351,19 +398,21 @@ async function dispatchReservation(
 
   let sentMessageId: number;
   try {
+    const schedule = await loadReminderSchedule(dependencies, reservation.occurrence);
     const text = buildOccurrenceMessage(
       reservation.occurrence,
       reservation.delivery.claimedAt,
       {
         deliveryType: reservation.delivery.deliveryType,
         escalationWatchers: reservation.escalationWatchers,
+        schedule,
       },
     );
     sentMessageId = await dependencies.telegram.send(
       config.botToken,
       reservation.targetChatId,
       text,
-      deliveryKeyboard(reservation.occurrence),
+      deliveryKeyboard(reservation.occurrence, schedule),
     );
   } catch (error) {
     const status = error instanceof TelegramHttpError ? "failed" : "unknown";
@@ -497,11 +546,20 @@ export async function runDispatcher(
             finalized.occurrence.latestMessageId != null
           ) {
             try {
+              const schedule = await loadReminderSchedule(
+                dependencies,
+                finalized.occurrence,
+              );
               await dependencies.telegram.editFinal(
                 config.botToken,
                 finalized.occurrence.latestMessageChatId,
                 finalized.occurrence.latestMessageId,
-                messageSyncText(finalized.occurrence, now),
+                messageSyncText(
+                  finalized.occurrence,
+                  now,
+                  schedule,
+                  finalized.nextDueAt,
+                ),
               );
             } catch (error) {
               telegramFinalized = false;
@@ -552,7 +610,12 @@ export async function runDispatcher(
         let succeeded = false;
         try {
           if (occurrence.latestMessageChatId != null && occurrence.latestMessageId != null) {
-            const keyboard = retireOnly ? null : messageSyncKeyboard(occurrence, now);
+            const schedule = retireOnly
+              ? undefined
+              : await loadReminderSchedule(dependencies, occurrence);
+            const keyboard = retireOnly
+              ? null
+              : messageSyncKeyboard(occurrence, now, schedule);
             if (retireOnly) {
               await dependencies.telegram.editFinal(
                 config.botToken,
@@ -565,7 +628,7 @@ export async function runDispatcher(
                 config.botToken,
                 occurrence.latestMessageChatId,
                 occurrence.latestMessageId,
-                messageSyncText(occurrence, now),
+                messageSyncText(occurrence, now, schedule),
                 keyboard,
               );
             } else {
@@ -573,7 +636,7 @@ export async function runDispatcher(
                 config.botToken,
                 occurrence.latestMessageChatId,
                 occurrence.latestMessageId,
-                messageSyncText(occurrence, now),
+                messageSyncText(occurrence, now, schedule),
               );
             }
           }

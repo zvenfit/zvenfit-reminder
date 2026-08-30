@@ -193,6 +193,86 @@ describe("occurrence Telegram UX", () => {
     expect(rendered.text).not.toContain("Просрочено:");
   });
 
+  it("distinguishes a recurring task cadence from repeated signals", () => {
+    const rendered = renderOccurrenceMessage(
+      {
+        ...occurrence,
+        kind: "task",
+      },
+      new Date("2026-08-25T15:00:01.000Z"),
+      {
+        deliveryType: "initial",
+        schedule: {
+          version: 1,
+          frequency: "daily",
+          interval: 1,
+          startDate: "2026-08-25",
+          timing: { kind: "timed", timeLocal: "18:00" },
+        },
+      },
+    );
+
+    expect(rendered.text).toContain("🔁 Ритм задачи: Каждый день · 18:00");
+  });
+
+  it("makes recurring completion scope and the next deadline explicit", () => {
+    const rendered = renderOccurrenceMessage(
+      {
+        ...occurrence,
+        kind: "task",
+        status: "completed",
+        notificationState: "stopped",
+        completedBy: 42,
+        completedByDisplayName: "Иван",
+        completedAt: new Date("2026-08-30T09:06:00.000Z"),
+        undoUntil: new Date("2026-08-30T09:16:00.000Z"),
+      },
+      new Date("2026-08-30T09:07:00.000Z"),
+      {
+        schedule: {
+          version: 1,
+          frequency: "daily",
+          interval: 1,
+          startDate: "2026-08-25",
+          timing: { kind: "timed", timeLocal: "12:00" },
+        },
+        nextOccurrenceAt: new Date("2026-08-31T09:00:00.000Z"),
+      },
+    );
+
+    expect(rendered.text).toContain("Этот срок выполнен:");
+    expect(rendered.text).toContain("Следующий срок: 31 августа в 12:00");
+    expect(rendered.text).toContain("🔁 Ритм задачи: Каждый день · 12:00");
+  });
+
+  it("keeps one-off completion language and labels the schedule as one-off", () => {
+    const rendered = renderOccurrenceMessage(
+      {
+        ...occurrence,
+        status: "completed",
+        notificationState: "stopped",
+        completedBy: 42,
+        completedByDisplayName: "Иван",
+        completedAt: new Date("2026-08-25T15:05:00.000Z"),
+      },
+      new Date("2026-08-25T15:06:00.000Z"),
+      {
+        schedule: {
+          version: 1,
+          frequency: "once",
+          date: "2026-08-25",
+          timing: { kind: "timed", timeLocal: "18:00" },
+        },
+      },
+    );
+
+    expect(rendered.text).toContain("Оплачено:");
+    expect(rendered.text).not.toContain("Этот срок оплачен:");
+    expect(rendered.text).toContain("Ритм задачи: Один раз · 25 августа · 18:00");
+    expect(rendered.text).not.toContain("🔁 Ритм задачи:");
+    expect(rendered.text).not.toContain("Следующий срок:");
+  });
+
   it("renders snooze as the only primary state while retaining the deadline", () => {
     const rendered = renderOccurrenceMessage(
       {

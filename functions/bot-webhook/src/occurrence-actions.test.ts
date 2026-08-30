@@ -60,11 +60,13 @@ function dependencies(item = occurrence(), actor = member()) {
       getByTelegramChatId: vi.fn().mockResolvedValue({
         workspaceId: "workspace-a",
         telegramChatId: -100123,
+        defaultAllDayReminderTime: "09:00",
         status: "active",
       }),
       getById: vi.fn().mockResolvedValue({
         workspaceId: "workspace-a",
         telegramChatId: -100123,
+        defaultAllDayReminderTime: "09:00",
         status: "active",
       }),
     },
@@ -167,6 +169,45 @@ describe("executeOccurrenceAction", () => {
       20,
       now,
     );
+  });
+
+  it("returns recurring presentation with the next deadline after the completed one", async () => {
+    const item = occurrence({
+      dueAt: new Date("2026-08-30T09:00:00.000Z"),
+      timezone: "Europe/Moscow",
+      updatedAt: new Date("2026-08-30T09:06:00.000Z"),
+    });
+    const deps = dependencies(item);
+    vi.mocked(deps.reminders.getById).mockResolvedValue({
+      ...reminder,
+      timezone: "Europe/Moscow",
+      schedule: {
+        version: 1,
+        frequency: "daily",
+        interval: 1,
+        startDate: "2026-08-25",
+        timing: { kind: "timed", timeLocal: "12:00" },
+      },
+    } as ReminderDefinition);
+
+    const result = await executeOccurrenceAction(
+      config,
+      {
+        source: "telegram",
+        action: "done",
+        occurrenceId: "occurrence-a",
+        actorUserId: 20,
+        chatId: -100123,
+        chatType: "group",
+        now: new Date("2026-08-30T09:06:00.000Z"),
+      },
+      deps,
+    );
+
+    expect(result.presentation).toMatchObject({
+      schedule: { frequency: "daily", interval: 1 },
+      nextOccurrenceAt: new Date("2026-08-31T09:00:00.000Z"),
+    });
   });
 
   it("defaults legacy Telegram snooze actions to the one-hour preset", async () => {

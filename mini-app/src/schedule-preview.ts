@@ -75,6 +75,31 @@ function isStillUpcomingToday(schedule: ScheduleSpec, nowMinutes: number): boole
   return hour * 60 + minute >= nowMinutes;
 }
 
+function previewHorizonDays(
+  schedule: ScheduleSpec,
+  today: LocalDateParts,
+  count: number,
+): number {
+  const start = parseLocalDate(
+    schedule.frequency === "once" ? schedule.date : schedule.startDate,
+  );
+  const daysUntilStart = Math.max(0, dayOrdinal(start) - dayOrdinal(today));
+  const occurrenceCount = Math.max(1, count);
+
+  switch (schedule.frequency) {
+    case "once":
+      return daysUntilStart;
+    case "daily":
+      return daysUntilStart + schedule.interval * occurrenceCount + 1;
+    case "weekly":
+      return daysUntilStart + schedule.interval * 7 * occurrenceCount + 7;
+    case "monthly":
+      return daysUntilStart + schedule.interval * 31 * occurrenceCount + 31;
+    case "yearly":
+      return daysUntilStart + schedule.interval * 366 * occurrenceCount + 366;
+  }
+}
+
 function matchesSchedule(schedule: ScheduleSpec, candidate: LocalDateParts): boolean {
   if (schedule.frequency === "once") {
     return formatLocalDate(candidate) === schedule.date;
@@ -117,7 +142,7 @@ export function upcomingScheduleDates(
   const now = localNow(reference, timezone);
   const today = { year: now.year, month: now.month, day: now.day };
   const result: string[] = [];
-  const maxDays = schedule.frequency === "yearly" ? 366 * 12 : 366 * 6;
+  const maxDays = previewHorizonDays(schedule, today, count);
 
   for (let offset = 0; offset <= maxDays && result.length < count; offset += 1) {
     const candidate = addDays(today, offset);

@@ -41,11 +41,7 @@ export const workspaceSettingsSchema = z
     quietHoursEnd: localTimeSchema,
     defaultAllDayReminderTime: localTimeSchema,
   })
-  .strict()
-  .refine((settings) => settings.quietHoursStart !== settings.quietHoursEnd, {
-    message: "Quiet hours start and end must be different",
-    path: ["quietHoursEnd"],
-  });
+  .strict();
 
 export type WorkspaceSettingsInput = z.input<typeof workspaceSettingsSchema>;
 

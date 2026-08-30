@@ -1,6 +1,7 @@
 import type {
   DeliveryType,
   ReminderOccurrence,
+  ScheduleSpec,
   SnoozePreset,
 } from "./reminder-domain.js";
 
@@ -19,6 +20,8 @@ export type OccurrenceMessageState =
 export interface OccurrenceMessageOptions {
   deliveryType?: DeliveryType;
   escalationWatchers?: Array<{ userId: number; displayName: string }>;
+  schedule?: ScheduleSpec;
+  nextOccurrenceAt?: Date | null;
 }
 
 export interface RenderedOccurrenceMessage {
@@ -126,13 +129,25 @@ function formatOccurrenceActionLink(occurrence: ReminderOccurrence): string | nu
   }
 }
 
-function formatOccurrenceDue(occurrence: ReminderOccurrence): string {
+function formatDeadlineInstant(
+  instant: Date,
+  timezone: string,
+  allDay: boolean,
+): string {
   return new Intl.DateTimeFormat("ru-RU", {
     day: "numeric",
     month: "long",
-    ...(occurrence.allDay ? {} : { hour: "2-digit", minute: "2-digit" }),
-    timeZone: occurrence.timezone,
-  }).format(occurrence.dueAt);
+    ...(allDay ? {} : { hour: "2-digit", minute: "2-digit" }),
+    timeZone: timezone,
+  }).format(instant);
+}
+
+function formatOccurrenceDue(occurrence: ReminderOccurrence): string {
+  return formatDeadlineInstant(
+    occurrence.dueAt,
+    occurrence.timezone,
+    occurrence.allDay,
+  );
 }
 
 function formatOccurrenceInstant(instant: Date, timezone: string): string {
@@ -143,6 +158,56 @@ function formatOccurrenceInstant(instant: Date, timezone: string): string {
     minute: "2-digit",
     timeZone: timezone,
   }).format(instant);
+}
+
+const WEEKDAY_LABELS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"] as const;
+
+function formatScheduleLocalDate(date: string): string {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "numeric",
+    month: "long",
+    timeZone: "UTC",
+  }).format(new Date(`${date}T12:00:00.000Z`));
+}
+
+/**
+ * Formats the cadence of new reminder occurrences, not the repeat interval of
+ * Telegram signals for one open occurrence.
+ */
+export function formatScheduleCadence(schedule: ScheduleSpec): string {
+  const timing = schedule.timing.kind === "allDay"
+    ? "весь день"
+    : schedule.timing.timeLocal;
+
+  switch (schedule.frequency) {
+    case "once":
+      return `Один раз · ${formatScheduleLocalDate(schedule.date)} · ${timing}`;
+    case "daily":
+      return `${
+        schedule.interval === 1 ? "Каждый день" : `Каждые ${schedule.interval} дн.`
+      } · ${timing}`;
+    case "weekly": {
+      const weekdays = [...schedule.weekdays]
+        .sort((left, right) => left - right)
+        .map((weekday) => WEEKDAY_LABELS[weekday - 1])
+        .join(", ");
+      return `${
+        schedule.interval === 1 ? "Каждую неделю" : `Каждые ${schedule.interval} нед.`
+      } · ${weekdays} · ${timing}`;
+    }
+    case "monthly": {
+      const day = schedule.day.type === "lastDay"
+        ? "последний день"
+        : `${schedule.day.value}-е число`;
+      return `${
+        schedule.interval === 1 ? "Каждый месяц" : `Каждые ${schedule.interval} мес.`
+      } · ${day} · ${timing}`;
+    }
+    case "yearly":
+      return `${
+        schedule.interval === 1 ? "Каждый год" : `Каждые ${schedule.interval} г.`
+      } · ${schedule.day}.${String(schedule.month).padStart(2, "0")} · ${timing}`;
+  }
 }
 
 export function resolveOccurrenceMessageState(
@@ -183,13 +248,19 @@ export function renderOccurrenceMessage(
     ? "⏸"
     : "🔔";
   const lines = [`${icon} <b>${escapeHtml(occurrence.title)}</b>`];
+  const isRecurring = options.schedule?.frequency !== undefined &&
+    options.schedule.frequency !== "once";
 
   if (state === "completed") {
     const actorName = escapeHtml(occurrence.completedByDisplayName ?? "Участник");
     const actor = occurrence.completedBy == null
       ? actorName
       : `<a href="tg://user?id=${occurrence.completedBy}">${actorName}</a>`;
-    lines.push(`${occurrence.kind === "payment" ? "Оплачено" : "Выполнено"}: ${actor}`);
+    const completionLabel = occurrence.kind === "payment" ? "Оплачено" : "Выполнено";
+    const recurringCompletionLabel = occurrence.kind === "payment"
+      ? "Этот срок оплачен"
+      : "Этот срок выполнен";
+    lines.push(`${isRecurring ? recurringCompletionLabel : completionLabel}: ${actor}`);
     if (occurrence.completedAt) {
       lines.push(
         `Когда: ${escapeHtml(formatOccurrenceInstant(occurrence.completedAt, occurrence.timezone))}`,
@@ -198,6 +269,18 @@ export function renderOccurrenceMessage(
     if (occurrence.undoUntil && occurrence.undoUntil > now) {
       lines.push(
         `Отменить можно до ${escapeHtml(formatOccurrenceInstant(occurrence.undoUntil, occurrence.timezone))}`,
+      );
+    }
+    if (isRecurring && options.nextOccurrenceAt) {
+      const nextDeadline = formatDeadlineInstant(
+        options.nextOccurrenceAt,
+        occurrence.timezone,
+        options.schedule!.timing.kind === "allDay",
+      );
+      lines.push(
+        `Следующий срок: ${escapeHtml(nextDeadline)}${
+          options.schedule!.timing.kind === "allDay" ? " · весь день" : ""
+        }`,
       );
     }
   } else if (state === "cancelled") {
@@ -217,6 +300,11 @@ export function renderOccurrenceMessage(
     lines.push(`Просрочено: ${escapeHtml(formattedDue)}`);
   } else {
     lines.push(`${occurrence.allDay ? "Срок" : "До"}: ${escapeHtml(formattedDue)}`);
+  }
+
+  if (options.schedule) {
+    const cadencePrefix = options.schedule.frequency === "once" ? "" : "🔁 ";
+    lines.push(`${cadencePrefix}Ритм задачи: ${escapeHtml(formatScheduleCadence(options.schedule))}`);
   }
 
   const amount = formatOccurrenceAmount(occurrence);

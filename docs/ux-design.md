@@ -39,6 +39,11 @@ work. Product behavior remains governed by [product-spec.md](product-spec.md).
 7. **Mobile content is never covered.** Floating and sticky controls must not
    obscure tasks or fields at 320px width, short Telegram viewports, or with the
    software keyboard open.
+8. **Series scope is explicit at the action.** A recurring occurrence names its
+   task rhythm anywhere it can be completed, and completion copy says that only
+   the current deadline is closed. The confirmation names the next deadline.
+   `Task rhythm` and `signal rhythm` are separate concepts in both labels and
+   preview copy; `daily` must never leave the user guessing which one repeats.
 
 ### Component and type scale
 
@@ -236,6 +241,11 @@ answers when the commitment is due and how that due date recurs. `Сигналы
 answers when the bot first speaks and how often it returns while the occurrence
 is still open. A deadline control must never be titled `Когда напоминать`.
 
+The form calls these concepts `Ритм задачи` and `Ритм сигналов`. The first says
+when a new deadline appears; the second says how the bot repeats while that one
+deadline remains open. For a recurring definition, the preview explicitly says
+that each deadline is completed separately.
+
 The preview names all three facts independently: the deadline, the first
 signal, and the repeat policy. For an all-day occurrence, the deadline is the
 end of the local calendar day while the zero-lead signal uses the workspace's
@@ -249,6 +259,57 @@ Before saving, the first-signal preview mirrors server scheduling: a requested
 lead time that has already passed becomes `Сразу после сохранения`, and a
 candidate inside quiet hours names the effective wake time. Preview clocks are
 live rather than frozen at page load.
+
+### Form validation and calendar controls
+
+Validation stays next to the field that needs correction. Errors use concise
+actionable copy, `aria-invalid` and an associated description; correcting the
+value clears its stale error without clearing the rest of the draft. A blocked
+save or native constraint check scrolls to and focuses the first invalid
+control in visual order. The 24-hour time control follows the same contract and
+does not silently coerce a time outside `00:00`–`23:59`.
+
+Calendar-derived defaults and applicable minimum dates use the selected
+workspace timezone (or the reminder timezone while editing), never the device
+timezone. A new one-off reminder defaults to tomorrow and cannot be dated
+before today in that timezone. Recurring defaults for the start date, weekday,
+month, and day are derived from today in the same timezone. This contract also
+applies around midnight, where the browser and workspace may be on different
+calendar dates.
+
+Date fields always show and accept `ДД.ММ.ГГГГ`, for example `30.08.2026`,
+regardless of the browser or Telegram WebView locale. The value remains an ISO
+calendar date at the API boundary. A 48×48 calendar affordance inside the field
+opens the platform's native picker and preserves applicable minimum and maximum
+dates; browser-specific numeric ordering is never the visible representation.
+
+Recurring interval inputs show the unit beside the number, accept integers
+from 1, and expose the same frequency-specific upper bounds as the domain
+schema:
+
+| Frequency | Unit | Allowed interval |
+| --- | --- | --- |
+| Daily | days | 1–365 |
+| Weekly | weeks | 1–52 |
+| Monthly | months | 1–120 |
+| Yearly | years | 1–20 |
+
+Invalid values are rejected rather than rounded or silently clamped. Monthly
+day 29–31 keeps the documented last-day overflow behavior. A yearly date must
+exist in its selected month: for example, 31 February is rejected inline;
+29 February remains a valid annual rule.
+
+Frequency choices and other single-choice radio/tab groups use one roving tab
+stop with arrow-key navigation. The weekday selector preserves native
+multi-select button semantics. Every weekday target is at least 44×44px with
+12px text; at 320px the seven targets wrap without horizontal overflow.
+
+Quiet-hours copy describes the active outcome instead of merely naming the
+setting. With night delivery off, it says that signals inside the workspace
+interval move to the interval end; with night delivery on, it says they will
+also arrive during that interval. If the workspace has quiet hours disabled
+(equal start and end), the form says so, disables the night-delivery checkbox,
+and keeps it unchecked.
 
 ### Recommended control order
 
@@ -291,6 +352,14 @@ The detail screen prioritizes:
 
 Destructive or administrative actions stay out of the primary thumb zone.
 
+Every active recurring occurrence shows the human recurrence rule beside its
+completion action. Supporting copy says that the action closes this deadline,
+not the whole series. After completion, the undo confirmation says `Этот срок
+выполнен` (or the payment equivalent) and names the next concrete local
+deadline. A one-off occurrence keeps the shorter completion copy. Completing a
+deadline must never silently archive its series; pause and archive remain
+separate series-management actions.
+
 For an active occurrence, the exact local date and time of `Следующий сигнал`
 is the primary value; `Через …` is supporting copy. A signal whose scheduled
 instant has passed says `Ожидает отправки`, not `Через …`. The same exact value
@@ -327,6 +396,7 @@ Initial group message:
 🔔 Submit meter readings
 
 Complete by today, 18:00
+Task rhythm: every month · on the 25th · 18:00
 Responsible: @sergey
 
 Next ping in 6 hours
@@ -360,9 +430,15 @@ Completed state:
 ```text
 ✅ Submit meter readings
 
-Completed by Sergey · today, 14:32
+This deadline was completed by Sergey · today, 14:32
+Next deadline: 25 September, 18:00
 [ Undo completion ]
 ```
+
+For recurring messages, both the text and the completion control use current-
+deadline scope. One-off messages omit series language and keep the concise
+action. The exact next deadline is included only when the series has another
+occurrence.
 
 Administrative completion names both people:
 

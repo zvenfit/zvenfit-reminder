@@ -5,14 +5,19 @@ import {
   WorkspaceMembersRepository,
   WorkspacesRepository,
   canActOnOccurrence,
+  getNextScheduledDeadline,
   telegramApiRequest,
   type AppConfig,
   type ReminderOccurrence,
+  type ScheduleSpec,
   type SnoozeResolution,
   type SnoozeSelection,
 } from "@zvenfit-reminder/shared";
 import type { InlineKeyboard } from "grammy";
-import { renderOccurrenceAction } from "./occurrence-message.js";
+import {
+  renderOccurrenceAction,
+  type OccurrencePresentationContext,
+} from "./occurrence-message.js";
 
 const TELEGRAM_API_TIMEOUT_MS = 10_000;
 
@@ -45,6 +50,7 @@ export interface OccurrenceActionResult {
   action: OccurrenceAction;
   occurrence: ReminderOccurrence;
   snooze?: SnoozeResolution;
+  presentation?: OccurrencePresentationContext;
 }
 
 export class OccurrenceActionNotFoundError extends Error {
@@ -179,7 +185,32 @@ async function authorizeOccurrenceActionWithDependencies(
     throw new OccurrenceActionForbiddenError();
   }
 
-  return { workspace, occurrence };
+  return { workspace, occurrence, reminder };
+}
+
+function buildOccurrencePresentation(
+  schedule: ScheduleSpec | undefined,
+  timezone: string | undefined,
+  defaultAllDayReminderTime: string | undefined,
+  occurrence: ReminderOccurrence,
+  action: OccurrenceAction,
+  now: Date,
+): OccurrencePresentationContext | undefined {
+  if (!schedule) {
+    return undefined;
+  }
+  if (action !== "done" || schedule.frequency === "once" || !timezone) {
+    return { schedule };
+  }
+
+  const reference = new Date(Math.max(now.getTime(), occurrence.dueAt.getTime()));
+  const nextDeadline = getNextScheduledDeadline(schedule, timezone, reference, {
+    ...(defaultAllDayReminderTime ? { defaultAllDayReminderTime } : {}),
+  });
+  return {
+    schedule,
+    nextOccurrenceAt: nextDeadline?.dueAt ?? null,
+  };
 }
 
 export async function executeOccurrenceAction(
@@ -189,7 +220,7 @@ export async function executeOccurrenceAction(
 ): Promise<OccurrenceActionResult> {
   const dependencies = providedDependencies ?? createDependencies(config);
   const now = input.now ?? new Date();
-  const { workspace, occurrence } = await authorizeOccurrenceActionWithDependencies(
+  const { workspace, occurrence, reminder } = await authorizeOccurrenceActionWithDependencies(
     input,
     dependencies,
   );
@@ -224,10 +255,19 @@ export async function executeOccurrenceAction(
   if (!updated) {
     throw new OccurrenceActionNotFoundError();
   }
+  const presentation = buildOccurrencePresentation(
+    reminder.schedule,
+    reminder.timezone,
+    workspace.defaultAllDayReminderTime,
+    updated,
+    input.action,
+    now,
+  );
   const result: OccurrenceActionResult = {
     action: input.action,
     occurrence: updated,
     ...(snooze ? { snooze } : {}),
+    ...(presentation ? { presentation } : {}),
   };
   const claim = await dependencies.occurrences.beginMessageSync(
     workspace.workspaceId,
@@ -262,7 +302,7 @@ export async function executeOccurrenceAction(
         dependencies.telegram
       ) {
         const rendered = renderOccurrenceAction(
-          { action: input.action, occurrence: current },
+          { action: input.action, occurrence: current, ...(presentation ? { presentation } : {}) },
           {
             id: input.actorUserId,
             displayName: input.actorDisplayName ?? "Участник",

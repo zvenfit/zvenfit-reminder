@@ -13,6 +13,7 @@ import {
 import { describeTimezone } from "./timezones";
 import { Time24Field } from "./time-24-field";
 import { UiIcon } from "./ui-icon";
+import { CalendarDateField } from "./calendar-date-field";
 
 export function SnoozePicker({
   occurrence,
@@ -211,18 +212,19 @@ export function SnoozePicker({
               onConfirm({ type: "custom", localDate, localTime });
             }}
           >
-            <label className="field">
-              <span>Дата</span>
-              <input
-                type="date"
+            <div className="field">
+              <label htmlFor="snooze-custom-date">Дата</label>
+              <CalendarDateField
+                id="snooze-custom-date"
+                label="Дата"
                 required
                 min={initialDraft.minDate}
                 max={initialDraft.maxDate}
                 disabled={pending}
                 value={localDate}
-                onChange={(event) => setLocalDate(event.target.value)}
+                onChange={setLocalDate}
               />
-            </label>
+            </div>
             <label className="field">
               <span>Время</span>
               <Time24Field

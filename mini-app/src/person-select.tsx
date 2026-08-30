@@ -21,8 +21,11 @@ export function MemberAvatar({ member, size = "regular" }: {
 
   useEffect(() => {
     let active = true;
+    setSource(null);
     void getMemberAvatar(member.userId).then((avatar) => {
-      if (active && isSafeAvatarDataUrl(avatar)) setSource(avatar);
+      if (active) setSource(isSafeAvatarDataUrl(avatar) ? avatar : null);
+    }).catch(() => {
+      if (active) setSource(null);
     });
     return () => {
       active = false;
@@ -55,12 +58,18 @@ export function PersonSelect({
   value,
   actorId,
   includeAnyone,
+  id,
+  invalid = false,
+  describedBy,
   onChange,
 }: {
   members: WorkspaceMember[];
   value: string;
   actorId?: number;
   includeAnyone: boolean;
+  id?: string;
+  invalid?: boolean;
+  describedBy?: string;
   onChange(value: string): void;
 }) {
   const [open, setOpen] = useState(false);
@@ -98,6 +107,10 @@ export function PersonSelect({
   }
 
   function handleOptionKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (event.key === "Tab") {
+      setOpen(false);
+      return;
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       setOpen(false);
@@ -126,10 +139,13 @@ export function PersonSelect({
       onKeyDown={handleOptionKeyDown}
     >
       <button
+        id={id}
         className="person-select__trigger"
         ref={triggerRef}
         type="button"
         aria-label="Ответственный"
+        aria-invalid={invalid || undefined}
+        aria-describedby={describedBy}
         aria-haspopup="listbox"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
@@ -163,6 +179,7 @@ export function PersonSelect({
               type="button"
               role="option"
               aria-selected={selectedAnyone}
+              tabIndex={selectedAnyone || !selectedMember ? 0 : -1}
               onClick={() => choose("anyone")}
             >
               <AnyoneAvatar />
@@ -178,6 +195,7 @@ export function PersonSelect({
                 type="button"
                 role="option"
                 aria-selected={selected}
+                tabIndex={selected || (!selectedAnyone && !selectedMember && member === members[0]) ? 0 : -1}
                 key={member.userId}
                 onClick={() => choose(String(member.userId))}
               >

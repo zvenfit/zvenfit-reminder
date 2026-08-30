@@ -5,6 +5,7 @@ import type {
   NotificationDelivery,
   ReminderOccurrence,
   ReservedDelivery,
+  ScheduleSpec,
 } from "@zvenfit-reminder/shared";
 import {
   createTelegramClient,
@@ -24,6 +25,14 @@ const config: AppConfig = {
   webhookSecret: "test-secret",
   defaultTimezone: "Europe/Moscow",
   miniAppUrl: "",
+};
+
+const dailySchedule: ScheduleSpec = {
+  version: 1,
+  frequency: "daily",
+  interval: 1,
+  startDate: "2026-08-13",
+  timing: { kind: "timed", timeLocal: "15:00" },
 };
 
 function occurrence(): ReminderOccurrence {
@@ -215,8 +224,10 @@ describe("runDispatcher", () => {
       latestMessageId: 55,
     };
     const editActive = vi.fn().mockResolvedValue(undefined);
+    const getById = vi.fn().mockResolvedValue({ schedule: dailySchedule });
     const dependencies = {
       workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      reminders: { getById },
       actions: {
         listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
         finalizeCompletion: vi.fn(),
@@ -255,6 +266,15 @@ describe("runDispatcher", () => {
     expect(editActive.mock.calls[0]?.[3]).toContain("Срок не изменился:");
     expect(editActive.mock.calls[0]?.[3]).not.toContain("Просрочено:");
     expect(editActive.mock.calls[0]?.[3]).toContain("17:00");
+    expect(editActive.mock.calls[0]?.[3]).toContain("Каждый день");
+    expect(editActive.mock.calls[0]?.[4]).toEqual(expect.objectContaining({
+      inline_keyboard: expect.arrayContaining([
+        expect.arrayContaining([
+          expect.objectContaining({ text: "✅ Выполнил этот срок" }),
+        ]),
+      ]),
+    }));
+    expect(getById).toHaveBeenCalledWith("workspace-a", "reminder-a");
   });
 
   it("retires an old audience without rendering private content into it", async () => {
@@ -322,8 +342,10 @@ describe("runDispatcher", () => {
       undoUntil: null,
     };
     const editFinal = vi.fn().mockResolvedValue(undefined);
+    const getById = vi.fn().mockResolvedValue({ schedule: dailySchedule });
     const dependencies = {
       workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      reminders: { getById },
       actions: {
         listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([{
           workspaceId: "workspace-a",
@@ -335,8 +357,8 @@ describe("runDispatcher", () => {
           occurrenceId: "occurrence-a",
           reminderId: "reminder-a",
           archivedReminder: false,
-          nextDueAt: null,
-          nextReminderStartAt: null,
+          nextDueAt: new Date("2026-08-14T12:00:00.000Z"),
+          nextReminderStartAt: new Date("2026-08-14T12:00:00.000Z"),
           occurrence: completed,
         }),
         markCompletionMessageFinalized: vi.fn().mockResolvedValue(undefined),
@@ -363,6 +385,9 @@ describe("runDispatcher", () => {
     expect(editFinal.mock.calls[0]?.[3]).toContain("Когда:");
     expect(editFinal.mock.calls[0]?.[3]).not.toContain("Просрочено:");
     expect(editFinal.mock.calls[0]?.[3]).not.toContain("🔴");
+    expect(editFinal.mock.calls[0]?.[3]).toContain("Каждый день");
+    expect(editFinal.mock.calls[0]?.[3]).toContain("Следующий срок:");
+    expect(editFinal.mock.calls[0]?.[3]).toContain("14 августа");
     expect(dependencies.actions.markCompletionMessageFinalized).toHaveBeenCalledWith(
       "workspace-a",
       "occurrence-a",
@@ -445,6 +470,7 @@ describe("runDispatcher", () => {
       telegramMessageId: 777,
     };
     const sendTelegram = vi.fn().mockResolvedValue(777);
+    const getById = vi.fn().mockResolvedValue({ schedule: dailySchedule });
     const dependencies = {
       workspaces: {
         listActive: vi.fn().mockResolvedValue([{
@@ -452,6 +478,7 @@ describe("runDispatcher", () => {
           status: "active",
         }]),
       },
+      reminders: { getById },
       actions: {
         listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
         finalizeCompletion: vi.fn(),
@@ -511,10 +538,12 @@ describe("runDispatcher", () => {
     expect(dependencies.deliveries.beginSend).toHaveBeenCalledBefore(sendTelegram);
     expect(sendTelegram.mock.calls[0]?.[2]).toContain("Срок наступил:");
     expect(sendTelegram.mock.calls[0]?.[2]).not.toContain("Просрочено:");
+    expect(sendTelegram.mock.calls[0]?.[2]).toContain("Каждый день");
+    expect(getById).toHaveBeenCalledWith("workspace-a", "reminder-a");
     expect(sendTelegram.mock.calls[0]?.[3]).toEqual({
       inline_keyboard: [
         [
-          { text: "✅ Выполнил", callback_data: "od:occurrence-a" },
+          { text: "✅ Выполнил этот срок", callback_data: "od:occurrence-a" },
           { text: "⏰ +1 час", callback_data: "os:occurrence-a" },
         ],
         [
@@ -696,7 +725,7 @@ describe("runDispatcher", () => {
     expect(stats.errorCauses).toContain("delivery_begin_send_failed:ydb_400080:error");
   });
 
-  it("renders watcher mentions for escalation deliveries", async () => {
+  it("renders watcher mentions even when recurrence lookup fails", async () => {
     const item = occurrence();
     const reservation = {
       ...reservedDelivery(item),
@@ -704,8 +733,10 @@ describe("runDispatcher", () => {
       delivery: { ...reservedDelivery(item).delivery, deliveryType: "escalation" as const },
     };
     const send = vi.fn().mockResolvedValue(777);
+    const getById = vi.fn().mockRejectedValue(new Error("temporary reminder read failure"));
     const dependencies = {
       workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      reminders: { getById },
       actions: {
         listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]),
         finalizeCompletion: vi.fn(),
@@ -727,10 +758,17 @@ describe("runDispatcher", () => {
       telegram: { send, delete: vi.fn().mockResolvedValue(undefined), editFinal: vi.fn() },
     } as unknown as DispatcherDependencies;
 
-    await runDispatcher(config, new Date("2026-08-27T12:00:00.000Z"), dependencies);
+    const stats = await runDispatcher(
+      config,
+      new Date("2026-08-27T12:00:00.000Z"),
+      dependencies,
+    );
 
     expect(send.mock.calls[0]?.[2]).toContain("Нужна помощь наблюдателей");
     expect(send.mock.calls[0]?.[2]).toContain("tg://user?id=10");
+    expect(getById).toHaveBeenCalledWith("workspace-a", "reminder-a");
+    expect(stats.sent).toBe(1);
+    expect(stats.errors).toEqual([]);
   });
 
   it("compacts the previous message when Telegram cannot delete it", async () => {

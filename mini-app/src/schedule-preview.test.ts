@@ -46,6 +46,32 @@ describe("upcomingScheduleDates", () => {
       "2026-08-19",
     ]);
   });
+
+  it("keeps a far-future one-off deadline in the preview", () => {
+    expect(upcomingScheduleDates({
+      version: 1,
+      frequency: "once",
+      date: "2099-08-15",
+      timing: { kind: "timed", timeLocal: "09:00" },
+    }, "Europe/Moscow", 1, reference)).toEqual(["2099-08-15"]);
+  });
+
+  it("covers the full valid interval for sparse yearly schedules", () => {
+    expect(upcomingScheduleDates({
+      version: 1,
+      frequency: "yearly",
+      startDate: "2026-01-01",
+      timing: { kind: "timed", timeLocal: "09:00" },
+      interval: 20,
+      month: 1,
+      day: 1,
+      overflow: "lastDay",
+    }, "Europe/Moscow", 3, reference)).toEqual([
+      "2046-01-01",
+      "2066-01-01",
+      "2086-01-01",
+    ]);
+  });
 });
 
 describe("formatScheduleDate", () => {

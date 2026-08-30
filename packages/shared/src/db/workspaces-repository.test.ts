@@ -6,6 +6,7 @@ import {
   WorkspaceChatAlreadyRegisteredError,
   WorkspaceOwnershipClaimForbiddenError,
   WorkspacesRepository,
+  workspaceSettingsSchema,
 } from "./workspaces-repository.js";
 
 function resultSet(rows: Array<Record<string, string | number | boolean | null>>) {
@@ -172,20 +173,16 @@ describe("WorkspacesRepository", () => {
     expect(write?.[0]).toContain("UPDATE workspaces SET");
   });
 
-  it("rejects an ambiguous all-day quiet period before opening a transaction", async () => {
-    const { repository, session } = repositoryDouble();
-
-    await expect(repository.updateSettings(
-      "workspace-a",
-      {
+  it("allows equal quiet-hour boundaries to disable the quiet period", () => {
+    expect(workspaceSettingsSchema.parse({
         timezone: "Europe/Moscow",
         quietHoursStart: "08:00",
         quietHoursEnd: "08:00",
         defaultAllDayReminderTime: "09:00",
-      },
-      10,
-    )).rejects.toThrow("Quiet hours start and end must be different");
-    expect(session.beginTransaction).not.toHaveBeenCalled();
+      })).toMatchObject({
+        quietHoursStart: "08:00",
+        quietHoursEnd: "08:00",
+      });
   });
 
   it("transfers ownership and changes both member roles atomically", async () => {
