@@ -260,6 +260,12 @@ lead time that has already passed becomes `Сразу после сохране�
 candidate inside quiet hours names the effective wake time. Preview clocks are
 live rather than frozen at page load.
 
+The first-signal control accepts a numeric amount and an explicit `часов` or
+`дней` unit instead of limiting the user to presets. Zero remains the
+at-deadline choice and the maximum is 365 days. Payment details pair the amount
+with an explicit `₽ · RUB` or `$ · USD` currency choice; all later amount labels
+format the stored ISO currency code.
+
 ### Form validation and calendar controls
 
 Validation stays next to the field that needs correction. Errors use concise

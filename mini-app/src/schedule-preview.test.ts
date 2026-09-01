@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatScheduleDate, upcomingScheduleDates } from "./schedule-preview";
+import {
+  earliestScheduleDate,
+  formatScheduleDate,
+  upcomingScheduleDates,
+} from "./schedule-preview";
 
 const reference = new Date("2026-08-17T09:00:00.000Z");
 
@@ -81,5 +85,18 @@ describe("formatScheduleDate", () => {
     expect(label).toContain("2099");
     expect(label).not.toContain("г.");
     expect(label).not.toContain(",");
+  });
+});
+
+describe("earliestScheduleDate", () => {
+  it("finds the nearest date across series instead of trusting API order", () => {
+    expect(earliestScheduleDate([
+      ["2026-09-20", "2026-10-20"],
+      ["2026-09-05", "2026-10-05"],
+    ])).toBe("2026-09-05");
+  });
+
+  it("returns null when no series has an upcoming date", () => {
+    expect(earliestScheduleDate([[], []])).toBeNull();
   });
 });

@@ -515,6 +515,37 @@ test("isolates data when switching between groups", async ({ page }) => {
     .toBe("home");
 });
 
+test("shows the nearest plan date across series regardless of API order", async ({ page }) => {
+  const state = createState();
+  state.reminders.team = [
+    reminder("team", "later", "Поздняя серия", {
+      schedule: {
+        version: 1,
+        frequency: "monthly",
+        startDate: "2026-01-01",
+        interval: 1,
+        timing: { kind: "timed", timeLocal: "18:00" },
+        day: { type: "dayOfMonth", value: 20, overflow: "lastDay" },
+      },
+    }),
+    reminder("team", "nearer", "Ближняя серия", {
+      schedule: {
+        version: 1,
+        frequency: "monthly",
+        startDate: "2026-01-01",
+        interval: 1,
+        timing: { kind: "timed", timeLocal: "18:00" },
+        day: { type: "dayOfMonth", value: 5, overflow: "lastDay" },
+      },
+    }),
+  ];
+  await page.clock.install({ time: new Date("2026-09-01T09:00:00.000Z") });
+  await openApp(page, state);
+
+  await expect(page.getByText(/Ближайшее · 5 сент/)).toBeVisible();
+  await expect(page.getByText(/Ближайшее · 20 сент/)).toHaveCount(0);
+});
+
 test("shows a Telegram launch recovery screen without calling the API", async ({ page }) => {
   let apiRequests = 0;
   await page.route("https://telegram.org/js/telegram-web-app.js*", (route) =>
@@ -612,6 +643,41 @@ test("keeps revised supporting copy readable and primary actions AA-contrasted",
       (Math.min(foreground, background) + 0.05);
   });
   expect(lightSecondaryContrast).toBeGreaterThanOrEqual(4.5);
+});
+
+test("keeps custom lead and currency controls usable at supported mobile sizes", async ({ page }) => {
+  const state = createState();
+  await installTelegramAndApi(page, state);
+
+  for (const scenario of [
+    { width: 320, theme: "light" as const },
+    { width: 320, theme: "dark" as const },
+    { width: 412, theme: "light" as const },
+    { width: 412, theme: "dark" as const },
+  ]) {
+    await page.setViewportSize({ width: scenario.width, height: 700 });
+    await page.emulateMedia({ colorScheme: scenario.theme, reducedMotion: "reduce" });
+    await page.goto("/");
+    await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveValue("team");
+    await page.getByRole("button", { name: "Новое напоминание" }).click();
+    await page.getByRole("radio", { name: /Платёж/ }).click();
+    await page.getByText("Дополнительные настройки", { exact: true }).click();
+
+    const controls = [
+      page.getByRole("spinbutton", { name: "Сумма" }),
+      page.getByRole("combobox", { name: "Валюта" }),
+      page.getByRole("spinbutton", { name: "Количество до срока" }),
+      page.getByRole("combobox", { name: "Единица первого сигнала" }),
+    ];
+    for (const control of controls) {
+      await control.scrollIntoViewIfNeeded();
+      const bounds = await control.boundingBox();
+      expect(bounds?.width).toBeGreaterThanOrEqual(44);
+      expect(bounds?.height).toBeGreaterThanOrEqual(44);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+      .toBe(true);
+  }
 });
 
 test("shows the dashboard structure while the initial workspace is loading", async ({ page }) => {
@@ -1176,13 +1242,14 @@ test("separates the deadline from notification policy in the form preview", asyn
     )?.id;
   })).toBe("reminder-date-native");
   await page.getByLabel("Дата", { exact: true }).fill("15.08.2099");
-  await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("1440");
+  await page.getByRole("combobox", { name: "Единица первого сигнала" }).selectOption("days");
+  await page.getByRole("spinbutton", { name: "Количество до срока" }).fill("5");
   await page.getByRole("combobox", { name: "Повтор сигнала", exact: true }).selectOption("180");
 
   const preview = page.getByLabel("Предпросмотр напоминания");
   await expect(preview).toContainText("Ритм задачи");
   await expect(preview).toContainText("Это один отдельный срок");
-  await expect(preview).toContainText("За 1 день до срока");
+  await expect(preview).toContainText("За 5 дн до срока");
   await expect(preview).toContainText("Ритм сигналов");
   await expect(preview).toContainText("Каждые 3 часа — до отметки «Выполнено» для этого срока");
   await expect(preview).toContainText("22:00–08:00");
@@ -1196,7 +1263,7 @@ test("separates the deadline from notification policy in the form preview", asyn
     .toMatchObject({
       body: {
         schedule: { frequency: "once", date: "2099-08-15" },
-        notificationPolicy: { leadMinutes: 1_440, repeatIntervalMinutes: 180 },
+        notificationPolicy: { leadMinutes: 7_200, repeatIntervalMinutes: 180 },
       },
     });
 });
@@ -1254,7 +1321,7 @@ test("shows an immediate effective first signal when the selected lead is alread
 
   await page.getByLabel("Дата", { exact: true }).fill("26.08.2026");
   await page.getByRole("textbox", { name: "Время" }).fill("14:00");
-  await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("60");
+  await page.getByRole("spinbutton", { name: "Количество до срока" }).fill("1");
 
   const preview = page.getByLabel("Предпросмотр напоминания");
   await expect(preview).toContainText("Сразу после сохранения");
@@ -1271,7 +1338,10 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
   await expect(page.getByRole("textbox", { name: "Что нужно оплатить" })).toBeVisible();
   await page.getByText("Дополнительные настройки", { exact: true }).click();
   const amount = page.getByRole("spinbutton", { name: /Сумма/ });
+  const currency = page.getByRole("combobox", { name: "Валюта" });
   await expect(amount).toHaveValue("");
+  await expect(currency).toHaveValue("RUB");
+  await expect(currency.getByRole("option", { name: /\$ · USD/ })).toHaveCount(1);
   const amountStyle = await amount.evaluate((element) => {
     const style = getComputedStyle(element);
     return {
@@ -1295,6 +1365,7 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
 
   await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Домашний интернет");
   await amount.fill("890.50");
+  await currency.selectOption("USD");
   await page.getByRole("textbox", { name: /Ссылка на оплату/ }).fill("https://example.com/pay");
   await page.getByRole("button", { name: "Создать платёж" }).click();
 
@@ -1304,7 +1375,7 @@ test("creates a payment with payment-specific fields and semantics", async ({ pa
       body: {
         kind: "payment",
         amountMinor: 89_050,
-        currency: "RUB",
+        currency: "USD",
         actionUrl: "https://example.com/pay",
         schedule: { frequency: "once" },
       },
@@ -1389,7 +1460,8 @@ test("supports arrow-key navigation in tabs, radio groups, and the participant s
   const selector = page.getByRole("button", { name: "Ответственный" });
   await selector.focus();
   await page.keyboard.press("ArrowDown");
-  await expect(page.getByRole("option").first()).toBeFocused();
+  await expect(page.getByRole("listbox", { name: "Участники группы" })
+    .getByRole("option").first()).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(selector).toBeFocused();
 });
@@ -1678,18 +1750,22 @@ test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
   await page.getByRole("button", { name: "Изменить" }).click();
   const occurrenceTitle = page.getByRole("textbox", { name: "Что нужно оплатить" });
   await expect(occurrenceTitle).toHaveValue("Разовый платёж за счётчики");
-  await expect(page.getByRole("combobox", { name: "Первый сигнал", exact: true }))
-    .toHaveValue("1440");
+  await expect(page.getByRole("spinbutton", { name: "Количество до срока" }))
+    .toHaveValue("1");
+  await expect(page.getByRole("combobox", { name: "Единица первого сигнала" }))
+    .toHaveValue("days");
   await page.getByText("Добавить наблюдателей", { exact: true }).click();
   await expect(page.getByRole("checkbox", { name: /Я/ })).toBeChecked();
   await occurrenceTitle.fill("Черновик только этого платежа");
-  await page.getByRole("combobox", { name: "Первый сигнал", exact: true }).selectOption("10080");
+  await page.getByRole("spinbutton", { name: "Количество до срока" }).fill("7");
 
   await page.getByRole("radio", { name: /Этот и следующие/ }).click();
   await expect(page.getByRole("textbox", { name: "Что нужно сделать" }))
     .toHaveValue("Передать показания");
-  await expect(page.getByRole("combobox", { name: "Первый сигнал", exact: true }))
+  await expect(page.getByRole("spinbutton", { name: "Количество до срока" }))
     .toHaveValue("0");
+  await expect(page.getByRole("combobox", { name: "Единица первого сигнала" }))
+    .toHaveValue("hours");
   await expect(page.getByRole("checkbox", { name: /Анна/ })).toBeChecked();
   await expect(page.getByRole("checkbox", { name: /Я/ })).not.toBeChecked();
   await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Серия показаний без утечки");
@@ -1697,8 +1773,10 @@ test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
   await page.getByRole("radio", { name: /Только этот срок/ }).click();
   await expect(page.getByRole("textbox", { name: "Что нужно оплатить" }))
     .toHaveValue("Черновик только этого платежа");
-  await expect(page.getByRole("combobox", { name: "Первый сигнал", exact: true }))
-    .toHaveValue("10080");
+  await expect(page.getByRole("spinbutton", { name: "Количество до срока" }))
+    .toHaveValue("7");
+  await expect(page.getByRole("combobox", { name: "Единица первого сигнала" }))
+    .toHaveValue("days");
 
   await page.getByRole("radio", { name: /Этот и следующие/ }).click();
   await page.getByRole("button", { name: "Сохранить серию" }).click();
@@ -1741,7 +1819,8 @@ test("requires a concrete lead before moving a legacy occurrence deadline", asyn
   expect(state.requests.some((request) =>
     request.method === "PATCH" && request.path === "/api/occurrences/internet")).toBe(false);
 
-  await lead.selectOption("60");
+  await lead.selectOption("hours");
+  await page.getByRole("spinbutton", { name: "Количество до срока" }).fill("1");
   await page.getByRole("button", { name: "Сохранить этот срок" }).click();
   expect(state.requests.find((request) =>
     request.method === "PATCH" && request.path === "/api/occurrences/internet"))
@@ -1927,6 +2006,8 @@ test("edits the current and future definition of a reminder series", async ({ pa
   await row.getByRole("button", { name: /Передать показания/ }).click();
   await page.getByRole("button", { name: "Изменить" }).click();
   await expect(page.getByRole("heading", { name: "Что изменить?" })).toBeVisible();
+  await page.getByText("Дополнительные настройки", { exact: true }).click();
+  await expect(page.getByRole("combobox", { name: "Валюта" })).toHaveValue("USD");
   await page.getByRole("textbox", { name: "Что нужно оплатить" }).fill("Передать новые показания");
   await page.getByRole("button", { name: "Сохранить серию" }).click();
 

@@ -153,6 +153,18 @@ export function upcomingScheduleDates(
   return result;
 }
 
+export function earliestScheduleDate(
+  dateGroups: Iterable<readonly string[]>,
+): string | null {
+  let earliest: string | null = null;
+  for (const dates of dateGroups) {
+    for (const date of dates) {
+      if (earliest === null || date < earliest) earliest = date;
+    }
+  }
+  return earliest;
+}
+
 export function formatScheduleDate(value: string, compact = false): string {
   const parts = parseLocalDate(value);
   const currentYear = new Date().getFullYear();

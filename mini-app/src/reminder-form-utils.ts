@@ -2,11 +2,24 @@ import type { ScheduleSpec } from "./api";
 
 export type ReminderFrequency = ScheduleSpec["frequency"];
 export type RecurringFrequency = Exclude<ReminderFrequency, "once">;
+export type LeadTimeUnit = "hours" | "days";
+
+export const MAX_LEAD_MINUTES = 365 * 24 * 60;
+
+const LEAD_UNIT_MINUTES: Readonly<Record<LeadTimeUnit, number>> = {
+  hours: 60,
+  days: 24 * 60,
+};
 
 export interface IntervalMetadata {
   min: 1;
   max: number;
   unitLabel: "дней" | "недель" | "месяцев" | "лет";
+}
+
+export interface LeadTimeDraft {
+  amount: string;
+  unit: LeadTimeUnit;
 }
 
 const INTERVAL_METADATA: Readonly<Record<RecurringFrequency, IntervalMetadata>> = {
@@ -99,4 +112,34 @@ export function intervalMetadataFor(
   frequency: ReminderFrequency,
 ): IntervalMetadata | null {
   return frequency === "once" ? null : INTERVAL_METADATA[frequency];
+}
+
+export function leadTimeDraftFromMinutes(minutes: number): LeadTimeDraft {
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > MAX_LEAD_MINUTES) {
+    throw new RangeError(`minutes must be an integer from 0 to ${MAX_LEAD_MINUTES}`);
+  }
+
+  const unit: LeadTimeUnit = minutes > 0 && minutes % LEAD_UNIT_MINUTES.days === 0
+    ? "days"
+    : "hours";
+  return {
+    amount: String(minutes / LEAD_UNIT_MINUTES[unit]),
+    unit,
+  };
+}
+
+export function leadMinutesFromDraft(
+  amount: string,
+  unit: LeadTimeUnit,
+): number | null {
+  if (!amount.trim()) return null;
+  const minutes = Number(amount) * LEAD_UNIT_MINUTES[unit];
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > MAX_LEAD_MINUTES) {
+    return null;
+  }
+  return minutes;
+}
+
+export function leadTimeMaximum(unit: LeadTimeUnit): number {
+  return MAX_LEAD_MINUTES / LEAD_UNIT_MINUTES[unit];
 }

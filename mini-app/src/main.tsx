@@ -42,7 +42,11 @@ import {
   type WorkspaceMember,
   type Workspace,
 } from "./api";
-import { formatScheduleDate, upcomingScheduleDates } from "./schedule-preview";
+import {
+  earliestScheduleDate,
+  formatScheduleDate,
+  upcomingScheduleDates,
+} from "./schedule-preview";
 import { SnoozePicker } from "./snooze-picker";
 import { formatSnoozeInstant } from "./snooze-options";
 import {
@@ -62,8 +66,12 @@ import { isLocalTime24, Time24Field } from "./time-24-field";
 import {
   intervalMetadataFor,
   isoWeekdayInTimezone,
+  leadMinutesFromDraft,
+  leadTimeDraftFromMinutes,
+  leadTimeMaximum,
   localCalendarDate,
   maxValidYearlyDay,
+  type LeadTimeUnit,
 } from "./reminder-form-utils";
 import { CalendarDateField } from "./calendar-date-field";
 import { MemberAvatar, PersonSelect } from "./person-select";
@@ -91,13 +99,17 @@ function resizeDetailsTextarea(textarea: HTMLTextAreaElement | null): void {
 type EditScope = "occurrence" | "series";
 
 const PRESERVE_LEGACY_LEAD = "preserve";
+const PAYMENT_CURRENCIES = [
+  { code: "RUB", label: "₽ · RUB" },
+  { code: "USD", label: "$ · USD" },
+] as const;
 
 interface ReminderFormState {
   kind: ReminderKind;
   title: string;
   description: string;
   actionUrl: string;
-  amountRub: string;
+  amountMajor: string;
   currency: string;
   visibility: "group" | "private";
   assignmentMode: "person" | "anyone";
@@ -114,7 +126,8 @@ interface ReminderFormState {
   monthlyLastDay: boolean;
   yearlyMonth: string;
   yearlyDay: string;
-  leadMinutes: string;
+  leadAmount: string;
+  leadUnit: LeadTimeUnit;
   repeatIntervalMinutes: string;
   ignoreQuietHours: boolean;
 }
@@ -249,7 +262,7 @@ function emptyForm(
     title: "",
     description: "",
     actionUrl: "",
-    amountRub: "",
+    amountMajor: "",
     currency: "RUB",
     visibility: "group",
     assignmentMode: "person",
@@ -266,7 +279,8 @@ function emptyForm(
     monthlyLastDay: false,
     yearlyMonth: String(Number(month)),
     yearlyDay: String(Number(day)),
-    leadMinutes: "0",
+    leadAmount: "0",
+    leadUnit: "hours",
     repeatIntervalMinutes: "360",
     ignoreQuietHours: false,
   };
@@ -281,7 +295,7 @@ function reminderForm(reminder: Reminder): ReminderFormState {
   form.title = reminder.title;
   form.description = reminder.description ?? "";
   form.actionUrl = reminder.actionUrl ?? "";
-  form.amountRub = reminder.amountMinor == null ? "" : String(reminder.amountMinor / 100);
+  form.amountMajor = reminder.amountMinor == null ? "" : String(reminder.amountMinor / 100);
   form.currency = reminder.currency ?? "RUB";
   form.visibility = reminder.visibility;
   form.assignmentMode = reminder.assignment.mode;
@@ -313,7 +327,9 @@ function reminderForm(reminder: Reminder): ReminderFormState {
     form.yearlyMonth = String(reminder.schedule.month);
     form.yearlyDay = String(reminder.schedule.day);
   }
-  form.leadMinutes = String(reminder.notificationPolicy.leadMinutes);
+  const leadDraft = leadTimeDraftFromMinutes(reminder.notificationPolicy.leadMinutes);
+  form.leadAmount = leadDraft.amount;
+  form.leadUnit = leadDraft.unit;
   form.repeatIntervalMinutes = String(reminder.notificationPolicy.repeatIntervalMinutes);
   form.ignoreQuietHours = reminder.notificationPolicy.ignoreQuietHours;
   return form;
@@ -966,8 +982,12 @@ function App() {
 
   const planDates = useMemo(() => new Map(visibleReminders.map((reminder) => [
     reminder.reminderId,
-    upcomingScheduleDates(reminder.schedule, reminder.timezone, 3),
-  ])), [visibleReminders]);
+    upcomingScheduleDates(reminder.schedule, reminder.timezone, 3, clockNow),
+  ])), [clockNow, visibleReminders]);
+  const nearestPlanDate = useMemo(
+    () => earliestScheduleDate(planDates.values()),
+    [planDates],
+  );
 
   function clearError() {
     setError(null);
@@ -1322,7 +1342,7 @@ function App() {
       nextForm.title = occurrence.title;
       nextForm.description = occurrence.description ?? "";
       nextForm.actionUrl = occurrence.actionUrl ?? "";
-      nextForm.amountRub = occurrence.amountMinor == null ? "" : String(occurrence.amountMinor / 100);
+      nextForm.amountMajor = occurrence.amountMinor == null ? "" : String(occurrence.amountMinor / 100);
       nextForm.currency = occurrence.currency ?? "RUB";
       nextForm.visibility = occurrence.visibility;
       nextForm.assignmentMode = occurrence.assignment.mode;
@@ -1330,9 +1350,13 @@ function App() {
         ? String(occurrence.assignment.responsibleUserId)
         : "";
       nextForm.watcherUserIds = [...occurrence.watcherUserIds];
-      nextForm.leadMinutes = occurrence.leadMinutes == null
-        ? PRESERVE_LEGACY_LEAD
-        : String(occurrence.leadMinutes);
+      if (occurrence.leadMinutes == null) {
+        nextForm.leadAmount = PRESERVE_LEGACY_LEAD;
+      } else {
+        const leadDraft = leadTimeDraftFromMinutes(occurrence.leadMinutes);
+        nextForm.leadAmount = leadDraft.amount;
+        nextForm.leadUnit = leadDraft.unit;
+      }
       if (occurrence.repeatIntervalMinutes) {
         nextForm.repeatIntervalMinutes = String(occurrence.repeatIntervalMinutes);
       }
@@ -1555,10 +1579,16 @@ function App() {
     }
     if (
       form.kind === "payment" &&
-      form.amountRub.trim() &&
-      (!Number.isFinite(Number(form.amountRub)) || Number(form.amountRub) < 0)
+      form.amountMajor.trim() &&
+      (!Number.isFinite(Number(form.amountMajor)) || Number(form.amountMajor) < 0)
     ) {
       validationErrors.amount = "Введите сумму не меньше нуля.";
+    }
+    const requestedLeadMinutes = form.leadAmount === PRESERVE_LEGACY_LEAD
+      ? null
+      : leadMinutesFromDraft(form.leadAmount, form.leadUnit);
+    if (form.leadAmount !== PRESERVE_LEGACY_LEAD && requestedLeadMinutes === null) {
+      validationErrors.leadMinutes = `Введите количество ${form.leadUnit === "hours" ? "часов" : "дней"} от 0 до ${leadTimeMaximum(form.leadUnit)} с точностью до минуты.`;
     }
     const actionUrlError = actionUrlValidationMessage(form.kind, form.actionUrl);
     if (actionUrlError) validationErrors.actionUrl = actionUrlError;
@@ -1613,7 +1643,7 @@ function App() {
     if (
       editingOccurrence &&
       editScope === "occurrence" &&
-      form.leadMinutes === PRESERVE_LEGACY_LEAD
+      form.leadAmount === PRESERVE_LEGACY_LEAD
     ) {
       const originalDeadline = occurrenceLocalDeadline(editingOccurrence);
       const originalAllDay = editingOccurrence.allDay ?? false;
@@ -1633,7 +1663,7 @@ function App() {
     setFormErrors({});
     setSaving(true);
     clearError();
-    const amount = form.amountRub.trim() ? Math.round(Number(form.amountRub) * 100) : null;
+    const amount = form.amountMajor.trim() ? Math.round(Number(form.amountMajor) * 100) : null;
     const responsibleUserId = Number(form.responsibleUserId);
     const editingReminder = reminders.find((reminder) =>
       reminder.reminderId === editingReminderId);
@@ -1657,7 +1687,7 @@ function App() {
         ? editingOccurrence?.timezone ?? editingReminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow"
         : editingReminder?.timezone ?? selectedWorkspace?.timezone ?? "Europe/Moscow",
       notificationPolicy: {
-        leadMinutes: form.leadMinutes === PRESERVE_LEGACY_LEAD ? 0 : Number(form.leadMinutes),
+        leadMinutes: requestedLeadMinutes ?? 0,
         repeatIntervalMinutes: Number(form.repeatIntervalMinutes),
         ignoreQuietHours: selectedWorkspace?.quietHoursStart === selectedWorkspace?.quietHoursEnd
           ? false
@@ -1691,7 +1721,7 @@ function App() {
           timezone: payload.timezone,
           notificationPolicy: {
             ...payload.notificationPolicy,
-            leadMinutes: form.leadMinutes === PRESERVE_LEGACY_LEAD
+            leadMinutes: form.leadAmount === PRESERVE_LEGACY_LEAD
               ? null
               : payload.notificationPolicy.leadMinutes,
           },
@@ -2855,17 +2885,22 @@ function App() {
         ? `${formatScheduleDate(occurrenceDate)} · ${occurrenceAllDay ? "весь день" : occurrenceTime}`
         : "Выберите дату срока"
       : formSchedulePreview(form);
-    const firstSignalPreview = form.leadMinutes === PRESERVE_LEGACY_LEAD
+    const previewLeadMinutes = form.leadAmount === PRESERVE_LEGACY_LEAD
+      ? null
+      : leadMinutesFromDraft(form.leadAmount, form.leadUnit);
+    const firstSignalPreview = form.leadAmount === PRESERVE_LEGACY_LEAD
       ? editingOccurrence?.reminderStartAt
         ? `Не менять текущее время — ${formatMoment(editingOccurrence.reminderStartAt, previewTimezone, true)}`
         : "Не менять текущее время первого сигнала"
-      : previewDates[0]
+      : previewLeadMinutes === null
+        ? "Укажите количество часов или дней до срока"
+        : previewDates[0]
         ? firstSignalPresentation({
             dueLocalDate: previewDates[0],
             notificationTimeLocal: previewAllDay
               ? allDayAnchorTime
               : occurrenceOnly ? occurrenceTime : form.timeLocal,
-            leadMinutes: Number(form.leadMinutes),
+            leadMinutes: previewLeadMinutes,
             timezone: previewTimezone,
             quietHoursStart: selectedWorkspace?.quietHoursStart ?? "22:00",
             quietHoursEnd: selectedWorkspace?.quietHoursEnd ?? "08:00",
@@ -2873,7 +2908,7 @@ function App() {
             allDay: previewAllDay,
             now: clockNow,
           }).label
-        : leadNotificationLabel(Number(form.leadMinutes), {
+        : leadNotificationLabel(previewLeadMinutes, {
             allDay: previewAllDay,
             allDayAnchorTime,
           });
@@ -3007,13 +3042,24 @@ function App() {
                         step="0.01"
                         type="number"
                         placeholder="0"
-                        value={form.amountRub}
+                        value={form.amountMajor}
                         onChange={(event) => {
-                          setForm({ ...form, amountRub: event.target.value });
+                          setForm({ ...form, amountMajor: event.target.value });
                           clearFormErrors("amount");
                         }}
                       />
-                      <b>{form.currency === "RUB" ? "₽" : form.currency}</b>
+                      <select
+                        aria-label="Валюта"
+                        value={form.currency}
+                        onChange={(event) => setForm({ ...form, currency: event.target.value })}
+                      >
+                        {!PAYMENT_CURRENCIES.some(({ code }) => code === form.currency) ? (
+                          <option value={form.currency}>{form.currency}</option>
+                        ) : null}
+                        {PAYMENT_CURRENCIES.map(({ code, label }) => (
+                          <option value={code} key={code}>{label}</option>
+                        ))}
+                      </select>
                     </span>
                     {formErrors.amount ? <span className="field-error" id="reminder-amount-error" role="alert">{formErrors.amount}</span> : null}
                   </label>
@@ -3428,35 +3474,68 @@ function App() {
             <h2>Как напоминать об открытом сроке?</h2>
             <p className="form-panel__hint">Сигналы повторяются только для текущего срока и остановятся после отметки.</p>
             <div className="schedule-grid">
-              <label className="field">
+              <div className="field">
                 <span>Первый сигнал</span>
-                <select
-                  id="reminder-lead-minutes"
-                  aria-label="Первый сигнал"
-                  aria-describedby={formErrors.leadMinutes ? "reminder-lead-minutes-error" : undefined}
-                  aria-invalid={Boolean(formErrors.leadMinutes) || undefined}
-                  value={form.leadMinutes}
-                  onChange={(event) => {
-                    setForm({ ...form, leadMinutes: event.target.value });
-                    clearFormErrors("leadMinutes");
-                  }}
-                >
-                  {form.leadMinutes === PRESERVE_LEGACY_LEAD ? (
+                {form.leadAmount === PRESERVE_LEGACY_LEAD ? (
+                  <select
+                    id="reminder-lead-minutes"
+                    aria-label="Первый сигнал"
+                    aria-describedby="reminder-lead-hint"
+                    value={PRESERVE_LEGACY_LEAD}
+                    onChange={(event) => {
+                      if (event.target.value !== "hours" && event.target.value !== "days") return;
+                      setForm({
+                        ...form,
+                        leadAmount: "0",
+                        leadUnit: event.target.value,
+                      });
+                      clearFormErrors("leadMinutes");
+                    }}
+                  >
                     <option value={PRESERVE_LEGACY_LEAD}>
                       {editingOccurrence?.reminderStartAt
                         ? `Не менять — ${formatMoment(editingOccurrence.reminderStartAt, previewTimezone, true)}`
                         : "Не менять текущее время"}
                     </option>
-                  ) : null}
-                  {[0, 60, 1_440, 10_080].map((minutes) => (
-                    <option value={minutes} key={minutes}>{leadNotificationLabel(minutes, {
-                      allDay: previewAllDay,
-                      allDayAnchorTime,
-                    })}</option>
-                  ))}
-                </select>
+                    <option value="hours">Задать в часах</option>
+                    <option value="days">Задать в днях</option>
+                  </select>
+                ) : (
+                  <div className="inline-fields first-signal-fields">
+                    <input
+                      id="reminder-lead-minutes"
+                      aria-label="Количество до срока"
+                      aria-describedby={`reminder-lead-hint${formErrors.leadMinutes ? " reminder-lead-minutes-error" : ""}`}
+                      aria-invalid={Boolean(formErrors.leadMinutes) || undefined}
+                      inputMode="decimal"
+                      min="0"
+                      max={leadTimeMaximum(form.leadUnit)}
+                      step="any"
+                      type="number"
+                      value={form.leadAmount}
+                      onChange={(event) => {
+                        setForm({ ...form, leadAmount: event.target.value });
+                        clearFormErrors("leadMinutes");
+                      }}
+                    />
+                    <select
+                      aria-label="Единица первого сигнала"
+                      value={form.leadUnit}
+                      onChange={(event) => {
+                        setForm({ ...form, leadUnit: event.target.value as LeadTimeUnit });
+                        clearFormErrors("leadMinutes");
+                      }}
+                    >
+                      <option value="hours">часов</option>
+                      <option value="days">дней</option>
+                    </select>
+                  </div>
+                )}
+                <small className="field-hint" id="reminder-lead-hint">
+                  0 — в момент срока; максимум 365 дней.
+                </small>
                 {formErrors.leadMinutes ? <span className="field-error" id="reminder-lead-minutes-error" role="alert">{formErrors.leadMinutes}</span> : null}
-              </label>
+              </div>
               <label className="field">
                 <span>Повтор сигнала</span>
                 <select value={form.repeatIntervalMinutes} onChange={(event) => setForm({ ...form, repeatIntervalMinutes: event.target.value })}>
@@ -3701,7 +3780,9 @@ function App() {
         <section className="home-plan-teaser">
           <button type="button" onClick={() => switchMainView("plan")}>
             <span><small>План</small><b>{visibleReminders.length > 0 ? `Серий в работе: ${visibleReminders.length}` : "Пока пусто"}</b></span>
-            <span>{visibleReminders[0] ? `Ближайшее · ${(planDates.get(visibleReminders[0].reminderId) ?? []).map((date) => formatScheduleDate(date, true)).slice(0, 1).join("")}` : "Добавить напоминание"}</span>
+            <span>{nearestPlanDate
+              ? `Ближайшее · ${formatScheduleDate(nearestPlanDate, true)}`
+              : visibleReminders.length > 0 ? "Открыть план" : "Добавить напоминание"}</span>
             <UiIcon name="arrow-right" />
           </button>
         </section>
