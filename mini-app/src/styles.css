@@ -2022,6 +2022,10 @@ summary:focus-visible {
   font-weight: 500;
 }
 
+.field .field-hint {
+  line-height: 1.4;
+}
+
 .additional-fields {
   margin-top: 16px;
   border-top: 1px solid var(--line);
@@ -2479,20 +2483,18 @@ input[type="checkbox"]:disabled {
 }
 
 .amount-input {
-  position: relative;
-  display: block;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(96px, 112px);
+  gap: 8px;
 }
 
 .amount-input input,
+.amount-input select,
 .inline-fields > input[type="number"] {
   font-family: var(--font-data);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
   letter-spacing: 0.02em;
-}
-
-.amount-input input {
-  padding-right: 48px;
 }
 
 .amount-input input[type="number"],
@@ -2508,12 +2510,10 @@ input[type="checkbox"]:disabled {
   appearance: none;
 }
 
-.amount-input b {
-  position: absolute;
-  top: 50%;
-  right: 16px;
+.amount-input select {
+  padding-inline: 10px 28px;
   color: var(--ink-soft);
-  transform: translateY(-50%);
+  font-size: var(--text-caption);
 }
 
 .interval-input input {

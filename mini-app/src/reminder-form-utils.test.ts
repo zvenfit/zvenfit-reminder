@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   intervalMetadataFor,
   isoWeekdayInTimezone,
+  leadMinutesFromDraft,
+  leadTimeDraftFromMinutes,
+  leadTimeMaximum,
   localCalendarDate,
   maxValidYearlyDay,
 } from "./reminder-form-utils";
@@ -53,5 +56,27 @@ describe("frequency interval metadata", () => {
 
   it("does not expose interval controls for a one-off deadline", () => {
     expect(intervalMetadataFor("once")).toBeNull();
+  });
+});
+
+describe("first signal lead draft", () => {
+  it("uses days for whole-day leads and hours for shorter leads", () => {
+    expect(leadTimeDraftFromMinutes(10_080)).toEqual({ amount: "7", unit: "days" });
+    expect(leadTimeDraftFromMinutes(720)).toEqual({ amount: "12", unit: "hours" });
+    expect(leadTimeDraftFromMinutes(0)).toEqual({ amount: "0", unit: "hours" });
+  });
+
+  it("converts arbitrary hour and day amounts to integer minutes", () => {
+    expect(leadMinutesFromDraft("36", "hours")).toBe(2_160);
+    expect(leadMinutesFromDraft("5", "days")).toBe(7_200);
+    expect(leadMinutesFromDraft("1.5", "hours")).toBe(90);
+  });
+
+  it("rejects empty, over-year, and sub-minute values", () => {
+    expect(leadMinutesFromDraft("", "hours")).toBeNull();
+    expect(leadMinutesFromDraft("366", "days")).toBeNull();
+    expect(leadMinutesFromDraft("0.001", "hours")).toBeNull();
+    expect(leadTimeMaximum("hours")).toBe(8_760);
+    expect(leadTimeMaximum("days")).toBe(365);
   });
 });

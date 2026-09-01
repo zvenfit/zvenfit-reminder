@@ -74,6 +74,7 @@ Each reminder contains:
 - an optional description;
 - an optional validated action URL;
 - an optional amount stored in minor currency units plus an ISO currency code;
+  the Mini App offers RUB and USD explicitly and preserves the selected code;
 - group or private visibility;
 - a creator;
 - one responsible member or the `anyone` completion mode;
@@ -203,6 +204,10 @@ Workspace defaults:
 | First watcher escalation | 24 hours after deadline |
 | Later watcher escalation | At most once per 24 hours |
 | Stop condition | Explicit completion or cancellation |
+
+The first notification lead is entered as an amount of hours or days, from zero
+through 365 days. Zero means that notifications start at the deadline. The API
+continues to store the exact result as integer minutes.
 
 Quick repeat presets are one hour, three hours, six hours, twelve hours, one
 day, and a custom interval.
