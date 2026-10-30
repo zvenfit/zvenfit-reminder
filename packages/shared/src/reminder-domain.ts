@@ -29,6 +29,18 @@ export const workspaceMemberDisplayNameUpdateSchema = z
 export const reminderVisibilitySchema = z.enum(["group", "private"]);
 export type ReminderVisibility = z.infer<typeof reminderVisibilitySchema>;
 
+// General uses the existing default destination (null), never thread ID 1.
+export const telegramThreadIdSchema = z.number().int().min(2).max(Number.MAX_SAFE_INTEGER);
+
+export type TopicUnavailableReason = "topic_closed" | "topic_deleted";
+
+export interface WorkspaceTopic {
+  messageThreadId: number;
+  name: string;
+  isClosed: boolean;
+  unavailableReason?: TopicUnavailableReason | null;
+}
+
 export const reminderKindSchema = z.enum(["task", "payment"]);
 export type ReminderKind = z.infer<typeof reminderKindSchema>;
 
@@ -284,6 +296,7 @@ const reminderDraftBaseSchema = z
     amountMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().default(null),
     currency: z.string().regex(/^[A-Z]{3}$/).nullable().default(null),
     visibility: reminderVisibilitySchema.default("group"),
+    messageThreadId: telegramThreadIdSchema.nullable().optional(),
     assignment: assignmentSchema,
     watcherUserIds: z
       .array(z.number().int().positive().max(Number.MAX_SAFE_INTEGER))
@@ -299,6 +312,9 @@ const reminderDraftBaseSchema = z
   .strict()
   .superRefine((value, context) => {
     const effectiveKind = value.kind ?? (value.amountMinor == null ? "task" : "payment");
+    if (value.visibility === "private" && value.messageThreadId != null) {
+      context.addIssue({ code: "custom", path: ["messageThreadId"], message: "Private reminders cannot target a forum topic" });
+    }
     if ((value.amountMinor == null) !== (value.currency == null)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -385,11 +401,13 @@ export type OccurrenceDraftUpdate = z.infer<typeof occurrenceDraftUpdateSchema>;
 export const reminderDraftSchema = reminderDraftBaseSchema
   .transform((value) => ({
     ...value,
+    messageThreadId: value.messageThreadId ?? null,
     kind: value.kind ?? (value.amountMinor == null ? "task" as const : "payment" as const),
   }));
 export type ReminderDraft = z.infer<typeof reminderDraftSchema>;
 
 export interface Workspace {
+  isForum?: boolean;
   workspaceId: string;
   telegramChatId: number;
   displayName: string;
@@ -468,6 +486,7 @@ export interface ReminderOccurrence {
   amountMinor: number | null;
   currency: string | null;
   visibility: ReminderVisibility;
+  messageThreadId: number | null;
   timezone: string;
   /**
    * Requested lead time captured when this occurrence was materialized or last
@@ -509,6 +528,7 @@ export interface NotificationDelivery {
   claimedAt: Date;
   status: DeliveryStatus;
   telegramChatId: number | null;
+  messageThreadId: number | null;
   telegramMessageId: number | null;
   errorCode: string | null;
   createdAt: Date;

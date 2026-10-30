@@ -14,6 +14,7 @@ import {
 } from "../reminder-scheduling.js";
 import { createSessionRunner, TypedValues, Types, type SessionRunner } from "./client.js";
 import { prepareOccurrenceMutation } from "./delivery-guard.js";
+import { assertTopicAvailable } from "./topics-repository.js";
 import { withSerializableTransaction } from "./transaction.js";
 import {
   getField,
@@ -132,6 +133,7 @@ function rowToReminder(
     amountMinor: storedAmount == null ? null : Number(storedAmount),
     currency: nullableString(getField(data, "currency")),
     visibility: getField(data, "visibility"),
+    messageThreadId: getField(data, "message_thread_id") ?? null,
     assignment:
       getField(data, "assignment_mode") === "person"
         ? {
@@ -379,6 +381,8 @@ export class RemindersRepository {
           }
         }
 
+        await assertTopicAvailable(transaction, workspaceId, reminder.messageThreadId);
+
         const deadline = getNextScheduledDeadline(reminder.schedule, reminder.timezone, now, {
           defaultAllDayReminderTime: workspaceSettings.defaultAllDayReminderTime,
         });
@@ -411,6 +415,7 @@ export class RemindersRepository {
             DECLARE $amount_minor AS Int64?;
             DECLARE $currency AS Utf8?;
             DECLARE $visibility AS Utf8;
+            DECLARE $message_thread_id AS Int64?;
             DECLARE $creator_user_id AS Int64;
             DECLARE $assignment_mode AS Utf8;
             DECLARE $responsible_user_id AS Int64?;
@@ -431,14 +436,14 @@ export class RemindersRepository {
 
             INSERT INTO reminders (
               workspace_id, reminder_id, kind, title, description, action_url,
-              amount_minor, currency, visibility, creator_user_id,
+              amount_minor, currency, visibility, message_thread_id, creator_user_id,
               assignment_mode, responsible_user_id, schedule_spec, timezone,
               lead_minutes, repeat_interval_minutes, ignore_quiet_hours,
               escalation_enabled, escalation_delay_minutes,
               escalation_repeat_minutes, status, version, created_at, updated_at
             ) VALUES (
               $workspace_id, $reminder_id, $kind, $title, $description, $action_url,
-              $amount_minor, $currency, $visibility, $creator_user_id,
+              $amount_minor, $currency, $visibility, $message_thread_id, $creator_user_id,
               $assignment_mode, $responsible_user_id, $schedule_spec, $timezone,
               $lead_minutes, $repeat_interval_minutes, $ignore_quiet_hours,
               $escalation_enabled, $escalation_delay_minutes,
@@ -463,6 +468,7 @@ export class RemindersRepository {
             $amount_minor: optionalInt64(reminder.amountMinor),
             $currency: optionalUtf8(reminder.currency),
             $visibility: TypedValues.utf8(reminder.visibility),
+            $message_thread_id: optionalInt64(reminder.messageThreadId),
             $creator_user_id: TypedValues.int64(reminder.creatorUserId),
             $assignment_mode: TypedValues.utf8(reminder.assignment.mode),
             $responsible_user_id: optionalInt64(
@@ -798,6 +804,9 @@ export class RemindersRepository {
               occurrence.due_at AS current_due_at,
               occurrence.status AS current_status,
               occurrence.latest_message_id AS current_latest_message_id,
+              occurrence.message_thread_id AS current_message_thread_id,
+              occurrence.visibility AS current_visibility,
+              occurrence.responsible_user_id AS current_responsible_user_id,
               occurrence.delivery_lock_key AS delivery_lock_key,
               occurrence.delivery_locked_at AS delivery_locked_at
             FROM reminder_runtime AS runtime
@@ -825,6 +834,10 @@ export class RemindersRepository {
         const parsed = reminderDraftSchema.parse({
           ...parsedInput,
           kind: parsedInput.kind ?? reminderKindFromRow(reminderRow),
+          messageThreadId: parsedInput.visibility === "private" ? null
+            : parsedInput.messageThreadId === undefined
+              ? getField(reminderRow, "message_thread_id") ?? null
+              : parsedInput.messageThreadId,
         });
         const existingVisibility = String(getField(reminderRow, "visibility"));
         const actorIsManager = Boolean(
@@ -914,16 +927,21 @@ export class RemindersRepository {
           }
         }
 
+        await assertTopicAvailable(transaction, workspaceId, parsed.messageThreadId);
+
         const hasCurrentOccurrence = getField(runtimeRow, "current_occurrence_id") != null;
         const nextResponsibleUserId = parsed.assignment.mode === "person"
           ? parsed.assignment.responsibleUserId
           : null;
-        const currentResponsibleUserId = getField(reminderRow, "responsible_user_id") == null
+        const currentResponsibleUserId = getField(runtimeRow, "current_responsible_user_id") == null
           ? null
-          : Number(getField(reminderRow, "responsible_user_id"));
+          : Number(getField(runtimeRow, "current_responsible_user_id"));
+        const currentVisibility = getField(runtimeRow, "current_visibility") ?? existingVisibility;
         const deliveryTargetChanged =
-          existingVisibility !== parsed.visibility ||
-          (existingVisibility === "private" &&
+          currentVisibility !== parsed.visibility ||
+          (parsed.visibility === "group" &&
+            (getField(runtimeRow, "current_message_thread_id") ?? null) !== parsed.messageThreadId) ||
+          (currentVisibility === "private" &&
             parsed.visibility === "private" &&
             currentResponsibleUserId !== nextResponsibleUserId);
         const migrateLiveMessage = Boolean(
@@ -1011,6 +1029,7 @@ export class RemindersRepository {
             DECLARE $amount_minor AS Int64?;
             DECLARE $currency AS Utf8?;
             DECLARE $visibility AS Utf8;
+            DECLARE $message_thread_id AS Int64?;
             DECLARE $assignment_mode AS Utf8;
             DECLARE $responsible_user_id AS Int64?;
             DECLARE $schedule_spec AS JsonDocument;
@@ -1039,7 +1058,7 @@ export class RemindersRepository {
             UPDATE reminders SET
               kind = $kind, title = $title, description = $description, action_url = $action_url,
               amount_minor = $amount_minor, currency = $currency,
-              visibility = $visibility, assignment_mode = $assignment_mode,
+              visibility = $visibility, message_thread_id = $message_thread_id, assignment_mode = $assignment_mode,
               responsible_user_id = $responsible_user_id,
               schedule_spec = $schedule_spec, timezone = $timezone,
               lead_minutes = $lead_minutes,
@@ -1101,7 +1120,7 @@ export class RemindersRepository {
               ),
               kind = $kind, title = $title, description = $description, action_url = $action_url,
               amount_minor = $amount_minor, currency = $currency,
-              visibility = $visibility, assignment_mode = $assignment_mode,
+              visibility = $visibility, message_thread_id = $message_thread_id, assignment_mode = $assignment_mode,
               responsible_user_id = $responsible_user_id,
               timezone = $timezone,
               lead_minutes = $lead_minutes,
@@ -1148,6 +1167,7 @@ export class RemindersRepository {
             $amount_minor: optionalInt64(parsed.amountMinor),
             $currency: optionalUtf8(parsed.currency),
             $visibility: TypedValues.utf8(parsed.visibility),
+            $message_thread_id: optionalInt64(parsed.messageThreadId),
             $assignment_mode: TypedValues.utf8(parsed.assignment.mode),
             $responsible_user_id: optionalInt64(
               parsed.assignment.mode === "person" ? parsed.assignment.responsibleUserId : null,

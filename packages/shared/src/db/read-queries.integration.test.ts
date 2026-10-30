@@ -3,6 +3,7 @@ import { getDriver } from "./client.js";
 import { OccurrencesRepository } from "./occurrences-repository.js";
 import { RemindersRepository } from "./reminders-repository.js";
 import { WorkspaceMembersRepository } from "./workspace-members-repository.js";
+import { TopicsRepository } from "./topics-repository.js";
 import { WorkspacesRepository } from "./workspaces-repository.js";
 
 const integrationEnabled = process.env.RUN_YDB_INTEGRATION === "1";
@@ -16,17 +17,19 @@ describe.runIf(integrationEnabled)("YDB read query smoke", () => {
   });
 
   it("compiles and executes every Mini App read query against real YDB", async () => {
+    const topics = new TopicsRepository(endpoint, database);
     const workspaces = new WorkspacesRepository(endpoint, database);
     const reminders = new RemindersRepository(endpoint, database);
     const members = new WorkspaceMembersRepository(endpoint, database);
     const occurrences = new OccurrencesRepository(endpoint, database);
 
     await expect(Promise.all([
+      topics.list(sentinelWorkspaceId),
       workspaces.listForUser(0),
       reminders.listForActor(sentinelWorkspaceId, 0),
       members.listProfiles(sentinelWorkspaceId),
       occurrences.listActionableForActor(sentinelWorkspaceId, 0),
       occurrences.listHistoryForActor(sentinelWorkspaceId, 0, 1),
-    ])).resolves.toEqual([[], [], [], [], []]);
+    ])).resolves.toEqual([[], [], [], [], [], []]);
   }, 20_000);
 });

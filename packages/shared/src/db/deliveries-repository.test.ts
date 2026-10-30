@@ -113,8 +113,8 @@ function reservationDouble(
 }
 
 describe("DeliveriesRepository.reserve", () => {
-  it("reserves a deterministic initial delivery and advances the next ping", async () => {
-    const { repository, session } = reservationDouble(occurrenceRow());
+  it.each([null, 42])("reserves a deterministic delivery to destination %s", async (messageThreadId) => {
+    const { repository, session } = reservationDouble(occurrenceRow({ message_thread_id: messageThreadId }));
     const now = new Date("2026-08-13T12:00:00.000Z");
     const reservation = await repository.reserve("workspace-a", "occurrence-a", now);
 
@@ -124,6 +124,7 @@ describe("DeliveriesRepository.reserve", () => {
       status: "reserved",
       telegramChatId: -100123,
     });
+    expect(reservation?.delivery.messageThreadId).toBe(messageThreadId);
     expect(reservation?.delivery.deliveryKey).toBe(
       createDeliveryKey("occurrence-a", "initial", now, 0),
     );
@@ -142,6 +143,7 @@ describe("DeliveriesRepository.reserve", () => {
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("INSERT INTO notification_deliveries"),
     );
+    expect(decodeYdbValue(writeCall?.[1]?.$message_thread_id)).toBe(messageThreadId);
     expect(writeCall?.[0]).toContain("notification_sequence = $next_sequence");
     expect(writeCall?.[0]).toContain("delivery_lock_key = $delivery_key");
     expect(writeCall?.[0]).toContain("status = IF(due_at <= $claimed_at, $overdue_status, status)");
@@ -165,6 +167,40 @@ describe("DeliveriesRepository.reserve", () => {
 
     expect(session.executeQuery.mock.calls.some(([query]) =>
       query.includes("INSERT INTO notification_deliveries"))).toBe(false);
+  });
+
+  it.each([
+    { delivery_lock_key: null, delivery_locked_at: null },
+    { delivery_lock_key: "message-sync:expired", delivery_locked_at: "2026-08-13T11:00:00.000Z" },
+  ])("keeps a due ping unchanged after retirement fails or its lease expires: %j", async (lock) => {
+    const row = occurrenceRow({ ...lock, message_sync_required: true, message_sync_retire_only: true,
+      latest_message_chat_id: -100123, latest_message_id: 77, message_thread_id: 52, notification_sequence: 4 });
+    const { repository, session } = reservationDouble(row);
+    const now = new Date("2026-08-13T12:00:00.000Z");
+
+    await expect(repository.reserve("workspace-a", "occurrence-a", now)).resolves.toBeNull();
+    // The retirement fence must run before cadence deferral, sequence advance,
+    // delivery insertion or acquisition of another lease.
+    expect(session.executeQuery).toHaveBeenCalledTimes(1);
+
+    Object.assign(row, { delivery_lock_key: null, delivery_locked_at: null,
+      message_sync_required: false, message_sync_retire_only: false,
+      latest_message_chat_id: null, latest_message_id: null });
+    const resumed = await repository.reserve("workspace-a", "occurrence-a", now);
+    expect(resumed?.delivery).toMatchObject({ scheduledAt: now, sequence: 4, messageThreadId: 52 });
+    const write = session.executeQuery.mock.calls.find(([query]) => query.includes("INSERT INTO notification_deliveries"));
+    expect(decodeYdbValue(write?.[1]?.$next_sequence)).toBe(5);
+  });
+
+  it.each([
+    { latest_message_chat_id: null, latest_message_id: null, message_sync_retire_only: true },
+    { latest_message_chat_id: null, latest_message_id: 77, message_sync_retire_only: true },
+    { latest_message_chat_id: -100123, latest_message_id: null, message_sync_retire_only: true },
+    { latest_message_chat_id: -100123, latest_message_id: 77, message_sync_retire_only: false },
+  ])("does not block delivery for an unaddressable old card or ordinary refresh: %j", async (sync) => {
+    const { repository } = reservationDouble(occurrenceRow({ message_sync_required: true, ...sync }));
+    await expect(repository.reserve("workspace-a", "occurrence-a", new Date("2026-08-13T12:00:00.000Z")))
+      .resolves.toMatchObject({ delivery: { sequence: 0, status: "reserved" } });
   });
 
   it("defers a late cron claim to 08:00 instead of sending in quiet hours", async () => {
@@ -306,6 +342,53 @@ describe("DeliveriesRepository.reserve", () => {
 });
 
 describe("DeliveriesRepository.beginSend", () => {
+  it.each([
+    { visibility: "group", retireOnly: true, oldChatId: -100123, oldMessageId: 77, valid: false },
+    { visibility: "private", retireOnly: true, oldChatId: -100123, oldMessageId: 77, valid: false },
+    { visibility: "group", retireOnly: true, oldChatId: null, oldMessageId: null, valid: true },
+    { visibility: "group", retireOnly: true, oldChatId: null, oldMessageId: 77, valid: true },
+    { visibility: "group", retireOnly: true, oldChatId: -100123, oldMessageId: null, valid: true },
+    { visibility: "group", retireOnly: false, oldChatId: -100123, oldMessageId: 77, valid: true },
+  ])("fences a queued reservation against pending retirement without erasing cleanup state: %j", async ({ visibility, retireOnly, oldChatId, oldMessageId, valid }) => {
+    const targetChatId = visibility === "private" ? 200 : -100123;
+    const row = {
+      delivery_status: "reserved", reserved_chat_id: targetChatId,
+      reserved_thread_id: null, current_thread_id: null,
+      occurrence_id: "occurrence-a", occurrence_revision: 7, state_revision: 7,
+      occurrence_status: "pending", notification_state: "waiting",
+      delivery_lock_key: "delivery-a", delivery_locked_at: "2026-08-13T11:59:30.000Z",
+      message_sync_required: true, message_sync_retire_only: retireOnly,
+      latest_message_chat_id: oldChatId, latest_message_id: oldMessageId,
+      visibility, assignment_mode: "person", responsible_user_id: 20,
+      reminder_status: "active", workspace_status: "active", workspace_chat_id: -100123,
+      private_chat_available: true, private_chat_id: 200,
+    };
+    const session = {
+      beginTransaction: vi.fn().mockResolvedValue({ id: "tx-send-retirement" }),
+      commitTransaction: vi.fn().mockResolvedValue(undefined), rollbackTransaction: vi.fn().mockResolvedValue(undefined),
+      executeQuery: vi.fn(async (query: string) => ({
+        resultSets: query.includes("delivery.status AS delivery_status") ? [resultSet([row])] : [],
+      })),
+    };
+    const runSession: SessionRunner = async (operation) => operation(session as unknown as TableSession);
+    const repository = new DeliveriesRepository("", "", runSession);
+
+    await expect(repository.beginSend("workspace-a", "delivery-a", new Date("2026-08-13T12:00:00.000Z")))
+      .resolves.toEqual({ valid, targetChatId });
+    const [read] = session.executeQuery.mock.calls[0];
+    expect(read).toContain("occurrence.message_sync_retire_only AS message_sync_retire_only");
+    expect(read).toContain("occurrence.latest_message_chat_id AS latest_message_chat_id");
+    expect(read).toContain("occurrence.latest_message_id AS latest_message_id");
+    const writes = session.executeQuery.mock.calls.slice(1).map(([query]) => query).join("\n");
+    if (valid) expect(writes).toContain("status = 'sending'");
+    else {
+      expect(writes).toContain("status = 'cancelled'");
+      expect(writes).not.toContain("status = 'sending'");
+      expect(writes).not.toContain("UPDATE reminder_occurrences");
+    }
+    expect(session.commitTransaction).toHaveBeenCalledWith({ txId: "tx-send-retirement" });
+  });
+
   it("rejects a private reservation whose responsible chat changed", async () => {
     const session = {
       beginTransaction: vi.fn().mockResolvedValue({ id: "tx-send" }),
@@ -353,10 +436,22 @@ describe("DeliveriesRepository.beginSend", () => {
     expect(session.executeQuery.mock.calls[1]?.[0]).toContain("reservation_stale");
   });
 
-  it("atomically fences a valid reservation before Telegram send", async () => {
+  it.each([
+    { current: null, reserved: null, known: null, closed: false, valid: true },
+    { current: 42, reserved: 42, known: 42, closed: false, valid: true },
+    { current: 52, reserved: 42, known: 52, closed: false, valid: false },
+    { current: 42, reserved: 42, known: 42, closed: true, valid: false },
+    { current: 42, reserved: 42, known: 42, closed: false, unavailable: "topic_deleted", valid: false },
+    { current: 42, reserved: 42, known: null, closed: false, valid: false },
+  ])("revalidates the destination before send: %j", async ({ current, reserved, known, closed, unavailable, valid }) => {
     const row = {
       delivery_status: "reserved",
       reserved_chat_id: -100123,
+      current_thread_id: current,
+      reserved_thread_id: reserved,
+      known_thread_id: known,
+      topic_is_closed: closed,
+      topic_unavailable_reason: unavailable ?? null,
       occurrence_revision: 7,
       occurrence_id: "occurrence-a",
       occurrence_status: "overdue",
@@ -391,11 +486,12 @@ describe("DeliveriesRepository.beginSend", () => {
       "workspace-a",
       "delivery-a",
       new Date("2026-08-13T12:00:00.000Z"),
-    )).resolves.toEqual({ valid: true, targetChatId: -100123 });
+    )).resolves.toEqual({ valid, targetChatId: -100123 });
 
     const write = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("status = 'sending'"));
-    expect(write?.[0]).toContain("delivery_lock_key = $delivery_key");
+    if (valid) expect(write?.[0]).toContain("delivery_lock_key = $delivery_key");
+    else expect(write).toBeUndefined();
     expect(session.commitTransaction).toHaveBeenCalled();
   });
 });

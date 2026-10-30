@@ -7,7 +7,7 @@ import {
 } from "../reminder-domain.js";
 import { createSessionRunner, TypedValues, Types, type SessionRunner } from "./client.js";
 import { prepareOccurrenceMutation } from "./delivery-guard.js";
-import { withSerializableTransaction } from "./transaction.js";
+import { withSerializableTransaction, type SerializableTransaction } from "./transaction.js";
 import {
   getField,
   mapResultRows,
@@ -79,6 +79,87 @@ function rowToWorkspaceMemberProfile(row: Record<string, unknown>): WorkspaceMem
     displayNameOverride: nullableString(getField(row, "display_name_override")),
     privateChatAvailable: Boolean(getField(row, "private_chat_available")),
   };
+}
+
+/** Uses the same self-enrollment role policy in an existing serializable transaction. */
+export async function observeWorkspaceMemberInTransaction(
+  transaction: SerializableTransaction,
+  workspaceId: string,
+  userId: number,
+  now: Date,
+): Promise<WorkspaceMember | null> {
+  const { resultSets } = await transaction.executeQuery(
+    `
+      DECLARE $workspace_id AS Utf8;
+      DECLARE $user_id AS Int64;
+      SELECT status, owner_user_id FROM workspaces
+      WHERE workspace_id = $workspace_id LIMIT 1;
+
+      SELECT * FROM workspace_members
+      WHERE workspace_id = $workspace_id AND user_id = $user_id
+      LIMIT 1;
+    `,
+    {
+      $workspace_id: TypedValues.utf8(workspaceId),
+      $user_id: TypedValues.int64(userId),
+    },
+  );
+  const workspaceRow = mapResultRows(resultSets[0])[0];
+  if (!workspaceRow || getField(workspaceRow, "status") !== "active") {
+    return null;
+  }
+  const existingRow = mapResultRows(resultSets[1])[0];
+  const existing = existingRow ? rowToWorkspaceMember(existingRow) : null;
+  const reactivated = existing?.status === "removed";
+  const isWorkspaceOwner = Number(getField(workspaceRow, "owner_user_id")) === userId;
+  const member: WorkspaceMember = {
+    workspaceId,
+    userId,
+    role: isWorkspaceOwner ? "owner" : reactivated ? "member" : (existing?.role ?? "member"),
+    status: "active",
+    roleGrantedBy: isWorkspaceOwner
+      ? userId
+      : reactivated ? null : (existing?.roleGrantedBy ?? null),
+    roleGrantedAt: isWorkspaceOwner
+      ? (existing?.roleGrantedAt ?? now)
+      : reactivated ? null : (existing?.roleGrantedAt ?? null),
+    lastObservedAt: now,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+  };
+
+  await transaction.executeQuery(
+    `
+      DECLARE $workspace_id AS Utf8;
+      DECLARE $user_id AS Int64;
+      DECLARE $role AS Utf8;
+      DECLARE $status AS Utf8;
+      DECLARE $role_granted_by AS Int64?;
+      DECLARE $role_granted_at AS Timestamp?;
+      DECLARE $last_observed_at AS Timestamp;
+      DECLARE $created_at AS Timestamp;
+      DECLARE $updated_at AS Timestamp;
+      UPSERT INTO workspace_members (
+        workspace_id, user_id, role, status, role_granted_by,
+        role_granted_at, last_observed_at, created_at, updated_at
+      ) VALUES (
+        $workspace_id, $user_id, $role, $status, $role_granted_by,
+        $role_granted_at, $last_observed_at, $created_at, $updated_at
+      );
+    `,
+    {
+      $workspace_id: TypedValues.utf8(member.workspaceId),
+      $user_id: TypedValues.int64(member.userId),
+      $role: TypedValues.utf8(member.role),
+      $status: TypedValues.utf8(member.status),
+      $role_granted_by: optionalInt64(member.roleGrantedBy),
+      $role_granted_at: optionalTimestamp(member.roleGrantedAt),
+      $last_observed_at: timestampValue(member.lastObservedAt),
+      $created_at: timestampValue(member.createdAt),
+      $updated_at: timestampValue(member.updatedAt),
+    },
+  );
+  return member;
 }
 
 export class WorkspaceMembersRepository {
@@ -243,78 +324,7 @@ export class WorkspaceMembersRepository {
   ): Promise<WorkspaceMember | null> {
     return this.runSession((session) =>
       withSerializableTransaction(session, async (transaction) => {
-        const { resultSets } = await transaction.executeQuery(
-          `
-            DECLARE $workspace_id AS Utf8;
-            DECLARE $user_id AS Int64;
-            SELECT status, owner_user_id FROM workspaces
-            WHERE workspace_id = $workspace_id LIMIT 1;
-
-            SELECT * FROM workspace_members
-            WHERE workspace_id = $workspace_id AND user_id = $user_id
-            LIMIT 1;
-          `,
-          {
-            $workspace_id: TypedValues.utf8(workspaceId),
-            $user_id: TypedValues.int64(userId),
-          },
-        );
-        const workspaceRow = mapResultRows(resultSets[0])[0];
-        if (!workspaceRow || getField(workspaceRow, "status") !== "active") {
-          return null;
-        }
-        const existingRow = mapResultRows(resultSets[1])[0];
-        const existing = existingRow ? rowToWorkspaceMember(existingRow) : null;
-        const reactivated = existing?.status === "removed";
-        const isWorkspaceOwner = Number(getField(workspaceRow, "owner_user_id")) === userId;
-        const member: WorkspaceMember = {
-          workspaceId,
-          userId,
-          role: isWorkspaceOwner ? "owner" : reactivated ? "member" : (existing?.role ?? "member"),
-          status: "active",
-          roleGrantedBy: isWorkspaceOwner
-            ? userId
-            : reactivated ? null : (existing?.roleGrantedBy ?? null),
-          roleGrantedAt: isWorkspaceOwner
-            ? (existing?.roleGrantedAt ?? now)
-            : reactivated ? null : (existing?.roleGrantedAt ?? null),
-          lastObservedAt: now,
-          createdAt: existing?.createdAt ?? now,
-          updatedAt: now,
-        };
-
-        await transaction.executeQuery(
-          `
-            DECLARE $workspace_id AS Utf8;
-            DECLARE $user_id AS Int64;
-            DECLARE $role AS Utf8;
-            DECLARE $status AS Utf8;
-            DECLARE $role_granted_by AS Int64?;
-            DECLARE $role_granted_at AS Timestamp?;
-            DECLARE $last_observed_at AS Timestamp;
-            DECLARE $created_at AS Timestamp;
-            DECLARE $updated_at AS Timestamp;
-            UPSERT INTO workspace_members (
-              workspace_id, user_id, role, status, role_granted_by,
-              role_granted_at, last_observed_at, created_at, updated_at
-            ) VALUES (
-              $workspace_id, $user_id, $role, $status, $role_granted_by,
-              $role_granted_at, $last_observed_at, $created_at, $updated_at
-            );
-          `,
-          {
-            $workspace_id: TypedValues.utf8(member.workspaceId),
-            $user_id: TypedValues.int64(member.userId),
-            $role: TypedValues.utf8(member.role),
-            $status: TypedValues.utf8(member.status),
-            $role_granted_by: optionalInt64(member.roleGrantedBy),
-            $role_granted_at: optionalTimestamp(member.roleGrantedAt),
-            $last_observed_at: timestampValue(member.lastObservedAt),
-            $created_at: timestampValue(member.createdAt),
-            $updated_at: timestampValue(member.updatedAt),
-          },
-        );
-        return member;
+        return observeWorkspaceMemberInTransaction(transaction, workspaceId, userId, now);
       }),
     );
   }

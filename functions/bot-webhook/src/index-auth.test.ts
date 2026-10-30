@@ -98,3 +98,10 @@ describe("buildWebhookFailureResponse", () => {
     });
   });
 });
+
+it("keeps webhook fallback errors in their original forum topic", () => {
+  const response = buildWebhookFailureResponse({ message: { chat: { id: -42 }, message_thread_id: 123 } });
+  expect(JSON.parse(response.body ?? "{}")).toMatchObject({ chat_id: -42, message_thread_id: 123 });
+  const general = buildWebhookFailureResponse({ message: { chat: { id: -42 }, message_thread_id: 1 } });
+  expect(JSON.parse(general.body ?? "{}")).not.toHaveProperty("message_thread_id");
+});

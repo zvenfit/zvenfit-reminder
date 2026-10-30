@@ -56,6 +56,7 @@ function occurrence(): ReminderOccurrence {
     amountMinor: null,
     currency: null,
     visibility: "group",
+    messageThreadId: null,
     timezone: "Europe/Moscow",
     leadMinutes: 0,
     repeatIntervalMinutes: 360,
@@ -98,6 +99,7 @@ function reservedDelivery(item: ReminderOccurrence): ReservedDelivery {
       claimedAt: new Date("2026-08-13T12:00:00.000Z"),
       status: "reserved",
       telegramChatId: -100123,
+      messageThreadId: item.messageThreadId,
       telegramMessageId: null,
       errorCode: null,
       createdAt: new Date("2026-08-13T12:00:00.000Z"),
@@ -114,7 +116,114 @@ function noMessageSync() {
   };
 }
 
+function singleSendDependencies(reservation: ReservedDelivery) {
+  return {
+    topics: { markUnavailable: vi.fn().mockResolvedValue(undefined) },
+    workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: reservation.delivery.workspaceId }]) },
+    actions: { listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]) },
+    occurrences: { ...noMessageSync(), listRuntimeCandidates: vi.fn().mockResolvedValue([]) },
+    deliveries: {
+      listCandidates: vi.fn().mockResolvedValue([{ occurrenceId: reservation.occurrence.occurrenceId }]),
+      reserve: vi.fn().mockResolvedValue(reservation),
+      beginSend: vi.fn().mockResolvedValue({ valid: true, targetChatId: reservation.targetChatId }),
+      recordResult: vi.fn().mockResolvedValue({ ...reservation.delivery, status: "sent", telegramMessageId: 777 }),
+    },
+    telegram: createTelegramClient(),
+  };
+}
+
 describe("runDispatcher", () => {
+  it.each([
+    { deliveryType: "initial" as const, visibility: "group" as const, messageThreadId: 42, chatId: -100123 },
+    { deliveryType: "repeat" as const, visibility: "group" as const, messageThreadId: 52, chatId: -100123 },
+    { deliveryType: "escalation" as const, visibility: "group" as const, messageThreadId: 42, chatId: -100123 },
+    { deliveryType: "initial" as const, visibility: "private" as const, messageThreadId: null, chatId: 20 },
+  ])("preserves the snapshot destination and mentions through the dispatcher and HTTP client: %j", async (scenario) => {
+    const item = { ...occurrence(), visibility: scenario.visibility, messageThreadId: scenario.messageThreadId,
+      latestMessageId: null, latestMessageChatId: null };
+    const reservation = reservedDelivery(item);
+    reservation.targetChatId = scenario.chatId;
+    reservation.delivery.telegramChatId = scenario.chatId;
+    reservation.delivery.deliveryType = scenario.deliveryType;
+    if (scenario.deliveryType === "escalation") reservation.escalationWatchers = [{ userId: 10, displayName: "Анна <&>" }];
+    const dependencies = singleSendDependencies(reservation);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: true, result: { message_id: 777 } }), { status: 200 }));
+    try {
+      const result = await runDispatcher(config, reservation.delivery.claimedAt, dependencies as unknown as DispatcherDependencies);
+      expect(result).toMatchObject({ sent: 1, failed: 0, unknown: 0, errors: [] });
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+      expect(body.chat_id).toBe(scenario.chatId);
+      expect(body.parse_mode).toBe("HTML");
+      if (scenario.visibility === "group") expect(body.text).toContain('tg://user?id=20');
+      else expect(body.text).not.toContain("tg://user");
+      if (scenario.messageThreadId === null) expect(body).not.toHaveProperty("message_thread_id");
+      else expect(body.message_thread_id).toBe(scenario.messageThreadId);
+      if (scenario.deliveryType === "escalation") {
+        expect(body.text).toContain('tg://user?id=10');
+        expect(body.text).toContain("Анна &lt;&amp;&gt;");
+      } else expect(body.text).not.toContain('tg://user?id=10');
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("records an uncertain send without replay or unavailable-topic marking when the response is truncated", async () => {
+    const reservation = reservedDelivery({ ...occurrence(), messageThreadId: 42 });
+    const dependencies = singleSendDependencies(reservation);
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response('{"ok":true,"result":', { status: 200 }));
+    try {
+      const result = await runDispatcher(config, reservation.delivery.claimedAt, dependencies as unknown as DispatcherDependencies);
+      expect(result).toMatchObject({ sent: 0, failed: 0, unknown: 1 });
+      expect(dependencies.deliveries.recordResult).toHaveBeenCalledExactlyOnceWith("workspace-a", "delivery-a",
+        { status: "unknown", errorCode: "telegram_transport_unknown" }, expect.any(Date));
+      expect(dependencies.topics.markUnavailable).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { fetchMock.mockRestore(); }
+  });
+
+  it("still finalizes a rejected send when persisting topic availability fails", async () => {
+    const reservation = reservedDelivery({ ...occurrence(), messageThreadId: 42 });
+    const dependencies = singleSendDependencies(reservation);
+    dependencies.topics.markUnavailable.mockRejectedValue(new Error("YDB temporarily unavailable"));
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: false, description: "Bad Request: TOPIC_CLOSED" }), { status: 400 }));
+    try {
+      const result = await runDispatcher(config, reservation.delivery.claimedAt, dependencies as unknown as DispatcherDependencies);
+      expect(result).toMatchObject({ sent: 0, failed: 1, unknown: 0 });
+      expect(result.errors).toContain("topic_availability_persist_failed");
+      expect(dependencies.deliveries.recordResult).toHaveBeenCalledExactlyOnceWith("workspace-a", "delivery-a",
+        { status: "failed", errorCode: "topic_closed" }, expect.any(Date));
+      expect(fetchMock).toHaveBeenCalledOnce();
+    } finally { fetchMock.mockRestore(); }
+  });
+  it.each([
+    ["Bad Request: TOPIC_CLOSED", "topic_closed"],
+    ["Bad Request: message thread not found", "topic_deleted"],
+  ])("persists actionable topic failures without falling back to General", async (description, code) => {
+    const item = { ...occurrence(), messageThreadId: 42 };
+    const reservation = reservedDelivery(item);
+    reservation.delivery.messageThreadId = 42;
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ ok: false, description }), { status: 400 }));
+    const markUnavailable = vi.fn(), recordResult = vi.fn();
+    const dependencies = {
+      topics: { markUnavailable },
+      workspaces: { listActive: vi.fn().mockResolvedValue([{ workspaceId: "workspace-a" }]) },
+      actions: { listCompletionFinalizationCandidates: vi.fn().mockResolvedValue([]) },
+      occurrences: { ...noMessageSync(), listRuntimeCandidates: vi.fn().mockResolvedValue([]) },
+      deliveries: {
+        listCandidates: vi.fn().mockResolvedValue([{ occurrenceId: item.occurrenceId }]),
+        reserve: vi.fn().mockResolvedValue(reservation),
+        beginSend: vi.fn().mockResolvedValue({ valid: true, targetChatId: reservation.targetChatId }), recordResult,
+      },
+      telegram: createTelegramClient(),
+    } as unknown as DispatcherDependencies;
+    try {
+      const result = await runDispatcher(config, reservation.delivery.claimedAt, dependencies);
+      expect(result.failed).toBe(1);
+      expect(markUnavailable).toHaveBeenCalledExactlyOnceWith("workspace-a", 42, code, reservation.delivery.claimedAt);
+      expect(recordResult).toHaveBeenCalledWith("workspace-a", "delivery-a", { status: "failed", errorCode: code }, expect.any(Date));
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body)).message_thread_id).toBe(42);
+    } finally { fetchMock.mockRestore(); }
+  });
   it("routes cron Telegram calls through the authenticated Worker", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -452,6 +561,7 @@ describe("runDispatcher", () => {
     const dueAt = new Date("2026-08-13T12:00:00.000Z");
     const item = {
       ...occurrence(),
+      messageThreadId: 42,
       dueAt,
       reminderStartAt: dueAt,
       nextNotificationAt: dueAt,
@@ -536,6 +646,8 @@ describe("runDispatcher", () => {
     );
     expect(dependencies.deliveries.reserve).toHaveBeenCalledBefore(sendTelegram);
     expect(dependencies.deliveries.beginSend).toHaveBeenCalledBefore(sendTelegram);
+    expect(sendTelegram.mock.calls[0]?.[4]).toBe(42);
+    expect(sendTelegram.mock.calls[0]?.[2]).toContain("tg://user?id=20");
     expect(sendTelegram.mock.calls[0]?.[2]).toContain("Срок наступил:");
     expect(sendTelegram.mock.calls[0]?.[2]).not.toContain("Просрочено:");
     expect(sendTelegram.mock.calls[0]?.[2]).toContain("Каждый день");
@@ -912,4 +1024,18 @@ describe("runDispatcher", () => {
       "delivery_result_conflict:send_lease_lost:delivery_state",
     );
   });
+});
+
+it.each([null, 42])("sends to the reserved forum destination %s without changing the mention", async (messageThreadId) => {
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ result: { message_id: 77 } }) });
+  vi.stubGlobal("fetch", fetchMock);
+  try {
+    await createTelegramClient().send("test-token", -100123, '<a href="tg://user?id=20">Иван</a>', { inline_keyboard: [] }, messageThreadId);
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).toMatchObject({ chat_id: -100123, parse_mode: "HTML", text: '<a href="tg://user?id=20">Иван</a>' });
+    if (messageThreadId == null) expect(body).not.toHaveProperty("message_thread_id");
+    else expect(body.message_thread_id).toBe(42);
+  } finally {
+    vi.unstubAllGlobals();
+  }
 });

@@ -8,6 +8,7 @@ export type ReminderKind = "task" | "payment";
 export interface Workspace {
   workspaceId: string;
   telegramChatId: number;
+  isForum?: boolean;
   displayName: string;
   ownerUserId: number;
   timezone: string;
@@ -15,6 +16,13 @@ export interface Workspace {
   quietHoursEnd: string;
   defaultAllDayReminderTime: string;
   role: WorkspaceRole;
+}
+
+export interface WorkspaceTopic {
+  messageThreadId: number;
+  name: string;
+  isClosed: boolean;
+  unavailableReason?: "topic_closed" | "topic_deleted" | null;
 }
 
 export interface WorkspaceSettings {
@@ -86,6 +94,7 @@ export interface Reminder {
   amountMinor: number | null;
   currency: string | null;
   visibility: ReminderVisibility;
+  messageThreadId?: number | null;
   creatorUserId: number;
   assignment:
     | { mode: "person"; responsibleUserId: number }
@@ -122,6 +131,7 @@ export interface ReminderOccurrence {
   amountMinor: number | null;
   currency: string | null;
   visibility: ReminderVisibility;
+  messageThreadId?: number | null;
   assignment:
     | { mode: "person"; responsibleUserId: number }
     | { mode: "anyone" };
@@ -185,6 +195,7 @@ export type UpdateOccurrenceBody = Omit<CreateReminderBody, "schedule" | "notifi
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+export const API_REQUEST_TIMEOUT_MS = 20_000;
 const MOCK_MODE = import.meta.env.DEV && new URLSearchParams(window.location.search).has("mock");
 
 const mockMembers: WorkspaceMember[] = [
@@ -199,6 +210,7 @@ const mockWorkspaces: Workspace[] = [
   {
     workspaceId: "demo",
     telegramChatId: -1001,
+    isForum: true,
     displayName: "ZvenFit · Команда",
     ownerUserId: 10,
     timezone: "Europe/Moscow",
@@ -311,33 +323,54 @@ export class ApiError extends Error {
   }
 }
 
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Telegram-Init-Data": getInitData(),
-      ...(selectedWorkspaceId ? { "X-Workspace-Id": selectedWorkspaceId } : {}),
-      ...(options.headers ?? {}),
-    },
-  });
+async function api<T>(path: string, options: RequestInit = {}, workspace = selectedWorkspaceId): Promise<T> {
+  const controller = new AbortController();
+  // Keep the deadline active while reading the body too: headers can arrive
+  // even when the connection stalls before the JSON response is complete.
+  const timeout = window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Init-Data": getInitData(),
+        ...(workspace ? { "X-Workspace-Id": workspace } : {}),
+        ...(options.headers ?? {}),
+      },
+    });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: response.statusText }));
-    throw new ApiError(
-      error.error ?? "Не удалось выполнить запрос",
-      response.status,
-      error.code,
-      error.reason,
-    );
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: response.statusText }));
+      throw new ApiError(
+        error.error ?? "Не удалось выполнить запрос",
+        response.status,
+        error.code,
+        error.reason,
+      );
+    }
+
+    return await response.json() as T;
+  } catch (error) {
+    if (controller.signal.aborted) {
+      const isRead = !options.method || ["GET", "HEAD"].includes(options.method.toUpperCase());
+      throw new ApiError(
+        isRead
+          ? "Сервис долго не отвечает. Проверьте соединение и повторите загрузку."
+          : "Ответ сервиса не получен. Изменение могло сохраниться — проверьте данные перед повтором.",
+        0,
+        "request_timeout",
+      );
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeout);
   }
-
-  return response.json() as Promise<T>;
 }
 
 export function listWorkspaces(): Promise<{ workspaces: Workspace[] }> {
   if (MOCK_MODE) return Promise.resolve({ workspaces: mockWorkspaces });
-  return api("/api/workspaces");
+  return api("/api/workspaces", {}, null);
 }
 
 export function loadDashboard(): Promise<{ occurrences: ReminderOccurrence[] }> {
@@ -365,6 +398,54 @@ export function loadHistory(): Promise<{ occurrences: ReminderOccurrence[] }> {
 export function listReminders(): Promise<{ reminders: Reminder[] }> {
   if (MOCK_MODE) return Promise.resolve({ reminders: inSelectedWorkspace(mockReminders) });
   return api("/api/reminders");
+}
+
+export function listTopics(workspace = selectedWorkspaceId): Promise<{ topics: WorkspaceTopic[] }> {
+  if (MOCK_MODE) return Promise.resolve({ topics: selectedWorkspaceId === "demo"
+    ? [{ messageThreadId: 12, name: "Оплаты", isClosed: false }, { messageThreadId: 34, name: "Тренировки", isClosed: false }] : [] });
+  return api("/api/topics", {}, workspace);
+}
+
+export interface GroupConnection {
+  connectionId: string;
+  state: "pending" | "validating" | "connected" | "rejected" | "expired";
+  expiresAt: string;
+  preparedButtonId?: string;
+  fallbackUrl?: string;
+  workspaceId?: string;
+  errorCode?: string;
+  message?: string;
+}
+
+export interface TopicConnection {
+  connectionId: string;
+  state: "pending" | "sending" | "succeeded" | "failed" | "unknown";
+  expiresAt: string;
+  messageThreadId?: number;
+  name?: string;
+  errorCode?: string;
+  message?: string;
+}
+
+export function createGroupConnection(input: { clientRequestId: string; launchMode: "native" | "private_chat" }): Promise<GroupConnection> {
+  return api("/api/group-connections", { method: "POST", body: JSON.stringify(input) }, null);
+}
+
+export function getGroupConnection(id: string): Promise<GroupConnection> {
+  return api(`/api/group-connections/${encodeURIComponent(id)}`, {}, null);
+}
+
+export function retryGroupConnection(id: string): Promise<GroupConnection> {
+  return api(`/api/group-connections/${encodeURIComponent(id)}/retry`, { method: "POST", body: "{}" }, null);
+}
+
+export function createTopicConnection(workspace: string, input: { clientRequestId: string; link: string; name: string }): Promise<TopicConnection> {
+  if (MOCK_MODE) return Promise.resolve({ connectionId: input.clientRequestId, state: "succeeded", expiresAt: new Date(Date.now() + 3600000).toISOString(), messageThreadId: 56, name: input.name });
+  return api("/api/topic-connections", { method: "POST", body: JSON.stringify(input) }, workspace);
+}
+
+export function getTopicConnection(workspace: string, id: string): Promise<TopicConnection> {
+  return api(`/api/topic-connections/${encodeURIComponent(id)}`, {}, workspace);
 }
 
 export function listMembers(): Promise<{ members: WorkspaceMember[] }> {
@@ -633,6 +714,7 @@ declare global {
       WebApp?: {
         initData: string;
         initDataUnsafe?: {
+          start_param?: string;
           user?: {
             id?: number;
             first_name?: string;
@@ -643,6 +725,11 @@ declare global {
         ready: () => void;
         expand: () => void;
         close?: () => void;
+        isVersionAtLeast?: (version: string) => boolean;
+        requestChat?: (requestId: string, callback?: (sent: boolean) => void) => void;
+        openTelegramLink?: (url: string) => void;
+        enableClosingConfirmation?: () => void;
+        disableClosingConfirmation?: () => void;
         BackButton?: {
           show: () => void;
           hide: () => void;

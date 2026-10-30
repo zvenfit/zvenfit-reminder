@@ -11,7 +11,7 @@ import {
   type WorkspaceAccess,
 } from "../reminder-domain.js";
 import { createSessionRunner, TypedValues, type SessionRunner } from "./client.js";
-import { withSerializableTransaction } from "./transaction.js";
+import { withSerializableTransaction, type SerializableTransaction } from "./transaction.js";
 import {
   getField,
   mapResultRows,
@@ -24,6 +24,7 @@ const createWorkspaceSchema = z
     workspaceId: z.string().uuid().optional(),
     telegramChatId: z.number().int().min(Number.MIN_SAFE_INTEGER).max(Number.MAX_SAFE_INTEGER),
     displayName: z.string().trim().min(1).max(200),
+    isForum: z.boolean().default(false),
     ownerUserId: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
     timezone: ianaTimezoneSchema,
     quietHoursStart: localTimeSchema.default(DEFAULT_QUIET_HOURS_START),
@@ -78,6 +79,7 @@ function rowToWorkspace(data: Record<string, unknown>): Workspace {
     workspaceId: String(getField(data, "workspace_id")),
     telegramChatId: Number(getField(data, "telegram_chat_id")),
     displayName: String(getField(data, "display_name")),
+    isForum: getField(data, "is_forum") === true,
     ownerUserId: Number(getField(data, "owner_user_id")),
     timezone: String(getField(data, "timezone")),
     quietHoursStart: String(getField(data, "quiet_hours_start")),
@@ -94,6 +96,98 @@ function rowToWorkspaceAccess(data: Record<string, unknown>): WorkspaceAccess {
     ...rowToWorkspace(data),
     role: z.enum(["owner", "organizer", "member"]).parse(getField(data, "member_role")),
   };
+}
+
+/** Creates the workspace, unique chat mapping and owner inside the caller's transaction. */
+export async function createWorkspaceInTransaction(
+  transaction: SerializableTransaction,
+  input: CreateWorkspaceInput,
+  now: Date,
+): Promise<Workspace> {
+  const parsed = createWorkspaceSchema.parse(input);
+  const workspace: Workspace = {
+    workspaceId: parsed.workspaceId ?? randomUUID(),
+    telegramChatId: parsed.telegramChatId,
+    displayName: parsed.displayName,
+    isForum: parsed.isForum,
+    ownerUserId: parsed.ownerUserId,
+    timezone: parsed.timezone,
+    quietHoursStart: parsed.quietHoursStart,
+    quietHoursEnd: parsed.quietHoursEnd,
+    defaultAllDayReminderTime: parsed.defaultAllDayReminderTime,
+    status: "active",
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  const { resultSets } = await transaction.executeQuery(
+    `
+      DECLARE $telegram_chat_id AS Int64;
+      SELECT workspace_id FROM telegram_chat_workspaces
+      WHERE telegram_chat_id = $telegram_chat_id
+      LIMIT 1;
+    `,
+    { $telegram_chat_id: TypedValues.int64(workspace.telegramChatId) },
+  );
+  if (mapResultRows(resultSets[0]).length > 0) {
+    throw new WorkspaceChatAlreadyRegisteredError(workspace.telegramChatId);
+  }
+
+  await transaction.executeQuery(
+    `
+      DECLARE $workspace_id AS Utf8;
+      DECLARE $telegram_chat_id AS Int64;
+      DECLARE $display_name AS Utf8;
+      DECLARE $is_forum AS Bool;
+      DECLARE $owner_user_id AS Int64;
+      DECLARE $timezone AS Utf8;
+      DECLARE $quiet_hours_start AS Utf8;
+      DECLARE $quiet_hours_end AS Utf8;
+      DECLARE $default_all_day_reminder_time AS Utf8;
+      DECLARE $status AS Utf8;
+      DECLARE $created_at AS Timestamp;
+      DECLARE $updated_at AS Timestamp;
+
+      INSERT INTO workspaces (
+        workspace_id, telegram_chat_id, display_name, is_forum, owner_user_id,
+        timezone, quiet_hours_start, quiet_hours_end,
+        default_all_day_reminder_time, status, created_at, updated_at
+      ) VALUES (
+        $workspace_id, $telegram_chat_id, $display_name, $is_forum, $owner_user_id,
+        $timezone, $quiet_hours_start, $quiet_hours_end,
+        $default_all_day_reminder_time, $status, $created_at, $updated_at
+      );
+
+      INSERT INTO telegram_chat_workspaces (
+        telegram_chat_id, workspace_id, created_at
+      ) VALUES ($telegram_chat_id, $workspace_id, $created_at);
+
+      INSERT INTO workspace_members (
+        workspace_id, user_id, role, status, role_granted_by,
+        role_granted_at, last_observed_at, created_at, updated_at
+      ) VALUES (
+        $workspace_id, $owner_user_id, 'owner', 'active', $owner_user_id,
+        $created_at, $created_at, $created_at, $updated_at
+      );
+    `,
+    {
+      $workspace_id: TypedValues.utf8(workspace.workspaceId),
+      $telegram_chat_id: TypedValues.int64(workspace.telegramChatId),
+      $display_name: TypedValues.utf8(workspace.displayName),
+      $is_forum: TypedValues.bool(workspace.isForum ?? false),
+      $owner_user_id: TypedValues.int64(workspace.ownerUserId),
+      $timezone: TypedValues.utf8(workspace.timezone),
+      $quiet_hours_start: TypedValues.utf8(workspace.quietHoursStart),
+      $quiet_hours_end: TypedValues.utf8(workspace.quietHoursEnd),
+      $default_all_day_reminder_time: TypedValues.utf8(
+        workspace.defaultAllDayReminderTime,
+      ),
+      $status: TypedValues.utf8(workspace.status),
+      $created_at: timestampValue(workspace.createdAt),
+      $updated_at: timestampValue(workspace.updatedAt),
+    },
+  );
+  return workspace;
 }
 
 export class WorkspacesRepository {
@@ -172,92 +266,17 @@ export class WorkspacesRepository {
   }
 
   async create(input: CreateWorkspaceInput, now: Date = new Date()): Promise<Workspace> {
-    const parsed = createWorkspaceSchema.parse(input);
-    const workspace: Workspace = {
-      workspaceId: parsed.workspaceId ?? randomUUID(),
-      telegramChatId: parsed.telegramChatId,
-      displayName: parsed.displayName,
-      ownerUserId: parsed.ownerUserId,
-      timezone: parsed.timezone,
-      quietHoursStart: parsed.quietHoursStart,
-      quietHoursEnd: parsed.quietHoursEnd,
-      defaultAllDayReminderTime: parsed.defaultAllDayReminderTime,
-      status: "active",
-      createdAt: now,
-      updatedAt: now,
-    };
+    return this.runSession((session) => withSerializableTransaction(session,
+      (transaction) => createWorkspaceInTransaction(transaction, input, now)));
+  }
 
-    await this.runSession((session) =>
-      withSerializableTransaction(session, async (transaction) => {
-        const { resultSets } = await transaction.executeQuery(
-          `
-            DECLARE $telegram_chat_id AS Int64;
-            SELECT workspace_id FROM telegram_chat_workspaces
-            WHERE telegram_chat_id = $telegram_chat_id
-            LIMIT 1;
-          `,
-          { $telegram_chat_id: TypedValues.int64(workspace.telegramChatId) },
-        );
-        if (mapResultRows(resultSets[0]).length > 0) {
-          throw new WorkspaceChatAlreadyRegisteredError(workspace.telegramChatId);
-        }
-
-        await transaction.executeQuery(
-          `
-            DECLARE $workspace_id AS Utf8;
-            DECLARE $telegram_chat_id AS Int64;
-            DECLARE $display_name AS Utf8;
-            DECLARE $owner_user_id AS Int64;
-            DECLARE $timezone AS Utf8;
-            DECLARE $quiet_hours_start AS Utf8;
-            DECLARE $quiet_hours_end AS Utf8;
-            DECLARE $default_all_day_reminder_time AS Utf8;
-            DECLARE $status AS Utf8;
-            DECLARE $created_at AS Timestamp;
-            DECLARE $updated_at AS Timestamp;
-
-            INSERT INTO workspaces (
-              workspace_id, telegram_chat_id, display_name, owner_user_id,
-              timezone, quiet_hours_start, quiet_hours_end,
-              default_all_day_reminder_time, status, created_at, updated_at
-            ) VALUES (
-              $workspace_id, $telegram_chat_id, $display_name, $owner_user_id,
-              $timezone, $quiet_hours_start, $quiet_hours_end,
-              $default_all_day_reminder_time, $status, $created_at, $updated_at
-            );
-
-            INSERT INTO telegram_chat_workspaces (
-              telegram_chat_id, workspace_id, created_at
-            ) VALUES ($telegram_chat_id, $workspace_id, $created_at);
-
-            INSERT INTO workspace_members (
-              workspace_id, user_id, role, status, role_granted_by,
-              role_granted_at, last_observed_at, created_at, updated_at
-            ) VALUES (
-              $workspace_id, $owner_user_id, 'owner', 'active', $owner_user_id,
-              $created_at, $created_at, $created_at, $updated_at
-            );
-          `,
-          {
-            $workspace_id: TypedValues.utf8(workspace.workspaceId),
-            $telegram_chat_id: TypedValues.int64(workspace.telegramChatId),
-            $display_name: TypedValues.utf8(workspace.displayName),
-            $owner_user_id: TypedValues.int64(workspace.ownerUserId),
-            $timezone: TypedValues.utf8(workspace.timezone),
-            $quiet_hours_start: TypedValues.utf8(workspace.quietHoursStart),
-            $quiet_hours_end: TypedValues.utf8(workspace.quietHoursEnd),
-            $default_all_day_reminder_time: TypedValues.utf8(
-              workspace.defaultAllDayReminderTime,
-            ),
-            $status: TypedValues.utf8(workspace.status),
-            $created_at: timestampValue(workspace.createdAt),
-            $updated_at: timestampValue(workspace.updatedAt),
-          },
-        );
-      }),
-    );
-
-    return workspace;
+  async updateTelegramMetadata(workspaceId: string, isForum: boolean): Promise<void> {
+    await this.runSession((session) => session.executeQuery(`
+      DECLARE $workspace_id AS Utf8;
+      DECLARE $is_forum AS Bool;
+      UPDATE workspaces SET is_forum = $is_forum
+      WHERE workspace_id = $workspace_id AND status = 'active';
+    `, { $workspace_id: TypedValues.utf8(workspaceId), $is_forum: TypedValues.bool(isForum) }));
   }
 
   async updateSettings(

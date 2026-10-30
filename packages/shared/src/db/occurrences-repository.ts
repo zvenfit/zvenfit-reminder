@@ -25,6 +25,7 @@ import {
   hasActiveDeliveryLock,
   prepareOccurrenceMutation,
 } from "./delivery-guard.js";
+import { assertTopicAvailable } from "./topics-repository.js";
 import { withSerializableTransaction } from "./transaction.js";
 import {
   InactiveWorkspaceMemberError,
@@ -112,6 +113,7 @@ export function rowToReminder(
     amountMinor: nullableNumber(storedAmount),
     currency: nullableString(getField(data, "currency")),
     visibility: getField(data, "visibility"),
+    messageThreadId: getField(data, "message_thread_id") ?? null,
     assignment:
       getField(data, "assignment_mode") === "person"
         ? {
@@ -183,6 +185,7 @@ export function rowToOccurrence(data: Record<string, unknown>): ReminderOccurren
     amountMinor: nullableNumber(getField(data, "amount_minor")),
     currency: nullableString(getField(data, "currency")),
     visibility: reminderVisibilitySchema.parse(getField(data, "visibility")),
+    messageThreadId: nullableNumber(getField(data, "message_thread_id")),
     timezone: String(getField(data, "timezone")),
     leadMinutes: nullableNumber(getField(data, "lead_minutes")),
     repeatIntervalMinutes: Number(getField(data, "repeat_interval_minutes")),
@@ -446,6 +449,8 @@ export class OccurrencesRepository {
         const parsed = reminderDraftSchema.parse({
           ...parsedInput,
           kind: parsedInput.kind ?? occurrence.kind,
+          messageThreadId: parsedInput.visibility === "private" ? null
+            : parsedInput.messageThreadId === undefined ? occurrence.messageThreadId : parsedInput.messageThreadId,
           notificationPolicy: {
             ...parsedInput.notificationPolicy,
             // This value is used only for validating the rest of the draft.
@@ -523,6 +528,12 @@ export class OccurrencesRepository {
           }
         }
 
+        await assertTopicAvailable(transaction, workspaceId, parsed.messageThreadId);
+        const deliveryTargetChanged = occurrence.visibility !== parsed.visibility ||
+          occurrence.messageThreadId !== parsed.messageThreadId ||
+          (parsed.visibility === "private" && JSON.stringify(occurrence.assignment) !== JSON.stringify(parsed.assignment));
+        const migrateLiveMessage = deliveryTargetChanged && occurrence.latestMessageId != null;
+
         const deadlineReference = DateTime.fromISO(
           parsed.schedule.frequency === "once" ? parsed.schedule.date : occurrence.dueLocalDate,
           { zone: parsed.timezone },
@@ -586,7 +597,7 @@ export class OccurrencesRepository {
         }
 
         const notificationScheduleAssignments = preserveLegacyNotificationSchedule
-          ? ""
+          ? (migrateLiveMessage ? "next_notification_at = $now," : "")
           : `
               reminder_start_at = $reminder_start_at,
               lead_minutes = $lead_minutes,
@@ -608,6 +619,7 @@ export class OccurrencesRepository {
             DECLARE $amount_minor AS Int64?;
             DECLARE $currency AS Utf8?;
             DECLARE $visibility AS Utf8;
+            DECLARE $message_thread_id AS Int64?;
             DECLARE $assignment_mode AS Utf8;
             DECLARE $responsible_user_id AS Int64?;
             DECLARE $due_at AS Timestamp;
@@ -626,6 +638,7 @@ export class OccurrencesRepository {
             DECLARE $now AS Timestamp;
             DECLARE $event_id AS Utf8;
             DECLARE $payload AS JsonDocument;
+            DECLARE $migrate_live_message AS Bool;
             DECLARE $revision_increment AS Uint64;
 
             UPDATE reminder_occurrences SET
@@ -639,6 +652,7 @@ export class OccurrencesRepository {
               amount_minor = $amount_minor,
               currency = $currency,
               visibility = $visibility,
+              message_thread_id = $message_thread_id,
               assignment_mode = $assignment_mode,
               responsible_user_id = $responsible_user_id,
               due_at = $due_at,
@@ -647,6 +661,7 @@ export class OccurrencesRepository {
               status = $status,
               timezone = $timezone,
               ${notificationScheduleAssignments}
+              message_sync_retire_only = IF($migrate_live_message, true, message_sync_retire_only),
               repeat_interval_minutes = $repeat_interval_minutes,
               ignore_quiet_hours = $ignore_quiet_hours,
               escalation_enabled = $escalation_enabled,
@@ -678,6 +693,8 @@ export class OccurrencesRepository {
             $amount_minor: optionalInt64(parsed.amountMinor),
             $currency: optionalUtf8(parsed.currency),
             $visibility: TypedValues.utf8(parsed.visibility),
+            $message_thread_id: optionalInt64(parsed.messageThreadId),
+            $migrate_live_message: TypedValues.bool(migrateLiveMessage),
             $assignment_mode: TypedValues.utf8(parsed.assignment.mode),
             $responsible_user_id: optionalInt64(
               parsed.assignment.mode === "person" ? parsed.assignment.responsibleUserId : null,
@@ -829,6 +846,12 @@ export class OccurrencesRepository {
           UPDATE reminder_occurrences SET
             delivery_lock_key = NULL,
             delivery_locked_at = NULL,
+            latest_message_chat_id = IF(
+              $succeeded AND message_sync_retire_only = true, NULL, latest_message_chat_id
+            ),
+            latest_message_id = IF(
+              $succeeded AND message_sync_retire_only = true, NULL, latest_message_id
+            ),
             message_sync_required = IF($succeeded, false, message_sync_required),
             message_sync_retire_only = IF($succeeded, false, message_sync_retire_only)
           WHERE workspace_id = $workspace_id
@@ -922,6 +945,7 @@ export class OccurrencesRepository {
           amountMinor: reminder.amountMinor,
           currency: reminder.currency,
           visibility: reminder.visibility,
+          messageThreadId: reminder.messageThreadId,
           timezone: reminder.timezone,
           leadMinutes: reminder.notificationPolicy.leadMinutes,
           repeatIntervalMinutes: reminder.notificationPolicy.repeatIntervalMinutes,
@@ -971,6 +995,7 @@ export class OccurrencesRepository {
             DECLARE $amount_minor AS Int64?;
             DECLARE $currency AS Utf8?;
             DECLARE $visibility AS Utf8;
+            DECLARE $message_thread_id AS Int64?;
             DECLARE $timezone AS Utf8;
             DECLARE $lead_minutes AS Uint32;
             DECLARE $repeat_interval_minutes AS Uint32;
@@ -997,7 +1022,7 @@ export class OccurrencesRepository {
               workspace_id, occurrence_id, reminder_id, reminder_version,
               due_at, due_local_date, all_day, reminder_start_at, status,
               notification_state, assignment_mode, responsible_user_id,
-              kind, title, description, action_url, amount_minor, currency, visibility,
+              kind, title, description, action_url, amount_minor, currency, visibility, message_thread_id,
               timezone, lead_minutes, repeat_interval_minutes, ignore_quiet_hours,
               escalation_enabled, escalation_delay_minutes,
               escalation_repeat_minutes, watcher_user_ids, next_notification_at,
@@ -1008,7 +1033,7 @@ export class OccurrencesRepository {
               $workspace_id, $occurrence_id, $reminder_id, $reminder_version,
               $due_at, $due_local_date, $all_day, $reminder_start_at, $status,
               $notification_state, $assignment_mode, $responsible_user_id,
-              $kind, $title, $description, $action_url, $amount_minor, $currency, $visibility,
+              $kind, $title, $description, $action_url, $amount_minor, $currency, $visibility, $message_thread_id,
               $timezone, $lead_minutes, $repeat_interval_minutes, $ignore_quiet_hours,
               $escalation_enabled, $escalation_delay_minutes,
               $escalation_repeat_minutes, $watcher_user_ids, $next_notification_at,
@@ -1052,6 +1077,7 @@ export class OccurrencesRepository {
             $amount_minor: optionalInt64(occurrence.amountMinor),
             $currency: optionalUtf8(occurrence.currency),
             $visibility: TypedValues.utf8(occurrence.visibility),
+            $message_thread_id: optionalInt64(occurrence.messageThreadId),
             $timezone: TypedValues.utf8(occurrence.timezone),
             $lead_minutes: TypedValues.uint32(reminder.notificationPolicy.leadMinutes),
             $repeat_interval_minutes: TypedValues.uint32(

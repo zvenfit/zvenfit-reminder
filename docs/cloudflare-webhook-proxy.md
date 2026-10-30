@@ -22,7 +22,7 @@ Cloud Functions также идут через закрытый маршрут W
   валидный bot token в закрытых заголовках. Proxy secret проверяется до метода,
   allowlist и content type, поэтому ошибки доверенного внутреннего клиента
   остаются расследуемыми, а публичный клиент не получает лишних деталей.
-- Разрешены только необходимые методы: `getMe`, `getChatMember`, `sendMessage`,
+- Разрешены только необходимые методы: `getMe`, `getChat`, `getChatMember`, `sendMessage`, `setChatMenuButton`, `setMyCommands`,
   `editMessageText`, `deleteMessage`, `answerCallbackQuery`,
   `savePreparedKeyboardButton`, `getUserProfilePhotos` и `getFile`.
 - Фото профиля скачиваются отдельным закрытым маршрутом `/telegram-file/*`:

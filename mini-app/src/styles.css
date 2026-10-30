@@ -3000,10 +3000,15 @@ button:disabled {
 
 .workspace-recovery__actions {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 22px;
 }
 
-.workspace-recovery__actions button {
-  margin-top: 22px;
+.workspace-recovery__actions .recovery-action {
+  flex-shrink: 0;
+  margin-top: 0;
 }
 
 @media (max-width: 420px) {
@@ -4401,3 +4406,30 @@ button:disabled {
     justify-content: space-between;
   }
 }
+
+/* Reuse the existing secondary action without its narrow-screen heading offset. */
+.field > .sync-button {
+  margin: 0;
+  justify-self: start;
+}
+
+/* Connection flows reuse the existing panel, field and action grammar. */
+.workspace-connector,
+.draft-recovery {
+  display: grid;
+  gap: 12px;
+  margin: 20px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-panel);
+  background: var(--paper);
+  overflow-wrap: anywhere;
+}
+.workspace-connector h2 { margin: 0; font-size: var(--text-section); }
+.workspace-connector p,
+.draft-recovery p { margin: 0; font-size: var(--text-body); }
+.workspace-connector small { font-size: var(--text-caption); color: var(--ink-soft); }
+.workspace-connector__actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.workspace-connector__actions > button { max-width: 100%; white-space: normal; }
+.workspace-connect-link { margin: 0 0 12px; }
+.save-recovery { margin-bottom: 16px; }
