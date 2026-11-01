@@ -17,6 +17,7 @@ import {
   getInitData,
   listWorkspaces,
   listMembers,
+  listTopics,
   listReminders,
   loadDashboard,
   loadHistory,
@@ -40,6 +41,7 @@ import {
   type SnoozeSelection,
   type UpdateOccurrenceBody,
   type WorkspaceMember,
+  type WorkspaceTopic,
   type Workspace,
 } from "./api";
 import {
@@ -75,6 +77,11 @@ import {
 } from "./reminder-form-utils";
 import { CalendarDateField } from "./calendar-date-field";
 import { MemberAvatar, PersonSelect } from "./person-select";
+import { launchWorkspaceHint } from "./launch-context";
+import { TopicConnector } from "./topic-connector";
+import { WorkspaceConnector } from "./workspace-connector";
+import { emptyTopicDraft, latestReminderDraft, readReminderDraft, removeReminderDraft, saveReminderDraft, type ReminderDraft, type TopicDraft } from "./reminder-draft-storage";
+import { emptyForm, reminderForm, cloneReminderForm, type ReminderFormState, type EditScope } from "./reminder-form-state";
 import { UiIcon } from "./ui-icon";
 import "@fontsource-variable/onest/wght.css";
 import "@fontsource/ibm-plex-mono/400.css";
@@ -82,7 +89,7 @@ import "@fontsource/ibm-plex-mono/600.css";
 import "./styles.css";
 
 type MainView = "home" | "plan" | "history";
-type View = MainView | "detail" | "create" | "settings" | "members";
+type View = MainView | "detail" | "create" | "settings" | "members" | "connect";
 type Scope = "mine" | "group";
 type Frequency = ScheduleSpec["frequency"];
 type DetailTarget = { kind: "occurrence" | "reminder"; id: string };
@@ -96,7 +103,7 @@ function resizeDetailsTextarea(textarea: HTMLTextAreaElement | null): void {
   textarea.style.height = `${nextHeight}px`;
   textarea.style.overflowY = textarea.scrollHeight > maximumHeight ? "auto" : "hidden";
 }
-type EditScope = "occurrence" | "series";
+
 
 const PRESERVE_LEGACY_LEAD = "preserve";
 const PAYMENT_CURRENCIES = [
@@ -104,33 +111,6 @@ const PAYMENT_CURRENCIES = [
   { code: "USD", label: "$ · USD" },
 ] as const;
 
-interface ReminderFormState {
-  kind: ReminderKind;
-  title: string;
-  description: string;
-  actionUrl: string;
-  amountMajor: string;
-  currency: string;
-  visibility: "group" | "private";
-  assignmentMode: "person" | "anyone";
-  responsibleUserId: string;
-  watcherUserIds: number[];
-  frequency: Frequency;
-  date: string;
-  startDate: string;
-  timeLocal: string;
-  allDay: boolean;
-  interval: string;
-  weekdays: number[];
-  monthlyDay: string;
-  monthlyLastDay: boolean;
-  yearlyMonth: string;
-  yearlyDay: string;
-  leadAmount: string;
-  leadUnit: LeadTimeUnit;
-  repeatIntervalMinutes: string;
-  ignoreQuietHours: boolean;
-}
 
 interface SettingsFormState {
   timezone: string;
@@ -144,6 +124,7 @@ type ReminderFormErrorKey =
   | "amount"
   | "actionUrl"
   | "responsible"
+  | "topic"
   | "date"
   | "startDate"
   | "occurrenceDate"
@@ -159,6 +140,7 @@ const FORM_ERROR_FOCUS_ORDER: Array<[ReminderFormErrorKey, string]> = [
   ["title", "#reminder-title"],
   ["amount", "#reminder-amount"],
   ["actionUrl", "#reminder-action-url"],
+  ["topic", "#reminder-topic"],
   ["responsible", "#reminder-responsible"],
   ["occurrenceDate", "#reminder-occurrence-date"],
   ["date", "#reminder-date"],
@@ -170,13 +152,6 @@ const FORM_ERROR_FOCUS_ORDER: Array<[ReminderFormErrorKey, string]> = [
   ["leadMinutes", "#reminder-lead-minutes"],
 ];
 
-function cloneReminderForm(form: ReminderFormState): ReminderFormState {
-  return {
-    ...form,
-    watcherUserIds: [...form.watcherUserIds],
-    weekdays: [...form.weekdays],
-  };
-}
 
 function timePosition(value: string): string {
   if (!isLocalTime24(value)) return "0%";
@@ -249,91 +224,6 @@ function handleRovingControlKey(event: KeyboardEvent<HTMLElement>): void {
   controls[nextIndex]?.click();
 }
 
-function emptyForm(
-  responsibleUserId?: number,
-  timezone = DEFAULT_TIMEZONE,
-  reference = new Date(),
-): ReminderFormState {
-  const today = localCalendarDate(reference, timezone);
-  const tomorrow = localCalendarDate(reference, timezone, 1);
-  const [, month, day] = today.split("-");
-  return {
-    kind: "task",
-    title: "",
-    description: "",
-    actionUrl: "",
-    amountMajor: "",
-    currency: "RUB",
-    visibility: "group",
-    assignmentMode: "person",
-    responsibleUserId: responsibleUserId ? String(responsibleUserId) : "",
-    watcherUserIds: [],
-    frequency: "once",
-    date: tomorrow,
-    startDate: today,
-    timeLocal: "09:00",
-    allDay: false,
-    interval: "1",
-    weekdays: [isoWeekdayInTimezone(reference, timezone)],
-    monthlyDay: String(Number(day)),
-    monthlyLastDay: false,
-    yearlyMonth: String(Number(month)),
-    yearlyDay: String(Number(day)),
-    leadAmount: "0",
-    leadUnit: "hours",
-    repeatIntervalMinutes: "360",
-    ignoreQuietHours: false,
-  };
-}
-
-function reminderForm(reminder: Reminder): ReminderFormState {
-  const form = emptyForm(
-    reminder.assignment.mode === "person" ? reminder.assignment.responsibleUserId : undefined,
-    reminder.timezone,
-  );
-  form.kind = reminder.kind;
-  form.title = reminder.title;
-  form.description = reminder.description ?? "";
-  form.actionUrl = reminder.actionUrl ?? "";
-  form.amountMajor = reminder.amountMinor == null ? "" : String(reminder.amountMinor / 100);
-  form.currency = reminder.currency ?? "RUB";
-  form.visibility = reminder.visibility;
-  form.assignmentMode = reminder.assignment.mode;
-  form.responsibleUserId = reminder.assignment.mode === "person"
-    ? String(reminder.assignment.responsibleUserId)
-    : "";
-  form.watcherUserIds = [...reminder.watcherUserIds];
-  form.frequency = reminder.schedule.frequency;
-  form.allDay = reminder.schedule.timing.kind === "allDay";
-  if (reminder.schedule.timing.kind === "timed") {
-    form.timeLocal = reminder.schedule.timing.timeLocal;
-  }
-  if (reminder.schedule.frequency === "once") {
-    form.date = reminder.schedule.date;
-  } else {
-    form.startDate = reminder.schedule.startDate;
-    form.interval = String(reminder.schedule.interval);
-  }
-  if (reminder.schedule.frequency === "weekly") {
-    form.weekdays = [...reminder.schedule.weekdays];
-  }
-  if (reminder.schedule.frequency === "monthly") {
-    form.monthlyLastDay = reminder.schedule.day.type === "lastDay";
-    if (reminder.schedule.day.type === "dayOfMonth") {
-      form.monthlyDay = String(reminder.schedule.day.value);
-    }
-  }
-  if (reminder.schedule.frequency === "yearly") {
-    form.yearlyMonth = String(reminder.schedule.month);
-    form.yearlyDay = String(reminder.schedule.day);
-  }
-  const leadDraft = leadTimeDraftFromMinutes(reminder.notificationPolicy.leadMinutes);
-  form.leadAmount = leadDraft.amount;
-  form.leadUnit = leadDraft.unit;
-  form.repeatIntervalMinutes = String(reminder.notificationPolicy.repeatIntervalMinutes);
-  form.ignoreQuietHours = reminder.notificationPolicy.ignoreQuietHours;
-  return form;
-}
 
 function workspaceSettings(workspace: Workspace): SettingsFormState {
   return {
@@ -361,9 +251,9 @@ function memberRoleLabel(role: WorkspaceMember["role"]): string {
   return "Участник";
 }
 
-function BackButton({ onClick }: { onClick: () => void }) {
+function BackButton({ onClick, disabled = false }: { onClick: () => void; disabled?: boolean }) {
   return (
-    <button className="back-button" type="button" aria-label="Назад" onClick={onClick}>
+    <button className="back-button" type="button" aria-label="Назад" disabled={disabled} onClick={onClick}>
       <svg aria-hidden="true" viewBox="0 0 24 24">
         <path d="M15 18 9 12l6-6" />
       </svg>
@@ -825,6 +715,7 @@ function App() {
   const [telegramAuthMissing] = useState(() => !previewMode && !getInitData());
   const [workspaceLoadAttempt, setWorkspaceLoadAttempt] = useState(0);
   const [view, setView] = useState<View>("home");
+  const [connectReturnView, setConnectReturnView] = useState<View>("home");
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
   const [scope, setScope] = useState<Scope>("group");
@@ -840,8 +731,22 @@ function App() {
   const [detailTarget, setDetailTarget] = useState<DetailTarget | null>(null);
   const [detailReturnView, setDetailReturnView] = useState<MainView>("home");
   const [archiveTarget, setArchiveTarget] = useState<Reminder | null>(null);
+  const [topics, setTopics] = useState<WorkspaceTopic[]>([]);
+  const [topicsLoading, setTopicsLoading] = useState(false);
+  const [topicsError, setTopicsError] = useState<string | null>(null);
+  const [topicsReload, setTopicsReload] = useState(0);
+  const [topicConnecting, setTopicConnecting] = useState(false);
   const [form, setForm] = useState<ReminderFormState>(() => emptyForm());
   const [formErrors, setFormErrors] = useState<ReminderFormErrors>({});
+  const [rawFields, setRawFields] = useState<Record<string, string>>({});
+  const [topicDrafts, setTopicDrafts] = useState<Record<EditScope, TopicDraft>>(() => ({ series: emptyTopicDraft(), occurrence: emptyTopicDraft() }));
+  const [savedDraft, setSavedDraft] = useState<ReminderDraft | null>(null);
+  const [draftStorageFailed, setDraftStorageFailed] = useState(false);
+  const [submissionUncertain, setSubmissionUncertain] = useState(false);
+  const draftContextRef = useRef<{ actorId: number; workspaceId: string; entityKey: string; sourceVersion?: number; sourceUpdatedAt?: string } | null>(null);
+  const draftIdentityRef = useRef("");
+  const draftSnapshotRef = useRef<ReminderDraft | null>(null);
+  const workspaceListGenerationRef = useRef(0);
   const [settingsForm, setSettingsForm] = useState<SettingsFormState>({
     timezone: DEFAULT_TIMEZONE,
     quietHoursStart: "22:00",
@@ -916,6 +821,32 @@ function App() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    setTopics([]);
+    setTopicsError(null);
+  }, [workspaceId]);
+
+  const needsTopics = view === "create" || view === "detail";
+  useEffect(() => {
+    if (!workspaceId || !needsTopics) return;
+    let active = true;
+    setTopicsLoading(true);
+    setTopicsError(null);
+    void listTopics(workspaceId).then((response) => {
+      if (active) setTopics(response.topics);
+    }).catch(() => {
+      if (active) setTopicsError("Не удалось загрузить темы. Обновите список перед выбором.");
+    }).finally(() => {
+      if (active) setTopicsLoading(false);
+    });
+    return () => { active = false; };
+  }, [workspaceId, needsTopics, topicsReload]);
+
+  function topicLabel(messageThreadId: number | null | undefined): string {
+    if (messageThreadId == null) return "Общий чат / Общее";
+    return topics.find((topic) => topic.messageThreadId === messageThreadId)?.name ?? `Тема №${messageThreadId}`;
+  }
+
   const actorId = window.Telegram?.WebApp?.initDataUnsafe?.user?.id ??
     (previewMode ? members[0]?.userId : undefined);
   const telegramUser = window.Telegram?.WebApp?.initDataUnsafe?.user;
@@ -940,6 +871,81 @@ function App() {
     [reminders],
   );
   const actor = actorId ? memberMap.get(actorId) : undefined;
+  draftIdentityRef.current = `${actorId}:${workspaceId}:${editingReminderId ?? "new"}:${editingOccurrenceId ?? ""}:${editScope}`;
+
+  useEffect(() => {
+    setSavedDraft(actorId && workspaceId ? latestReminderDraft(actorId, workspaceId) : null);
+  }, [actorId, workspaceId, view]);
+
+  useEffect(() => {
+    const context = draftContextRef.current;
+    if (!context || context.workspaceId !== workspaceId || context.actorId !== actorId ||
+      !(view === "create" || (view === "members" && membersReturnView === "create"))) return;
+    const scopedForms = editFormDraftsRef.current
+      ? { ...editFormDraftsRef.current, [editScope]: cloneReminderForm(form) } : null;
+    const snapshot: ReminderDraft = {
+      version: 1, savedAt: Date.now(), ...context, editingReminderId, editingOccurrenceId, editScope,
+      form: cloneReminderForm(form), scopedForms, occurrenceDate, occurrenceTime, occurrenceAllDay,
+      rawFields, topicDrafts, submissionUncertain,
+    };
+    draftSnapshotRef.current = snapshot;
+    setDraftStorageFailed(!saveReminderDraft(snapshot));
+  }, [workspaceId, actorId, view, membersReturnView, form, editingReminderId, editingOccurrenceId, editScope,
+    occurrenceDate, occurrenceTime, occurrenceAllDay, rawFields, topicDrafts, submissionUncertain]);
+
+  useEffect(() => {
+    if (view !== "create") return;
+    const app = window.Telegram?.WebApp;
+    app?.enableClosingConfirmation?.();
+    const flush = () => { if (draftSnapshotRef.current) saveReminderDraft(draftSnapshotRef.current); };
+    window.addEventListener("pagehide", flush);
+    return () => { window.removeEventListener("pagehide", flush); app?.disableClosingConfirmation?.(); };
+  }, [view]);
+
+  function clearSavedDraft() {
+    if (draftContextRef.current) removeReminderDraft(draftContextRef.current);
+    draftContextRef.current = null;
+    draftSnapshotRef.current = null;
+    setSavedDraft(null);
+    setSubmissionUncertain(false);
+  }
+
+  function reviewUncertainSave() {
+    const selectedId = activeWorkspaceIdRef.current;
+    if (!selectedId) return;
+    // Navigate before the read: its response may update only this workspace,
+    // and must never pull the user back after they open another group or draft.
+    setView("plan");
+    void refresh(selectedId);
+  }
+
+  function restoreDraft(draft: ReminderDraft) {
+    if (draft.actorId !== actorId || draft.workspaceId !== workspaceId) return;
+    const source = draft.editingReminderId ? reminders.find((item) => item.reminderId === draft.editingReminderId) : undefined;
+    const occurrence = draft.editingOccurrenceId ? [...occurrences, ...historyOccurrences].find((item) => item.occurrenceId === draft.editingOccurrenceId) : undefined;
+    if ((draft.editingReminderId && !source) || (draft.editingOccurrenceId && (!occurrence || ["completed", "cancelled"].includes(occurrence.status)))) {
+      showError("Исходное напоминание недоступно или срок уже завершён. Обновите данные перед восстановлением черновика."); return;
+    }
+    if (draft.form.visibility === "group" && actor?.role !== "owner" && actor?.role !== "organizer") {
+      showError("Для этого черновика нужны права организатора группы."); return;
+    }
+    draftContextRef.current = { actorId: draft.actorId, workspaceId: draft.workspaceId, entityKey: draft.entityKey, sourceVersion: draft.sourceVersion, sourceUpdatedAt: draft.sourceUpdatedAt };
+    setEditingReminderId(draft.editingReminderId); setEditingOccurrenceId(draft.editingOccurrenceId); setEditScope(draft.editScope);
+    editFormDraftsRef.current = draft.scopedForms;
+    setForm(cloneReminderForm(draft.form)); setOccurrenceDate(draft.occurrenceDate); setOccurrenceTime(draft.occurrenceTime); setOccurrenceAllDay(draft.occurrenceAllDay);
+    setRawFields(draft.rawFields); setTopicDrafts(draft.topicDrafts); setSubmissionUncertain(Boolean(draft.submissionUncertain));
+    setFormErrors({}); clearError(); setView("create");
+    if ((source && draft.sourceVersion != null && source.version !== draft.sourceVersion) ||
+      (occurrence && draft.sourceUpdatedAt && occurrence.updatedAt !== draft.sourceUpdatedAt)) {
+      setNotice("Напоминание изменилось, пока вы были вне приложения. Проверьте черновик перед сохранением.");
+    }
+  }
+
+  function rawField(id: string) {
+    const key = `${editScope}:${id}`;
+    return { rawDraft: rawFields[key], onDraftChange: (value: string) => setRawFields((current) => ({ ...current, [key]: value })) };
+  }
+
 
   const visibleOccurrences = useMemo(
     () =>
@@ -1112,19 +1118,17 @@ function App() {
       return;
     }
     const generation = ++refreshGenerationRef.current;
-    const historyGeneration = ++historyRefreshGenerationRef.current;
-    setHistoryLoading(false);
     selectWorkspace(selectedId);
     setLoading(true);
     clearError();
-    setHistoryError(null);
     setDashboardLoadError(null);
+    // History has its own loading/error state and must not hold up the home screen.
+    void refreshHistory(selectedId);
     try {
-      const [dashboardResult, remindersResult, membersResult, historyResult] = await Promise.allSettled([
+      const [dashboardResult, remindersResult, membersResult] = await Promise.allSettled([
         loadDashboard(),
         listReminders(),
         listMembers(),
-        loadHistory(),
       ]);
       if (
         generation !== refreshGenerationRef.current ||
@@ -1166,14 +1170,6 @@ function App() {
           ? "Не удалось обновить данные. Показываем последнюю загруженную версию."
           : dashboardFailureMessage(unavailableResources));
       setHasLoadedDashboard(true);
-      if (historyGeneration === historyRefreshGenerationRef.current) {
-        if (historyResult.status === "fulfilled") {
-          setHistoryOccurrences(historyResult.value.occurrences);
-        } else {
-          setHistoryOccurrences([]);
-          setHistoryError("История временно недоступна. Остальные данные загружены.");
-        }
-      }
     } catch (requestError) {
       if (
         generation === refreshGenerationRef.current &&
@@ -1231,15 +1227,20 @@ function App() {
       setLoading(false);
       return;
     }
+    const generation = ++workspaceListGenerationRef.current;
+    let active = true;
     void (async () => {
       setLoading(true);
       clearError();
       try {
         const response = await listWorkspaces();
+        if (!active || generation !== workspaceListGenerationRef.current) return;
         setWorkspaces(response.workspaces);
-        const storedWorkspaceId = window.localStorage.getItem("zvenfit.workspaceId");
-        const initial = response.workspaces.find((workspace) =>
-          workspace.workspaceId === storedWorkspaceId) ?? response.workspaces[0];
+        let storedWorkspaceId: string | null = null;
+        try { storedWorkspaceId = window.localStorage.getItem("zvenfit.workspaceId"); } catch { /* Storage is optional. */ }
+        const launchWorkspaceId = launchWorkspaceHint(window.location.search, window.Telegram?.WebApp?.initDataUnsafe?.start_param);
+        const initial = response.workspaces.find((workspace) => workspace.workspaceId === launchWorkspaceId) ??
+          response.workspaces.find((workspace) => workspace.workspaceId === storedWorkspaceId) ?? response.workspaces[0];
         if (!initial) {
           activeWorkspaceIdRef.current = null;
           setWorkspaceId(null);
@@ -1255,12 +1256,13 @@ function App() {
         }
         activeWorkspaceIdRef.current = initial.workspaceId;
         setWorkspaceId(initial.workspaceId);
+        selectWorkspace(initial.workspaceId);
         await refresh(initial.workspaceId);
       } catch (requestError) {
-        showError(requestError);
-        setLoading(false);
+        if (active && generation === workspaceListGenerationRef.current) { showError(requestError); setLoading(false); }
       }
     })();
+    return () => { active = false; };
   }, [telegramAuthMissing, workspaceLoadAttempt]);
 
   function retryWorkspaceLoad() {
@@ -1272,12 +1274,44 @@ function App() {
     setWorkspaceLoadAttempt((attempt) => attempt + 1);
   }
 
-  async function changeWorkspace(nextWorkspaceId: string) {
+  async function reloadWorkspaces() {
+    const generation = ++workspaceListGenerationRef.current;
+    const response = await listWorkspaces();
+    if (generation === workspaceListGenerationRef.current) setWorkspaces(response.workspaces);
+    return response.workspaces;
+  }
+
+  async function finishGroupConnection(connectedWorkspaceId: string, stillActive: () => boolean) {
+    const available = await reloadWorkspaces();
+    if (!stillActive()) return;
+    if (!available.some((item) => item.workspaceId === connectedWorkspaceId)) throw new Error("Группа ещё не доступна");
+    await activateWorkspace(connectedWorkspaceId);
+  }
+
+  function openGroupConnector() {
+    setConnectReturnView(view); clearError(); setView("connect");
+  }
+
+  useEffect(() => {
+    if (view !== "connect") return;
+    const back = window.Telegram?.WebApp?.BackButton;
+    const returnToPrevious = () => setView(connectReturnView);
+    back?.show(); back?.onClick(returnToPrevious);
+    return () => { back?.offClick(returnToPrevious); back?.hide(); };
+  }, [view, connectReturnView]);
+
+  async function activateWorkspace(nextWorkspaceId: string) {
     historyRefreshGenerationRef.current += 1;
     setHistoryLoading(false);
     activeWorkspaceIdRef.current = nextWorkspaceId;
     setWorkspaceId(nextWorkspaceId);
-    window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId);
+    selectWorkspace(nextWorkspaceId);
+    draftContextRef.current = null;
+    draftSnapshotRef.current = null;
+    setEditingReminderId(null);
+    setEditingOccurrenceId(null);
+    editFormDraftsRef.current = null;
+    try { window.localStorage.setItem("zvenfit.workspaceId", nextWorkspaceId); } catch { /* Selection remains available in memory. */ }
     setView("home");
     setDetailTarget(null);
     setArchiveTarget(null);
@@ -1309,9 +1343,11 @@ function App() {
 
   function openCreate() {
     if (!workspaceId) {
-      showError("Сначала подключите группу командой /setup.");
+      showError("Сначала подключите группу через «Подключить группу».");
       return;
     }
+    const existing = actorId ? readReminderDraft({ actorId, workspaceId, entityKey: "new" }) : null;
+    if (existing) { restoreDraft(existing); return; }
     const defaultResponsible = actorId ?? members[0]?.userId;
     const nextForm = emptyForm(
       defaultResponsible,
@@ -1323,6 +1359,8 @@ function App() {
       nextForm.assignmentMode = "person";
       nextForm.responsibleUserId = actorId ? String(actorId) : "";
     }
+    draftContextRef.current = actorId && workspaceId ? { actorId, workspaceId, entityKey: "new" } : null;
+    setRawFields({}); setTopicDrafts({ series: emptyTopicDraft(), occurrence: emptyTopicDraft() }); setSubmissionUncertain(false);
     setForm(nextForm);
     setEditingReminderId(null);
     setEditingOccurrenceId(null);
@@ -1335,6 +1373,11 @@ function App() {
   }
 
   function openEdit(reminder: Reminder, occurrence?: ReminderOccurrence) {
+    const entityKey = occurrence ? `occurrence:${occurrence.occurrenceId}` : `reminder:${reminder.reminderId}`;
+    const existing = actorId && workspaceId ? readReminderDraft({ actorId, workspaceId, entityKey }) : null;
+    if (existing) { restoreDraft(existing); return; }
+    draftContextRef.current = actorId && workspaceId ? { actorId, workspaceId, entityKey: occurrence ? `occurrence:${occurrence.occurrenceId}` : `reminder:${reminder.reminderId}`, sourceVersion: reminder.version, sourceUpdatedAt: occurrence?.updatedAt } : null;
+    setRawFields({}); setTopicDrafts({ series: emptyTopicDraft(), occurrence: emptyTopicDraft() }); setSubmissionUncertain(false);
     const seriesForm = reminderForm(reminder);
     const nextForm = cloneReminderForm(seriesForm);
     if (occurrence) {
@@ -1345,6 +1388,7 @@ function App() {
       nextForm.amountMajor = occurrence.amountMinor == null ? "" : String(occurrence.amountMinor / 100);
       nextForm.currency = occurrence.currency ?? "RUB";
       nextForm.visibility = occurrence.visibility;
+      nextForm.messageThreadId = occurrence.messageThreadId == null ? "" : String(occurrence.messageThreadId);
       nextForm.assignmentMode = occurrence.assignment.mode;
       nextForm.responsibleUserId = occurrence.assignment.mode === "person"
         ? String(occurrence.assignment.responsibleUserId)
@@ -1573,6 +1617,7 @@ function App() {
   }
 
   async function submitReminder() {
+    if (saving || topicConnecting) return;
     const validationErrors: ReminderFormErrors = {};
     if (!form.title.trim()) {
       validationErrors.title = "Напишите, что нужно сделать.";
@@ -1654,6 +1699,11 @@ function App() {
         validationErrors.leadMinutes = "Срок изменился. Выберите, когда отправить первый сигнал.";
       }
     }
+    if (form.visibility === "group" && form.messageThreadId) {
+      const selectedTopic = topics.find((topic) => String(topic.messageThreadId) === form.messageThreadId);
+      if (topicsLoading || topicsError) validationErrors.topic = "Дождитесь загрузки или обновите список тем.";
+      else if (!selectedTopic || selectedTopic.isClosed || selectedTopic.unavailableReason) validationErrors.topic = "Выберите открытую тему или общий чат.";
+    }
     if (Object.keys(validationErrors).length > 0) {
       setFormErrors(validationErrors);
       clearError();
@@ -1662,6 +1712,13 @@ function App() {
     }
     setFormErrors({});
     setSaving(true);
+    const submittedContext = draftContextRef.current;
+    const stillEditing = () => draftContextRef.current === submittedContext && activeWorkspaceIdRef.current === workspaceId;
+    const discardSubmittedDraft = () => {
+      const current = draftContextRef.current;
+      if (submittedContext && (!current || current === submittedContext || current.actorId !== submittedContext.actorId || current.workspaceId !== submittedContext.workspaceId || current.entityKey !== submittedContext.entityKey)) removeReminderDraft(submittedContext);
+    };
+    setSubmissionUncertain(true);
     clearError();
     const amount = form.amountMajor.trim() ? Math.round(Number(form.amountMajor) * 100) : null;
     const responsibleUserId = Number(form.responsibleUserId);
@@ -1677,6 +1734,7 @@ function App() {
         ? form.currency
         : null,
       visibility: form.visibility,
+      messageThreadId: form.visibility === "group" && form.messageThreadId ? Number(form.messageThreadId) : null,
       assignment:
         form.assignmentMode === "anyone"
           ? { mode: "anyone" }
@@ -1716,6 +1774,7 @@ function App() {
           amountMinor: payload.amountMinor,
           currency: payload.currency,
           visibility: payload.visibility,
+          messageThreadId: payload.messageThreadId,
           assignment: payload.assignment,
           watcherUserIds: payload.watcherUserIds,
           timezone: payload.timezone,
@@ -1729,17 +1788,21 @@ function App() {
           timing: occurrenceAllDay ? { kind: "allDay" } : { kind: "timed", timeLocal: occurrenceTime },
         };
         await updateOccurrence(editingOccurrenceId, occurrencePayload);
+        if (!stillEditing()) { discardSubmittedDraft(); return; }
         setNotice("Изменён только этот срок");
         setDetailTarget({ kind: "occurrence", id: editingOccurrenceId });
         setDetailReturnView("home");
         window.setTimeout(() => setNotice(null), 2600);
       } else if (editingReminderId) {
         await updateReminder(editingReminderId, payload);
+        if (!stillEditing()) { discardSubmittedDraft(); return; }
         setNotice("Изменения сохранены для текущего и следующих повторов");
         window.setTimeout(() => setNotice(null), 2600);
       } else {
         await createReminder(payload);
+        if (!stillEditing()) { discardSubmittedDraft(); return; }
       }
+      clearSavedDraft();
       setEditingReminderId(null);
       setEditingOccurrenceId(null);
       editFormDraftsRef.current = null;
@@ -1747,6 +1810,8 @@ function App() {
       setView(editingOccurrenceId && editScope === "occurrence" ? "detail" : "plan");
       await refresh();
     } catch (requestError) {
+      if (!stillEditing()) return;
+      if (requestError instanceof ApiError && requestError.status >= 400 && requestError.status < 500) setSubmissionUncertain(false);
       showError(requestError);
     } finally {
       setSaving(false);
@@ -2103,7 +2168,20 @@ function App() {
     return <InitialDashboardSkeleton />;
   }
 
+  if (view === "connect" && actorId) {
+    return <main className="app app--settings">
+      <header className="topbar"><BackButton onClick={() => setView(connectReturnView)} /><span className="utility-label">Группы</span></header>
+      <WorkspaceConnector key={actorId} actorId={actorId} onConnected={finishGroupConnection} />
+    </main>;
+  }
+
   if (workspaces.length === 0) {
+    if (!error && actorId && !loading) return <main className="app app--launch-error app--workspace-onboarding">
+      <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div></header>
+      <p className="form-panel__hint">Для аккаунта <b>{telegramAccountLabel}</b> пока нет подключённых групп.</p>
+      <WorkspaceConnector key={actorId} actorId={actorId} onConnected={finishGroupConnection} />
+      <button className="sync-button" type="button" onClick={retryWorkspaceLoad}>Обновить список групп</button>
+    </main>;
     return (
       <main className="app app--launch-error app--workspace-recovery">
         <header className="home-header">
@@ -2125,7 +2203,7 @@ function App() {
               : error
                 ? "Не получилось получить данные. Проверьте соединение и обновите панель."
                 : <>Для аккаунта <b>{telegramAccountLabel}</b> группы не найдены. Если
-                    команда <b>/setup</b> уже выполнена, обновите список.</>}
+                    группа уже подключена, обновите список. Иначе выберите её ниже.</>}
           </p>
           {error ? <div className="error-banner" role="alert">{error}</div> : null}
           {!loading ? (
@@ -2381,6 +2459,7 @@ function App() {
         </header>
 
         <section className="form-intro settings-intro">
+          <button type="button" className="sync-button" onClick={openGroupConnector}>Подключить ещё группу</button>
           <p className="eyebrow">Ритм группы</p>
           <h1>Когда можно звенеть</h1>
           <p>Эти правила действуют для всей группы. Срочные напоминания могут обходить тихие часы.</p>
@@ -2686,6 +2765,7 @@ function App() {
             <div><span>Срок</span><b>{formatMoment(occurrence.dueAt, detailTimezone, true)}</b><small>{occurrence.status === "overdue" ? `Просрочено на ${relativeDuration(occurrence.dueAt)}` : occurrence.status === "pending" ? `Через ${relativeDuration(occurrence.dueAt)}` : occurrenceStatusLabel(occurrence)}</small></div>
           ) : null}
           {reminder ? <div><span>Ритм задачи</span><b>{scheduleLabel(reminder.schedule)}</b><small>{reminder.status === "paused" ? "Новые сроки приостановлены" : recurringReminder ? "Каждый срок закрывается отдельно" : "Один отдельный срок"}</small></div> : null}
+          {(occurrence ?? reminder)?.visibility === "group" ? <div><span>Куда отправлять</span><b>{topicLabel((occurrence ?? reminder)?.messageThreadId)}</b></div> : null}
           <div><span>Ответственный</span><b>{responsibleUserId ? memberName(responsible) : "Любой участник"}</b><small>{responsible?.username ? `@${responsible.username}` : responsibleUserId ? "Участник группы" : "Кто отметит первым"}</small></div>
           {nextSignal && occurrence && occurrence.status !== "completed" && occurrence.status !== "cancelled" ? (
             <div className="detail-fact--signal"><span>Следующий сигнал</span><b>{nextSignal.exact}</b><small>{nextSignal.relative} · {occurrence.ignoreQuietHours ? "Разрешён в тихие часы" : "С учётом тихих часов"}</small></div>
@@ -2749,7 +2829,7 @@ function App() {
   if (view === "plan") {
     return (
       <main className="app app--main-view app--plan">
-        <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>{workspaces.length > 1 ? <WorkspaceSelect compact workspaces={workspaces} value={workspaceId ?? ""} onChange={(nextWorkspaceId) => void changeWorkspace(nextWorkspaceId)} /> : <span className="utility-label">{selectedWorkspace?.displayName}</span>}</header>
+        <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>{workspaces.length > 1 ? <WorkspaceSelect compact workspaces={workspaces} value={workspaceId ?? ""} onChange={(nextWorkspaceId) => void activateWorkspace(nextWorkspaceId)} /> : <span className="utility-label">{selectedWorkspace?.displayName}</span>}</header>
         <section className="main-view-intro">
           <div><p className="eyebrow">Будущие сроки</p><h1>План</h1><p>Серии и три ближайших повтора — без завершённых задач.</p></div>
           <div className="scope-switch" role="tablist" aria-label="Область плана" onKeyDown={handleRovingControlKey}>
@@ -2757,7 +2837,7 @@ function App() {
             <button aria-selected={scope === "group"} className={scope === "group" ? "is-selected" : ""} tabIndex={scope === "group" ? 0 : -1} onClick={() => setScope("group")} role="tab" type="button">Вся группа</button>
           </div>
         </section>
-        {dashboardLoadError && planUnavailable ? (
+        {dashboardLoadError && failedDashboardResources.includes("plan") ? (
           <RequestErrorBanner
             message={dashboardLoadError}
             recovery={{ label: "Загрузить план", onRetry: () => void refresh() }}
@@ -2803,7 +2883,7 @@ function App() {
   if (view === "history") {
     return (
       <main className="app app--main-view app--history">
-        <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>{workspaces.length > 1 ? <WorkspaceSelect compact workspaces={workspaces} value={workspaceId ?? ""} onChange={(nextWorkspaceId) => void changeWorkspace(nextWorkspaceId)} /> : <span className="utility-label">{selectedWorkspace?.displayName}</span>}</header>
+        <header className="home-header"><div className="brand-mark" aria-label="ZvenFit"><span /><b>ZvenFit</b></div>{workspaces.length > 1 ? <WorkspaceSelect compact workspaces={workspaces} value={workspaceId ?? ""} onChange={(nextWorkspaceId) => void activateWorkspace(nextWorkspaceId)} /> : <span className="utility-label">{selectedWorkspace?.displayName}</span>}</header>
         <section className="main-view-intro">
           <div><p className="eyebrow">Журнал действий</p><h1>История</h1><p>Что завершили или отменили, кто это сделал и когда.</p></div>
           <div className="scope-switch" role="tablist" aria-label="Область истории" onKeyDown={handleRovingControlKey}>
@@ -2853,6 +2933,7 @@ function App() {
   }
 
   if (view === "create") {
+    const connectionContext = draftIdentityRef.current;
     const selectedResponsible = memberMap.get(Number(form.responsibleUserId));
     const canAssignGroup = actor?.role === "owner" || actor?.role === "organizer";
     const previewResponsible = form.assignmentMode === "anyone"
@@ -2928,7 +3009,8 @@ function App() {
     return (
       <main className="app app--form">
         <header className="topbar">
-          <BackButton onClick={() => {
+          <BackButton disabled={saving} onClick={() => {
+            if (submissionUncertain) { reviewUncertainSave(); return; }
             if (editingOccurrenceId) {
               setDetailTarget({ kind: "occurrence", id: editingOccurrenceId });
               setView("detail");
@@ -2963,14 +3045,22 @@ function App() {
           <section className="edit-scope" aria-labelledby="edit-scope-title">
             <div><p className="eyebrow">Область изменений</p><h2 id="edit-scope-title">Что именно изменить?</h2></div>
             <div className="edit-scope__options" role="radiogroup" aria-label="Область редактирования" onKeyDown={handleRovingControlKey}>
-              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} tabIndex={editScope === "occurrence" ? 0 : -1} onClick={() => changeEditScope("occurrence")}><b>Только этот срок</b><small>{occurrenceDate ? formatScheduleDate(occurrenceDate) : "Дата не выбрана"}</small></button>
-              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} tabIndex={editScope === "series" ? 0 : -1} onClick={() => changeEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
+              <button className={editScope === "occurrence" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "occurrence"} tabIndex={editScope === "occurrence" ? 0 : -1} disabled={topicConnecting || saving} onClick={() => changeEditScope("occurrence")}><b>Только этот срок</b><small>{occurrenceDate ? formatScheduleDate(occurrenceDate) : "Дата не выбрана"}</small></button>
+              <button className={editScope === "series" ? "is-selected" : ""} type="button" role="radio" aria-checked={editScope === "series"} tabIndex={editScope === "series" ? 0 : -1} disabled={topicConnecting || saving} onClick={() => changeEditScope("series")}><b>Этот и следующие</b><small>Изменить ритм серии</small></button>
             </div>
           </section>
         ) : null}
 
+        {draftStorageFailed ? <p className="field-warning" role="status">Не удалось сохранить черновик на устройстве. Оставьте приложение открытым, пока копируете ссылку.</p> : null}
+        {submissionUncertain && !saving ? <div className="field save-recovery">
+          <p className="field-warning" role="status">Прошлая попытка сохранения могла завершиться. Проверьте План перед повторным сохранением.</p>
+          <button className="sync-button" type="button" onClick={reviewUncertainSave}>Проверить План</button>
+        </div> : null}
+        {saving ? <p className="form-panel__hint" role="status">Сохраняем напоминание…</p> : null}
+        {notice ? <p className="inline-note" role="status">{notice}</p> : null}
         <form
           className="reminder-form"
+          inert={saving}
           onInvalid={handleReminderFormInvalid}
           onSubmit={(event) => {
             event.preventDefault();
@@ -3152,6 +3242,47 @@ function App() {
               <p className="inline-note">Групповые поручения создают организаторы. Личное себе доступно всем.</p>
             ) : null}
 
+            {form.visibility === "group" && (selectedWorkspace?.isForum || Boolean(form.messageThreadId)) ? (
+              <div className="field">
+                <label htmlFor="reminder-topic">Куда отправлять</label>
+                <select
+                  id="reminder-topic"
+                  value={form.messageThreadId}
+                  aria-describedby="reminder-topic-help reminder-topic-status"
+                  aria-invalid={Boolean(formErrors.topic)}
+                  disabled={topicsLoading}
+                  onChange={(event) => {
+                    setForm({ ...form, messageThreadId: event.target.value });
+                    clearFormErrors("topic");
+                  }}
+                >
+                  <option value="">Общий чат / Общее</option>
+                  {form.messageThreadId && !topics.some((topic) => String(topic.messageThreadId) === form.messageThreadId)
+                    ? <option value={form.messageThreadId}>Тема №{form.messageThreadId} · {topicsLoading ? "загрузка…" : "не найдена"}</option> : null}
+                  {topics.map((topic) => <option key={topic.messageThreadId} value={topic.messageThreadId} disabled={topic.isClosed || Boolean(topic.unavailableReason)}>
+                    {topic.name}{topic.unavailableReason === "topic_deleted" ? " · недоступна" : topic.isClosed || topic.unavailableReason === "topic_closed" ? " · закрыта" : ""}
+                  </option>)}
+                </select>
+                <small id="reminder-topic-help">{form.assignmentMode === "person" ? "Бот отправит напоминание сюда и упомянет назначенного ответственного." : "Бот отправит напоминание сюда без персонального упоминания."}</small>
+                <span id="reminder-topic-status" role="status">
+                  {formErrors.topic || topicsError || (topicsLoading ? "Загружаем темы…" : "")}
+                </span>
+                {canAssignGroup && workspaceId && selectedWorkspace?.isForum ? <TopicConnector key={connectionContext} workspaceId={workspaceId} draft={topicDrafts[editScope]} disabled={topicsLoading || saving}
+                  onDraftChange={(next) => { if (draftIdentityRef.current === connectionContext) setTopicDrafts((current) => ({ ...current, [editScope]: next })); }}
+                  onBusyChange={setTopicConnecting} onConnected={(topic) => {
+                  if (draftIdentityRef.current !== connectionContext) return;
+                  setTopics((current) => [...current.filter((item) => item.messageThreadId !== topic.messageThreadId), topic].sort((a, b) => a.name.localeCompare(b.name, "ru")));
+                  setForm((current) => ({ ...current, messageThreadId: String(topic.messageThreadId) }));
+                  setTopicsError(null);
+                  clearFormErrors("topic");
+                }} /> : null}
+                <button className="sync-button" type="button" disabled={topicsLoading || topicConnecting} onClick={() => {
+                  clearFormErrors("topic");
+                  setTopicsReload((value) => value + 1);
+                }}>Обновить темы</button>
+              </div>
+            ) : null}
+
             <div className="field">
               <span>Ответственный</span>
               <PersonSelect
@@ -3210,6 +3341,7 @@ function App() {
                   <label htmlFor="reminder-occurrence-date">Дата</label>
                   <CalendarDateField
                     id="reminder-occurrence-date"
+                    {...rawField("reminder-occurrence-date")}
                     label="Дата"
                     emptyMessage="Выберите дату срока."
                     errorId="reminder-occurrence-date-error"
@@ -3226,7 +3358,8 @@ function App() {
                   setOccurrenceAllDay(event.target.checked);
                   clearFormErrors("leadMinutes");
                 }} /></label>
-                {!occurrenceAllDay ? <label className="field field--wide"><span>Время</span><Time24Field id="reminder-occurrence-time" label="Время" required value={occurrenceTime} onChange={(value) => {
+                {!occurrenceAllDay ? <label className="field field--wide"><span>Время</span><Time24Field id="reminder-occurrence-time"
+                    {...rawField("reminder-occurrence-time")} label="Время" required value={occurrenceTime} onChange={(value) => {
                   setOccurrenceTime(value);
                   clearFormErrors("leadMinutes");
                 }} /></label> : null}
@@ -3265,6 +3398,7 @@ function App() {
                   <label htmlFor="reminder-date">Дата</label>
                   <CalendarDateField
                     id="reminder-date"
+                    {...rawField("reminder-date")}
                     label="Дата"
                     emptyMessage="Выберите дату срока."
                     errorId="reminder-date-error"
@@ -3283,6 +3417,7 @@ function App() {
                   <label htmlFor="reminder-start-date">Считать сроки с</label>
                   <CalendarDateField
                     id="reminder-start-date"
+                    {...rawField("reminder-start-date")}
                     label="Считать сроки с"
                     emptyMessage="Выберите дату начала серии."
                     errorId="reminder-start-date-error"
@@ -3458,6 +3593,7 @@ function App() {
                   <span>Время</span>
                   <Time24Field
                     id="reminder-time"
+                    {...rawField("reminder-time")}
                     label="Время"
                     required
                     value={form.timeLocal}
@@ -3583,12 +3719,12 @@ function App() {
 
           <div className="form-submit-bar">
             <div>
-              <small>{form.visibility === "group" ? "Увидит группа" : "Личное"}</small>
+              <small>{form.visibility === "group" ? `Увидит группа · ${topicLabel(form.messageThreadId ? Number(form.messageThreadId) : null)}` : "Личное"}</small>
               <b>{form.assignmentMode === "anyone"
                 ? form.kind === "payment" ? "Оплатит любой" : "Выполнит любой"
                 : memberName(selectedResponsible)}</b>
             </div>
-            <button className="primary-action" type="submit" disabled={saving}>
+            <button className="primary-action" type="submit" disabled={saving || topicConnecting}>
               {saving
                 ? "Сохраняю…"
                 : editingReminderId
@@ -3627,11 +3763,19 @@ function App() {
             <WorkspaceSelect
               workspaces={workspaces}
               value={workspaceId ?? ""}
-              onChange={(nextWorkspaceId) => void changeWorkspace(nextWorkspaceId)}
+              onChange={(nextWorkspaceId) => void activateWorkspace(nextWorkspaceId)}
             />
           ) : <b>{selectedWorkspace?.displayName ?? "Группа не выбрана"}</b>}
         </span>
       </label>
+      <button className="sync-button workspace-connect-link" type="button" onClick={openGroupConnector}>Подключить группу</button>
+      {savedDraft ? <section className="draft-recovery" aria-label="Сохранённый черновик">
+        <div><b>Есть несохранённое напоминание</b><p>{savedDraft.form.title || "Без названия"}</p></div>
+        <div className="workspace-connector__actions">
+          <button className="sync-button" type="button" onClick={() => restoreDraft(savedDraft)}>Продолжить черновик</button>
+          <button className="sync-button" type="button" onClick={() => { removeReminderDraft(savedDraft); setSavedDraft(null); }}>Удалить черновик</button>
+        </div>
+      </section> : null}
 
       {selectedWorkspace?.role === "owner" || selectedWorkspace?.role === "organizer" ? (
         <div className="workspace-tools">

@@ -32,12 +32,15 @@ const TELEGRAM_METHODS = new Set([
   "answerCallbackQuery",
   "deleteMessage",
   "editMessageText",
+  "getChat",
   "getChatMember",
   "getFile",
   "getMe",
   "getUserProfilePhotos",
   "savePreparedKeyboardButton",
   "sendMessage",
+  "setChatMenuButton",
+  "setMyCommands",
 ]);
 const encoder = new TextEncoder();
 

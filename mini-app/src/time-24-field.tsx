@@ -44,6 +44,8 @@ interface Time24FieldProps {
   label: string;
   value: string;
   onChange(value: string): void;
+  rawDraft?: string;
+  onDraftChange?(value: string): void;
   required?: boolean;
   disabled?: boolean;
 }
@@ -53,10 +55,13 @@ export function Time24Field({
   label,
   value,
   onChange,
+  rawDraft,
+  onDraftChange,
   required = false,
   disabled = false,
 }: Time24FieldProps) {
-  const [draft, setDraft] = useState(value);
+  const [localDraft, setDraft] = useState(value);
+  const draft = rawDraft ?? localDraft;
   const [error, setError] = useState<string | null>(null);
   const errorId = `${useId()}-error`;
 
@@ -89,6 +94,7 @@ export function Time24Field({
           onChange={(event) => {
             const next = resolveTimeDraftChange(event.target.value, error !== null);
             setDraft(next.draft);
+            onDraftChange?.(next.draft);
             setError(next.error);
             if (next.committedValue !== null) {
               onChange(next.committedValue);

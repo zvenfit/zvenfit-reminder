@@ -5,6 +5,9 @@ import {
   PrivateChatUnavailableError,
   ReminderCreateForbiddenError,
   ScheduleHasNoFutureDeadlineError,
+  TopicRegistrationForbiddenError,
+  TopicConnectionConflictError,
+  TopicUnavailableError,
   type AppConfig,
   type ParsedInitData,
   type WorkspaceMember,
@@ -13,6 +16,8 @@ import {
   handleWorkspaceApi,
   type WorkspaceApiDependencies,
 } from "./workspace-api.js";
+import { InvalidTopicLinkError } from "./topic-link.js";
+import type { TopicConnectionService } from "./topic-connections.js";
 
 const config: AppConfig = {
   ydbEndpoint: "grpc://unused",
@@ -66,6 +71,7 @@ function dependencies(member: WorkspaceMember | null = actor()) {
     workspaces: {
       getById: vi.fn().mockResolvedValue({
         workspaceId: "workspace-a",
+        telegramChatId: -1001234567890,
         status: "active",
       }),
       listForUser: vi.fn().mockResolvedValue([]),
@@ -146,6 +152,7 @@ function dependencies(member: WorkspaceMember | null = actor()) {
         occurrence: { occurrenceId: "occurrence-a", status: "completed" },
       }),
     },
+    topics: { list: vi.fn().mockResolvedValue([]) },
     memberAvatar: {
       load: vi.fn().mockResolvedValue("data:image/jpeg;base64,AQID"),
     },
@@ -971,5 +978,72 @@ describe("handleWorkspaceApi", () => {
     expect(JSON.parse(response?.body ?? "{}")).toMatchObject({
       code: "schedule_has_no_future_deadline",
     });
+  });
+});
+
+describe("forum topics API", () => {
+  const headers = { "X-Workspace-Id": "workspace-a" };
+  const payload = { clientRequestId: "bdcdd9fa-63e6-415e-ab60-3c6b4cb01254", link: "https://t.me/c/1234567890/42", name: "Оплаты" };
+  const connection = { httpMethod: "POST", path: "/api/topic-connections", headers, body: JSON.stringify(payload) };
+  function service() {
+    return { start: vi.fn().mockResolvedValue({ connectionId: "a".repeat(32), state: "succeeded", messageThreadId: 42 }),
+      get: vi.fn().mockResolvedValue(null) } satisfies Pick<TopicConnectionService, "start" | "get">;
+  }
+  it("connects a topic through a verified operation with authenticated scope", async () => {
+    const deps = dependencies(actor("organizer")), connections = service();
+    const response = await handleWorkspaceApi(connection, config, initData, deps, connections);
+    expect(response?.statusCode).toBe(200);
+    expect(connections.start).toHaveBeenCalledExactlyOnceWith({ ...payload, workspaceId: "workspace-a", actorUserId: 20, telegramChatId: -1001234567890 });
+  });
+  it.each([null, actor("member")])("denies topic connection without active organizer rights", async (member) => {
+    const connections = service();
+    const response = await handleWorkspaceApi(connection, config, initData, dependencies(member), connections);
+    expect(response?.statusCode).toBe(403);
+    expect(connections.start).not.toHaveBeenCalled();
+  });
+  it.each(["{", "{}", JSON.stringify({ ...payload, workspaceId: "foreign" })])("validates connection data before persistence", async (body) => {
+    const connections = service();
+    expect((await handleWorkspaceApi({ ...connection, body }, config, initData, dependencies(actor("owner")), connections))?.statusCode).toBe(400);
+    expect(connections.start).not.toHaveBeenCalled();
+  });
+  it.each([
+    { error: new InvalidTopicLinkError("другой группы"), status: 400 },
+    { error: new TopicConnectionConflictError(), status: 409 },
+    { error: new TopicRegistrationForbiddenError(), status: 403 },
+    { error: new TopicUnavailableError(), status: 409 },
+  ])("handles invalid links, request conflicts and access changes", async ({ error, status }) => {
+    const connections = service();
+    connections.start.mockRejectedValue(error);
+    expect((await handleWorkspaceApi(connection, config, initData, dependencies(actor("owner")), connections))?.statusCode).toBe(status);
+  });
+  it("keeps status reads actor and workspace scoped", async () => {
+    const connections = service(), id = "a".repeat(32);
+    const response = await handleWorkspaceApi({ httpMethod: "GET", path: `/api/topic-connections/${id}`, headers }, config, initData, dependencies(actor("owner")), connections);
+    expect(response?.statusCode).toBe(404);
+    expect(connections.get).toHaveBeenCalledExactlyOnceWith(id, "workspace-a", 20);
+    expect(connections.start).not.toHaveBeenCalled();
+  });
+  it("does not expose the old unverified registration endpoint", async () => {
+    expect(await handleWorkspaceApi({ ...connection, path: "/api/topics" }, config, initData, dependencies(actor("owner")), service())).toBeNull();
+  });
+  it("lists topics only for active workspace members", async () => {
+    const deps = dependencies();
+    await handleWorkspaceApi({ httpMethod: "GET", path: "/api/topics", headers }, config, initData, deps);
+    expect(deps.topics.list).toHaveBeenCalledExactlyOnceWith("workspace-a");
+    const outsider = dependencies(null);
+    const denied = await handleWorkspaceApi({ httpMethod: "GET", path: "/api/topics", headers }, config, initData, outsider);
+    expect(denied?.statusCode).toBe(403);
+    expect(outsider.topics.list).not.toHaveBeenCalled();
+  });
+  it("passes the selected destination to the authorized write and rejects private topic payloads", async () => {
+    const deps = dependencies(actor("organizer"));
+    const event = { httpMethod: "POST", path: "/api/reminders", headers,
+      body: JSON.stringify({ ...privateReminderBody, visibility: "group", messageThreadId: 42 }) };
+    const response = await handleWorkspaceApi(event, config, initData, deps);
+    expect(response?.statusCode).toBe(201);
+    expect(deps.reminders.create).toHaveBeenCalledWith("workspace-a", 20, expect.objectContaining({ messageThreadId: 42 }));
+    const rejected = await handleWorkspaceApi({ ...event, body: JSON.stringify({ ...privateReminderBody, messageThreadId: 42 }) }, config, initData, deps);
+    expect(rejected?.statusCode).toBe(400);
+    expect(deps.reminders.create).toHaveBeenCalledOnce();
   });
 });

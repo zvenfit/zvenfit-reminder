@@ -10,10 +10,14 @@ import { getHeader } from "./api.js";
 const SAFE_ERROR_CODE_PATTERN = /^[a-z0-9_.:-]{1,100}$/i;
 const STATIC_API_ROUTES = new Set([
   "/api/workspaces",
+  "/api/group-connections",
   "/api/dashboard",
   "/api/history",
   "/api/reminders",
   "/api/members",
+  "/api/topics",
+  "/api/topic-connections",
+  "/api/group-connections",
   "/api/members/sync",
   "/api/members/publish-enrollment",
   "/api/workspace/settings",
@@ -36,6 +40,10 @@ export function trustedEdgeRequestIdForEvent(event: ApiGatewayEvent): string | u
 }
 
 export function normalizedApiRoute(path: string): string {
+  if (/^\/api\/group-connections\/[^/]+(?:\/retry)?$/.test(path)) return "/api/group-connections/:connectionId/:action";
+  if (/^\/api\/(topic|group)-connections\/[^/]+(?:\/retry)?$/.test(path)) {
+    return path.startsWith("/api/topic-") ? "/api/topic-connections/:id" : "/api/group-connections/:id/:action";
+  }
   if (/^\/api\/occurrences\/[^/]+\/(complete|snooze|undo-completion)$/.test(path)) {
     return "/api/occurrences/:occurrenceId/:action";
   }

@@ -74,6 +74,8 @@ interface CalendarDateFieldProps {
   label: string;
   value: string;
   onChange(value: string): void;
+  rawDraft?: string;
+  onDraftChange?(value: string): void;
   required?: boolean;
   disabled?: boolean;
   min?: string;
@@ -89,6 +91,8 @@ export function CalendarDateField({
   label,
   value,
   onChange,
+  rawDraft,
+  onDraftChange,
   required = false,
   disabled = false,
   min,
@@ -98,7 +102,8 @@ export function CalendarDateField({
   externalError = null,
   errorId: providedErrorId,
 }: CalendarDateFieldProps) {
-  const [draft, setDraft] = useState(() => formatCalendarDateValue(value));
+  const [localDraft, setDraft] = useState(() => formatCalendarDateValue(value));
+  const draft = rawDraft ?? localDraft;
   const [showError, setShowError] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const generatedErrorId = `${useId()}-error`;
@@ -174,6 +179,7 @@ export function CalendarDateField({
           onChange={(event) => {
             const nextDraft = formatCalendarDateDraft(event.target.value);
             setDraft(nextDraft);
+            onDraftChange?.(nextDraft);
             commitDraft(nextDraft);
           }}
           onFocus={(event) => event.currentTarget.select()}
@@ -196,6 +202,7 @@ export function CalendarDateField({
           onChange={(event) => {
             const nextValue = event.target.value;
             setDraft(formatCalendarDateValue(nextValue));
+            onDraftChange?.(formatCalendarDateValue(nextValue));
             onChange(nextValue);
             setShowError(false);
           }}

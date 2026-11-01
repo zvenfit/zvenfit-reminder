@@ -50,6 +50,11 @@ TABLES=(
   reminder_runtime
   reminder_watchers
   reminders
+  topic_connection_requests
+  group_connection_requests
+  group_connection_counters
+  group_connections
+  workspace_topics
   workspace_members
   users
   telegram_chat_workspaces

@@ -1,5 +1,6 @@
 import {
   DeliveryInProgressError,
+  GroupConnectionError,
   OccurrenceNotActionableError,
   OccurrencesRepository,
   RemindersRepository,
@@ -7,6 +8,8 @@ import {
   WorkspaceMembersRepository,
   WorkspaceChatAlreadyRegisteredError,
   WorkspacesRepository,
+  TopicsRepository,
+  TopicRegistrationForbiddenError,
   escapeHtml,
   loadConfig,
   operationalErrorFields,
@@ -21,6 +24,11 @@ import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import { ensureBotInitialized } from "./bot-initialization.js";
 import { syncGroupMembers, type SyncedTelegramUser } from "./members-sync.js";
+import { topicObservation } from "./forum-topics.js";
+import { ensureBotMenu, restorePrivateBotMenu } from "./bot-menu.js";
+import { createGroupConnectionService, groupSelectionButton, type GroupConnectionService } from "./group-connections.js";
+import { handleGroupConnectionApi } from "./group-connection-api.js";
+import { createTopicConnectionService, type TopicConnectionService } from "./topic-connections.js";
 import { buildStartResponse } from "./start-response.js";
 import {
   isActiveGroupMember,
@@ -49,6 +57,8 @@ import {
 } from "./request-observability.js";
 
 let botInstance: Bot | null = null;
+let groupConnectionsInstance: GroupConnectionService | null = null;
+let topicConnectionsInstance: TopicConnectionService | null = null;
 const TELEGRAM_API_TIMEOUT_SECONDS = 5;
 const TELEGRAM_API_FAILURE_TEXT =
   "⚠️ Бот временно не может связаться с Telegram API. Попробуйте ещё раз через минуту.";
@@ -117,7 +127,7 @@ export function buildWebhookFailureResponse(
   }
 
   const value = update as {
-    message?: { chat?: { id?: unknown } };
+    message?: { chat?: { id?: unknown }; message_thread_id?: number };
     callback_query?: { id?: unknown };
   };
   const callbackQueryId = value.callback_query?.id;
@@ -135,6 +145,8 @@ export function buildWebhookFailureResponse(
     return jsonResponse(200, {
       method: "sendMessage",
       chat_id: chatId,
+      ...(Number.isSafeInteger(value.message?.message_thread_id) && value.message!.message_thread_id! > 1
+        ? { message_thread_id: value.message!.message_thread_id } : {}),
       text,
     });
   }
@@ -155,6 +167,13 @@ function authenticatedWebhookResponse(
   }, requestId);
 }
 
+/** Initializes the existing bot and best-effort default menu for webhook and polling. */
+export async function initializeBotRuntime(bot: Bot): Promise<void> {
+  await ensureBotInitialized(bot);
+  try { await ensureBotMenu(bot, loadConfig().miniAppUrl); }
+  catch { writeFunctionLog("WARN", "bot_menu_configuration_failed", {}); }
+}
+
 export function getBot(): Bot {
   if (botInstance) {
     return botInstance;
@@ -162,6 +181,7 @@ export function getBot(): Bot {
 
   const config = loadConfig();
   const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
+  const topicsRepo = new TopicsRepository(config.ydbEndpoint, config.ydbDatabase);
   const workspaceMembersRepo = new WorkspaceMembersRepository(
     config.ydbEndpoint,
     config.ydbDatabase,
@@ -174,6 +194,10 @@ export function getBot(): Bot {
     ...(cachedBotInfo ? { botInfo: cachedBotInfo } : {}),
     client: telegramClientOptions(TELEGRAM_API_TIMEOUT_SECONDS, config),
   });
+  const groupConnections = createGroupConnectionService(config, bot.api);
+  const topicConnections = createTopicConnectionService(config, bot.api);
+  groupConnectionsInstance = groupConnections;
+  topicConnectionsInstance = topicConnections;
   const observeSyncedGroupUser = (chatId: number) => async (user: SyncedTelegramUser) =>
     observeTelegramIdentity(
       config,
@@ -191,8 +215,9 @@ export function getBot(): Bot {
     const chatId = ctx.chat?.id;
     const userId = ctx.from?.id;
     const isGroupChat = ctx.chat?.type === "group" || ctx.chat?.type === "supergroup";
-    const isConfiguredGroup = isGroupChat && chatId != null &&
-      (await workspacesRepo.getByTelegramChatId(chatId))?.status === "active";
+    const workspace = isGroupChat && chatId != null
+      ? await workspacesRepo.getByTelegramChatId(chatId) : null;
+    const isConfiguredGroup = workspace?.status === "active";
     const callbackData = ctx.callbackQuery && "data" in ctx.callbackQuery
       ? ctx.callbackQuery.data
       : null;
@@ -207,8 +232,11 @@ export function getBot(): Bot {
     const isPrivateStart =
       ctx.chat?.type === "private" &&
       userId != null &&
-      ctx.message?.text?.startsWith("/start") === true;
+      /^\/(start|menu|app)(?:@\w+)?(?:\s|$)/.test(ctx.message?.text ?? "");
     const isMemberEnrollmentCallback = userId != null && enrollmentWorkspaceId != null;
+    const isTopicConnectionCallback = userId != null && /^topic_connect:/.test(callbackData ?? "");
+    const isGroupShare = ctx.chat?.type === "private" && userId != null && ctx.message?.chat_shared != null;
+    const isGroupPanel = isGroupChat && /^\/(menu|app)(?:@\w+)?(?:\s|$)/.test(ctx.message?.text ?? "");
     const isGroupSetup =
       isGroupChat &&
       userId != null &&
@@ -219,7 +247,10 @@ export function getBot(): Bot {
       !isPrivateCallback &&
       !isPrivateStart &&
       !isMemberEnrollmentCallback &&
-      !isGroupSetup
+      !isTopicConnectionCallback &&
+      !isGroupShare &&
+      !isGroupSetup &&
+      !isGroupPanel
     ) {
       return;
     }
@@ -228,6 +259,7 @@ export function getBot(): Bot {
       ctx.from &&
       ctx.chat &&
       !isMemberEnrollmentCallback &&
+      !isTopicConnectionCallback &&
       (ctx.chat.type === "private" || isConfiguredGroup || isGroupSetup)
     ) {
       await observeTelegramIdentity(
@@ -247,23 +279,113 @@ export function getBot(): Bot {
       );
     }
 
+    if (isConfiguredGroup && workspace && ctx.message && ctx.chat?.type === "supergroup" &&
+      (workspace.isForum ?? false) !== (ctx.chat.is_forum === true)) {
+      await workspacesRepo.updateTelegramMetadata(workspace.workspaceId, ctx.chat.is_forum === true);
+    }
+
+    if (isConfiguredGroup && workspace && !isTopicConnectionCallback && !/^\/topic(?:@\w+)?(?:\s|$)/.test(ctx.message?.text ?? "")) {
+      const observed = topicObservation(ctx.message, ctx.update.update_id);
+      if (observed) await topicsRepo.observe(workspace.workspaceId, observed);
+    }
+
     await next();
   });
 
-  bot.command("start", async (ctx) => {
-    const response = buildStartResponse(
-      ctx.chat.type,
-      config.miniAppUrl,
-      bot.botInfo.username,
-    );
+  bot.callbackQuery(/^topic_connect:([0-9a-f]{32})$/, async (ctx) => {
+    const message = ctx.callbackQuery.message;
+    const confirmed = message && "is_topic_message" in message
+      ? await topicConnections.confirm({ connectionId: ctx.match[1], actorUserId: ctx.from.id,
+        chatId: message.chat.id, messageThreadId: message.message_thread_id,
+        isTopicMessage: message.is_topic_message === true }) : false;
+    await ctx.answerCallbackQuery({ text: confirmed ? "Тема подключена. Вернитесь в панель." : "Не удалось подтвердить тему. Проверьте права и срок подключения.", show_alert: !confirmed });
+  });
+
+  bot.on("message:chat_shared", async (ctx) => {
+    if (ctx.chat.type !== "private") return;
+    try { await restorePrivateBotMenu(bot, config.miniAppUrl, ctx.chat.id); }
+    catch { writeFunctionLog("WARN", "private_bot_menu_configuration_failed", {}); }
+    const result = await groupConnections.acceptShared(ctx.from.id, ctx.message.chat_shared.request_id, ctx.message.chat_shared.chat_id);
+    if (!result) {
+      await ctx.reply("Этот выбор группы больше не действует. Начните подключение в панели.", { reply_markup: { remove_keyboard: true } });
+      return;
+    }
+    await ctx.reply(result.state === "connected" ? "Группа подключена. Вернитесь в панель." :
+      result.message ?? "Проверяем группу. Вернитесь в панель, чтобы увидеть результат.", { reply_markup: { remove_keyboard: true } });
+    const panel = buildStartResponse("private", config.miniAppUrl, bot.botInfo.username, result.workspaceId);
+    if (panel.keyboard) await ctx.reply("Панель напоминаний", { reply_markup: panel.keyboard });
+  });
+
+  bot.command(["start", "menu", "app"], async (ctx) => {
+    let privateMenuReady = false;
+    try {
+      await ensureBotMenu(bot, config.miniAppUrl);
+    } catch { writeFunctionLog("WARN", "bot_menu_configuration_failed", {}); }
+    if (ctx.chat.type === "private") {
+      try { privateMenuReady = await restorePrivateBotMenu(bot, config.miniAppUrl, ctx.chat.id); }
+      catch { writeFunctionLog("WARN", "private_bot_menu_configuration_failed", {}); }
+    }
+    if (ctx.chat.type === "private" && ctx.match.startsWith("connect_")) {
+      let connection;
+      try { connection = await groupConnections.forStart(ctx.from!.id, ctx.match); }
+      catch (error) {
+        if (!(error instanceof GroupConnectionError && error.code === "not_found")) throw error;
+        await ctx.reply("Ссылка подключения недействительна для вашего аккаунта. Начните подключение в панели.", { reply_markup: { remove_keyboard: true } });
+      }
+      if (connection?.state === "pending" && connection.selectedChatId == null) {
+        await ctx.reply("Выберите группу, в которой вы администратор. Telegram предложит добавить бота с нужными правами.", {
+          reply_markup: { keyboard: [[groupSelectionButton(connection.requestId)]], resize_keyboard: true, one_time_keyboard: true },
+        });
+        return;
+      }
+      if (connection) await ctx.reply(connection.state === "connected" ? "Группа уже подключена. Откройте панель." :
+        "Этот выбор уже завершён или срок истёк. Продолжите подключение в панели.", { reply_markup: { remove_keyboard: true } });
+    }
+    const workspace = ctx.chat.type !== "private"
+      ? await workspacesRepo.getByTelegramChatId(ctx.chat.id) : null;
+    const match = /^ws_([0-9a-f-]{36})$/i.exec(ctx.match);
+    const requestedWorkspaceId = workspace?.status === "active" ? workspace.workspaceId : match?.[1];
+    const response = buildStartResponse(ctx.chat.type, config.miniAppUrl, bot.botInfo.username,
+      requestedWorkspaceId, bot.botInfo.has_main_web_app, privateMenuReady);
     await ctx.reply(response.message, {
-      reply_markup: response.removeReplyKeyboard
-        ? { remove_keyboard: true }
-        : response.keyboard,
+      reply_markup: response.removeReplyKeyboard ? { remove_keyboard: true } : response.keyboard,
     });
     if (response.removeReplyKeyboard && response.keyboard) {
       await ctx.reply("Панель напоминаний", { reply_markup: response.keyboard });
     }
+  });
+
+  bot.command("topic", async (ctx) => {
+    const workspace = await workspacesRepo.getByTelegramChatId(ctx.chat.id);
+    const actor = workspace && ctx.from
+      ? await workspaceMembersRepo.getByUserId(workspace.workspaceId, ctx.from.id) : null;
+    if (!workspace || workspace.status !== "active" || !actor || actor.status !== "active" ||
+      (actor.role !== "owner" && actor.role !== "organizer")) {
+      await ctx.reply("Подключать темы может только владелец или организатор группы.");
+      return;
+    }
+    const observed = topicObservation(ctx.message, ctx.update.update_id);
+    if (!observed) {
+      await ctx.reply("Отправьте /topic внутри нужной темы форума. Для темы «Общее» выберите «Общий чат / Общее» в панели.");
+      return;
+    }
+    const name = ctx.match.trim();
+    if (name.length > 128) {
+      await ctx.reply("Название темы должно содержать не больше 128 символов.");
+      return;
+    }
+    try {
+      await topicsRepo.observeForManager(workspace.workspaceId, ctx.from!.id, ctx.chat.id,
+        { ...observed, ...(name ? { name } : {}) });
+    } catch (error) {
+      if (!(error instanceof TopicRegistrationForbiddenError)) throw error;
+      await ctx.reply("Подключать темы может только владелец или организатор активной группы.");
+      return;
+    }
+    await ctx.reply("Тема подключена. Теперь её можно выбрать в напоминании. Название можно указать командой /topic Оплаты.", {
+      reply_markup: buildStartResponse(ctx.chat.type, config.miniAppUrl, bot.botInfo.username,
+        workspace.workspaceId, bot.botInfo.has_main_web_app).keyboard,
+    });
   });
 
   bot.command("list", async (ctx) => {
@@ -318,13 +440,17 @@ export function getBot(): Bot {
           return;
         }
       }
-      await ctx.reply("Workspace уже настроен.");
+      await ctx.reply("Группа уже подключена. Откройте панель для настройки напоминаний.", {
+        reply_markup: buildStartResponse(ctx.chat.type, config.miniAppUrl, bot.botInfo.username,
+          existing.workspaceId, bot.botInfo.has_main_web_app).keyboard,
+      });
       return;
     }
     try {
-      await workspacesRepo.create({
+      const createdWorkspace = await workspacesRepo.create({
         telegramChatId: ctx.chat.id,
         displayName: ctx.chat.title || "Группа",
+        isForum: ctx.chat.type === "supergroup" && ctx.chat.is_forum === true,
         ownerUserId: ctx.from.id,
         timezone: config.defaultTimezone,
       });
@@ -356,7 +482,9 @@ export function getBot(): Bot {
         // Workspace is already valid; /sync can retry member discovery later.
       }
       await ctx.reply(
-        `✅ Workspace создан. Участников синхронизировано: ${synced}. Можно переходить к новым напоминаниям.`,
+        `✅ Группа подключена. Участников синхронизировано: ${synced}. Откройте панель, чтобы создать напоминание.`,
+        { reply_markup: buildStartResponse(ctx.chat.type, config.miniAppUrl, bot.botInfo.username,
+          createdWorkspace.workspaceId, bot.botInfo.has_main_web_app).keyboard },
       );
     } catch (error) {
       if (error instanceof WorkspaceChatAlreadyRegisteredError) {
@@ -643,6 +771,11 @@ async function handleApi(
     return jsonResponse(401, { error: error instanceof Error ? error.message : "Unauthorized" });
   }
 
+  if (path === "/api/group-connections" || path.startsWith("/api/group-connections/")) {
+    getBot();
+    return (await handleGroupConnectionApi(event, parsedInit, groupConnectionsInstance!))!;
+  }
+
   if (method === "POST" && path === "/api/members/sync") {
     const workspaceId = getHeader(event, "X-Workspace-Id")?.trim();
     const workspacesRepo = new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase);
@@ -709,7 +842,10 @@ async function handleApi(
       });
     }
   }
-  const workspaceResponse = await handleWorkspaceApi(event, config, parsedInit);
+  const needsTopicConnections = path === "/api/topic-connections" || path.startsWith("/api/topic-connections/");
+  if (needsTopicConnections) getBot();
+  const workspaceResponse = await handleWorkspaceApi(event, config, parsedInit, undefined,
+    needsTopicConnections ? topicConnectionsInstance! : undefined);
   if (workspaceResponse) {
     return workspaceResponse;
   }
@@ -822,7 +958,7 @@ export async function handler(
       edgeRequestId = trustedEdgeRequestIdForEvent(event);
 
       const bot = getBot();
-      await ensureBotInitialized(bot);
+      await initializeBotRuntime(bot);
       const parsedUpdate: Parameters<Bot["handleUpdate"]>[0] = JSON.parse(event.body ?? "{}");
       update = parsedUpdate;
       await bot.handleUpdate(parsedUpdate);

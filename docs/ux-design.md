@@ -344,6 +344,70 @@ Plain-language preview
 Upcoming-date preview is mandatory for recurring schedules, especially monthly
 days 29–31.
 
+### Forum destination and Telegram entry
+
+Group reminder creation and editing show `Куда отправлять` beside visibility and
+responsibility. Reuse the existing native select, field help, focus/error styling,
+and secondary button; no new visual primitive or token is introduced. The default
+is `Общий чат / Общее`; known topics use names, closed topics are disabled, and a
+missing selected topic stays visible until the user deliberately replaces it.
+If Telegram forum mode is disabled, an existing destination still exposes the
+select so the user can repair it by choosing General; new topic connection is hidden.
+Private reminders hide this field and send no topic. Creation/series/occurrence
+drafts retain their own destinations. The preview and detail show the destination.
+
+Topic loading is independent of the initial dashboard and has an explicit retry
+button. Failures never clear a selected topic or present an empty list as success.
+The primary connection path is the `Подключить тему` disclosure, reusing the
+existing additional-fields primitive. It appears only for forum groups. Organizers
+paste a Telegram topic link and enter a list label; this label does not rename the
+Telegram topic. `Проверить и подключить` explicitly explains that the bot will post
+one service message without participant mentions. Only a confirmed destination is
+selected. A failed or unknown result retains the old selection and all entered
+fields. `Проверить результат` reads the existing attempt; a new send requires the
+explicit `Начать новую проверку` action and a new request identifier. Enter in the
+disclosure invokes its own action, never the reminder form submission.
+
+Topic lists contain topics known to the bot. Closed or unavailable topics remain
+visible but cannot be newly selected; updating a reminder requires an available
+destination. The main save action waits while verification is in progress. A
+successful connection collapses the disclosure and restores focus to the select.
+`Обновить темы` reloads the known list. `/topic Название` is a fallback only.
+
+The empty-workspace screen offers `Подключить группу`; the same flow is available
+beside the current group and from Settings. A supported Telegram client opens its
+native group picker. Older clients receive a button-driven path through the bot's
+private chat. The UI waits for server-confirmed group registration and membership;
+cancelling the native picker does not create a group. Reconnecting an existing
+group opens it without creating a duplicate or changing its owner. The process
+preserves its request identifier after a lost response. An expired
+attempt has an explicit new start; a rejected choice can retry that group or
+choose another. If the native picker fails, the same attempt can use the private
+chat button. Both in-app and Telegram Back return to the previous screen. Loading this
+process never resets a working dashboard. The bot's persistent `Напоминания`
+button next to the private-chat message input opens the UI directly. `/setup`,
+`/menu`, and `/app` remain fallback paths. Group launch links select an accessible
+source workspace when available.
+
+Before leaving the Mini App to copy a link, reminder drafts are retained on the
+current device for 24 hours, scoped to the Telegram account, group, and edited
+entity. `Продолжить черновик` restores the form after a relaunch; `Удалить черновик`
+discards it. The snapshot preserves both series and occurrence drafts, partial or
+invalid date/time input, selected people and destination, and topic-connection
+fields and operation identifiers. Restoring never sends a message or repeats a
+write. Membership and source state are checked against fresh server data; a
+completed or inaccessible occurrence is not reopened for editing. Successful save
+clears its draft immediately. Reopening the same editor also restores its draft;
+changes to the source series or occurrence show a review notice. Save freezes
+editing and in-app Back until the response arrives. A storage failure is shown before relying on a
+relaunch. Telegram authorization data is never stored in the draft.
+
+After a save timeout, `Проверить План` and in-app Back reload the selected group's
+Plan through read-only requests. The uncertain draft is retained and the write is
+never replayed. If that read fails, cached data is explicitly marked as stale with
+the existing retry action. A late response cannot navigate away from another
+group or a newer draft.
+
 ## Detail and action views
 
 The detail screen prioritizes:
@@ -518,6 +582,10 @@ all non-essential movement.
 - Missing private chat: explain that the responsible person must open the bot,
   with an `Open bot` action.
 - Load failure: keep cached content if present and offer `Try again`.
+- API reads stop waiting after 20 seconds and expose the existing contextual
+  retry action. History loads independently and never delays the initial Tasks
+  screen. A timed-out write explains that the change may already have been
+  saved and asks the user to check the data before repeating it.
 - Actionable error banners keep the message and retry control as separate,
   spaced elements; an action is never appended inline to the error sentence.
 - Read failures use an explicit contextual verb such as `Load data`, `Load

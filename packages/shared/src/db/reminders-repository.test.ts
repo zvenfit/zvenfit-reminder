@@ -12,6 +12,7 @@ import {
   ReminderUpdateConflictError,
   RemindersRepository,
 } from "./reminders-repository.js";
+import { TopicUnavailableError } from "./topics-repository.js";
 import { decodeYdbValue, parseYdbTimestamp } from "./ydb-utils.js";
 
 function resultSet(rows: Array<Record<string, string | number | boolean | null>>) {
@@ -34,12 +35,16 @@ function repositoryDouble(
   activeUserIds: number[],
   privateChatUserIds: number[] = activeUserIds,
   creatorRole: "owner" | "organizer" | "member" = "organizer",
+  topicState: "open" | "closed" | "missing" = "missing",
 ) {
   const session = {
     beginTransaction: vi.fn().mockResolvedValue({ id: "tx-reminder" }),
     commitTransaction: vi.fn().mockResolvedValue(undefined),
     rollbackTransaction: vi.fn().mockResolvedValue(undefined),
     executeQuery: vi.fn(async (query: string) => {
+      if (query.includes("SELECT is_closed, unavailable_reason FROM workspace_topics")) {
+        return { resultSets: [resultSet(topicState === "missing" ? [] : [{ is_closed: topicState === "closed" }])] };
+      }
       if (query.includes("SELECT status, quiet_hours_start")) {
         return {
           resultSets: [
@@ -528,11 +533,12 @@ describe("RemindersRepository", () => {
     )).rejects.toBeInstanceOf(ReminderReassignmentForbiddenError);
   });
 
-  it("preserves an amountless payment kind for legacy updates", async () => {
+  it.each([undefined, null, 52])("preserves kind and updates the current topic with PATCH destination %s", async (messageThreadId) => {
     const existing = {
       workspace_id: "workspace-a",
       reminder_id: "reminder-a",
       kind: "payment",
+      message_thread_id: 42,
       visibility: "group",
       creator_user_id: 10,
       responsible_user_id: 20,
@@ -546,6 +552,7 @@ describe("RemindersRepository", () => {
       commitTransaction: vi.fn().mockResolvedValue(undefined),
       rollbackTransaction: vi.fn().mockResolvedValue(undefined),
       executeQuery: vi.fn(async (query: string) => {
+        if (query.includes("SELECT is_closed, unavailable_reason FROM workspace_topics")) return { resultSets: [resultSet([{ is_closed: false }])] };
         if (query.includes("SELECT status, quiet_hours_start")) {
           return { resultSets: [
             resultSet([{ status: "active", quiet_hours_start: "22:00", quiet_hours_end: "08:00", default_all_day_reminder_time: "09:00" }]),
@@ -553,6 +560,8 @@ describe("RemindersRepository", () => {
             resultSet([existing]),
             resultSet([{
               current_occurrence_id: "occurrence-a",
+              current_message_thread_id: 42,
+              current_latest_message_id: 77,
               current_due_at: "2026-08-25T15:00:00.000Z",
               delivery_lock_key: null,
               delivery_locked_at: null,
@@ -578,7 +587,7 @@ describe("RemindersRepository", () => {
     await repository.update(
       "workspace-a",
       "reminder-a",
-      { ...draft, kind: undefined, title: "Новые показания" },
+      { ...draft, kind: undefined, messageThreadId, title: "Новые показания" },
       10,
       new Date("2026-08-14T00:00:00.000Z"),
     );
@@ -594,6 +603,8 @@ describe("RemindersRepository", () => {
     expect(write?.[0]).toContain("current_occurrence_id IS NULL");
     expect(decodeYdbValue(write?.[1]?.$version)).toBe(3);
     expect(decodeYdbValue(write?.[1]?.$kind)).toBe("payment");
+    expect(decodeYdbValue(write?.[1]?.$message_thread_id)).toBe(messageThreadId === undefined ? 42 : messageThreadId);
+    expect(decodeYdbValue(write?.[1]?.$migrate_live_message)).toBe(messageThreadId !== undefined);
     expect(decodeYdbValue(write?.[1]?.$schedule_changed)).toBe(false);
     expect(decodeYdbValue(write?.[1]?.$revision_increment)).toBe(1);
     expect(decodeYdbValue(write?.[1]?.$overdue_status)).toBe("overdue");
@@ -923,5 +934,27 @@ describe("RemindersRepository", () => {
       new Date("2026-08-14T00:05:00.000Z"),
     )).rejects.toBeInstanceOf(ReminderLifecycleConflictError);
     expect(session.commitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("reminder topic persistence", () => {
+  it("stores the selected topic only after validating it in the same workspace", async () => {
+    const { repository, session } = repositoryDouble([10, 20, 30], [10, 20, 30], "owner", "open");
+    const reminder = await repository.create("workspace-a", 10, { ...draft, messageThreadId: 42 }, {
+      now: new Date("2026-08-13T10:00:00Z"),
+    });
+    expect(reminder.messageThreadId).toBe(42);
+    const validation = session.executeQuery.mock.calls.find(([query]) => query.includes("SELECT is_closed"));
+    expect(decodeYdbValue(validation?.[1]?.$workspace_id)).toBe("workspace-a");
+    const write = session.executeQuery.mock.calls.find(([query]) => query.includes("INSERT INTO reminders"));
+    expect(decodeYdbValue(write?.[1]?.$message_thread_id)).toBe(42);
+  });
+  it.each(["missing", "closed"] as const)("rejects a %s topic before persistence", async (state) => {
+    const { repository, session } = repositoryDouble([10, 20, 30], [10, 20, 30], "owner", state);
+    await expect(repository.create("workspace-a", 10, { ...draft, messageThreadId: 42 }))
+      .rejects.toBeInstanceOf(TopicUnavailableError);
+    expect(session.executeQuery.mock.calls.some(([query]) => query.includes("INSERT INTO reminders"))).toBe(false);
+    expect(session.rollbackTransaction).toHaveBeenCalled();
   });
 });

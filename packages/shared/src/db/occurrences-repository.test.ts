@@ -7,6 +7,7 @@ import {
   rowToOccurrence,
 } from "./occurrences-repository.js";
 import { decodeYdbValue } from "./ydb-utils.js";
+import type { QueryParameters } from "./transaction.js";
 
 type Cell = string | number | boolean | null;
 
@@ -132,7 +133,7 @@ function syncRepository(row: Record<string, Cell>) {
     beginTransaction: vi.fn().mockResolvedValue({ id: "tx-sync" }),
     commitTransaction: vi.fn().mockResolvedValue(undefined),
     rollbackTransaction: vi.fn().mockResolvedValue(undefined),
-    executeQuery: vi.fn(async (query: string) => ({
+    executeQuery: vi.fn(async (query: string, _parameters?: QueryParameters) => ({
       resultSets: query.includes("SELECT * FROM reminder_occurrences")
         ? [resultSet([row])]
         : [],
@@ -156,7 +157,7 @@ function runtimeRow(state: "ready" | "blocked" = "ready"): Record<string, Cell> 
   };
 }
 
-function repositoryDouble(state: "ready" | "blocked" = "ready") {
+function repositoryDouble(state: "ready" | "blocked" = "ready", messageThreadId: number | null = null) {
   const session = {
     beginTransaction: vi.fn().mockResolvedValue({ id: "tx-occurrence" }),
     commitTransaction: vi.fn().mockResolvedValue(undefined),
@@ -166,7 +167,7 @@ function repositoryDouble(state: "ready" | "blocked" = "ready") {
         return {
           resultSets: [
             resultSet([runtimeRow(state)]),
-            resultSet([reminderRow]),
+            resultSet([{ ...reminderRow, message_thread_id: messageThreadId }]),
             resultSet([{ user_id: 10 }]),
           ],
         };
@@ -206,7 +207,7 @@ function occurrenceUpdateDraft(leadMinutes: number | null, date = "2026-08-25") 
   };
 }
 
-function occurrenceUpdateRepository(storedLeadMinutes: number | null) {
+function occurrenceUpdateRepository(storedLeadMinutes: number | null, overrides: Record<string, Cell> = {}) {
   const storedOccurrence = occurrenceRow({
     lead_minutes: storedLeadMinutes,
     creator_user_id: 10,
@@ -217,12 +218,14 @@ function occurrenceUpdateRepository(storedLeadMinutes: number | null) {
     snoozed_by: 20,
     snoozed_at: "2026-08-24T10:00:00.000Z",
     snooze_until: "2026-08-25T16:00:00.000Z",
+    ...overrides,
   });
   const session = {
     beginTransaction: vi.fn().mockResolvedValue({ id: "tx-occurrence-update" }),
     commitTransaction: vi.fn().mockResolvedValue(undefined),
     rollbackTransaction: vi.fn().mockResolvedValue(undefined),
     executeQuery: vi.fn(async (query: string) => {
+      if (query.includes("SELECT is_closed, unavailable_reason FROM workspace_topics")) return { resultSets: [resultSet([{ is_closed: false }])] };
       if (query.includes("SELECT status, quiet_hours_start")) {
         return {
           resultSets: [
@@ -262,13 +265,14 @@ function occurrenceUpdateRepository(storedLeadMinutes: number | null) {
 }
 
 describe("OccurrencesRepository.materialize", () => {
-  it("atomically creates a snapshot and blocks the per-reminder runtime slot", async () => {
-    const { repository, session } = repositoryDouble();
+  it.each([null, 42])("materializes the destination %s and blocks the per-reminder runtime slot", async (messageThreadId) => {
+    const { repository, session } = repositoryDouble("ready", messageThreadId);
     const occurrence = await repository.materialize("workspace-a", "reminder-a", {
       occurrenceId: "occurrence-a",
       now: new Date("2026-08-13T10:00:00.000Z"),
     });
 
+    expect(occurrence?.messageThreadId).toBe(messageThreadId);
     expect(occurrence).toMatchObject({
       occurrenceId: "occurrence-a",
       kind: "task",
@@ -284,6 +288,7 @@ describe("OccurrencesRepository.materialize", () => {
     const writeCall = session.executeQuery.mock.calls.find(([query]) =>
       query.includes("INSERT INTO reminder_occurrence_slots"),
     );
+    expect(decodeYdbValue(writeCall?.[1]?.$message_thread_id)).toBe(messageThreadId);
     expect(writeCall?.[0]).toContain("INSERT INTO reminder_occurrences");
     expect(writeCall?.[0]).toContain("state = 'blocked'");
     expect(decodeYdbValue(writeCall?.[1]?.$workspace_id)).toBe("workspace-a");
@@ -419,6 +424,26 @@ describe("OccurrencesRepository message synchronization", () => {
     )).resolves.toBeNull();
   });
 
+  it.each([true, false])("detaches retired messages only on successful sync, with succeeded=%s", async (succeeded) => {
+    const { repository, session } = syncRepository(occurrenceRow({
+      message_sync_retire_only: true,
+      message_thread_id: 52,
+      latest_message_chat_id: -100123,
+      latest_message_id: 55,
+    }));
+    await repository.finishMessageSync("workspace-a", "occurrence-a", 7, "sync-owned", succeeded);
+    const [query, parameters] = session.executeQuery.mock.calls[0];
+    // A retired message must not be reused if the next send is deferred or fails.
+    // Normal refreshes and failed retirement must retain the original reference.
+    expect(query).toMatch(/latest_message_chat_id = IF\(\s*\$succeeded AND message_sync_retire_only = true, NULL, latest_message_chat_id\s*\)/);
+    expect(query).toMatch(/latest_message_id = IF\(\s*\$succeeded AND message_sync_retire_only = true, NULL, latest_message_id\s*\)/);
+    expect(query).toContain("workspace_id = $workspace_id");
+    expect(query).toContain("occurrence_id = $occurrence_id");
+    expect(query).toContain("state_revision = $state_revision");
+    expect(query).toContain("delivery_lock_key = $sync_key");
+    expect(decodeYdbValue(parameters?.$succeeded)).toBe(succeeded);
+  });
+
   it("does not let a delayed action claim a newer message revision", async () => {
     const { repository, session } = syncRepository(occurrenceRow({ state_revision: 8 }));
 
@@ -478,4 +503,19 @@ describe("OccurrencesRepository.listActionableForActor", () => {
     expect(decodeYdbValue(params?.$workspace_id)).toBe("workspace-a");
     expect(decodeYdbValue(params?.$actor_user_id)).toBe(20);
   });
+});
+
+
+it("preserves omitted occurrence destinations and retires a moved topic without guessing a legacy lead", async () => {
+  for (const messageThreadId of [undefined, 52]) {
+    const { repository, session } = occurrenceUpdateRepository(null, { message_thread_id: 42, latest_message_id: 77 });
+    await repository.updateCurrentForActor("workspace-a", "occurrence-a", {
+      ...occurrenceUpdateDraft(null), messageThreadId,
+    }, 10, new Date("2026-08-24T12:00:00Z"));
+    const write = session.executeQuery.mock.calls.find(([query]) => query.includes("'occurrence.updated'"));
+    expect(decodeYdbValue(write?.[1]?.$message_thread_id)).toBe(messageThreadId ?? 42);
+    expect(decodeYdbValue(write?.[1]?.$migrate_live_message)).toBe(messageThreadId != null);
+    expect(write?.[0]).not.toContain("lead_minutes = $lead_minutes");
+    if (messageThreadId != null) expect(write?.[0]).toContain("next_notification_at = $now");
+  }
 });

@@ -4,6 +4,7 @@ import {
   OccurrencesRepository,
   RemindersRepository,
   WorkspacesRepository,
+  TopicsRepository,
   buildOccurrenceMessage,
   occurrenceCallbackData,
   operationalErrorFields,
@@ -49,6 +50,7 @@ interface TelegramClient {
     chatId: number,
     text: string,
     replyMarkup: InlineKeyboardMarkup,
+    messageThreadId?: number | null,
   ): Promise<number>;
   delete(botToken: string, chatId: number, messageId: number): Promise<void>;
   editFinal(
@@ -67,6 +69,7 @@ interface TelegramClient {
 }
 
 interface DispatcherDependencies {
+  topics?: Pick<TopicsRepository, "markUnavailable">;
   workspaces: Pick<WorkspacesRepository, "listActive">;
   reminders?: Pick<RemindersRepository, "getById">;
   occurrences: Pick<
@@ -97,13 +100,14 @@ export function createTelegramClient(
   routing: Pick<AppConfig, "telegramApiRoot" | "telegramProxySecret"> = {},
 ): TelegramClient {
   return {
-    async send(botToken, chatId, text, replyMarkup) {
+    async send(botToken, chatId, text, replyMarkup, messageThreadId) {
       const request = telegramApiRequest({ ...routing, botToken }, "sendMessage");
       const response = await fetch(request.url, {
         method: "POST",
         headers: request.headers,
         body: JSON.stringify({
           chat_id: chatId,
+          ...(messageThreadId != null ? { message_thread_id: messageThreadId } : {}),
           text,
           parse_mode: "HTML",
           reply_markup: replyMarkup,
@@ -111,7 +115,8 @@ export function createTelegramClient(
         signal: AbortSignal.timeout(TELEGRAM_API_TIMEOUT_MS),
       });
       if (!response.ok) {
-        throw new TelegramHttpError(response.status);
+        const body = await response.json().catch(() => null) as { description?: unknown } | null;
+        throw new TelegramHttpError(response.status, typeof body?.description === "string" ? body.description : null);
       }
       const body = (await response.json()) as { result?: { message_id?: number } };
       const messageId = body.result?.message_id;
@@ -191,6 +196,7 @@ async function editTelegramMessage(
 
 function createDependencies(config: AppConfig): DispatcherDependencies {
   return {
+    topics: new TopicsRepository(config.ydbEndpoint, config.ydbDatabase),
     workspaces: new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase),
     reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
     occurrences: new OccurrencesRepository(config.ydbEndpoint, config.ydbDatabase),
@@ -300,6 +306,11 @@ async function loadReminderSchedule(
 }
 
 function sanitizedErrorCode(error: unknown): string {
+  if (error instanceof TelegramHttpError && error.status === 400) {
+    const description = error.description?.toLowerCase() ?? "";
+    if (description.includes("topic_closed") || description.includes("topic closed")) return "topic_closed";
+    if (description.includes("message thread not found") || description.includes("topic_deleted")) return "topic_deleted";
+  }
   return error instanceof TelegramHttpError
     ? `telegram_http_${error.status}`
     : "telegram_transport_unknown";
@@ -413,10 +424,19 @@ async function dispatchReservation(
       reservation.targetChatId,
       text,
       deliveryKeyboard(reservation.occurrence, schedule),
+      reservation.delivery.messageThreadId,
     );
   } catch (error) {
     const status = error instanceof TelegramHttpError ? "failed" : "unknown";
     const errorCode = sanitizedErrorCode(error);
+    if (reservation.delivery.messageThreadId != null && (errorCode === "topic_closed" || errorCode === "topic_deleted")) {
+      try {
+        await dependencies.topics?.markUnavailable(reservation.delivery.workspaceId,
+          reservation.delivery.messageThreadId, errorCode, reservation.delivery.claimedAt);
+      } catch (persistError) {
+        recordDispatcherError(stats, "topic_availability_persist_failed", persistError);
+      }
+    }
     try {
       await dependencies.deliveries.recordResult(
         reservation.delivery.workspaceId,

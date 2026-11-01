@@ -78,6 +78,13 @@ function nullableString(value: unknown): string | null {
   return value == null ? null : String(value);
 }
 
+function hasPendingMessageRetirement(row: Record<string, unknown>): boolean {
+  // Match message sync's actionable target: without both IDs there is no old
+  // card to retire. Ordinary content refreshes may still be replaced by a send.
+  return Boolean(getField(row, "message_sync_retire_only")) &&
+    getField(row, "latest_message_chat_id") != null && getField(row, "latest_message_id") != null;
+}
+
 function rowToDelivery(data: Record<string, unknown>): NotificationDelivery {
   return {
     workspaceId: String(getField(data, "workspace_id")),
@@ -90,6 +97,7 @@ function rowToDelivery(data: Record<string, unknown>): NotificationDelivery {
     claimedAt: parseYdbTimestampRequired(getField(data, "claimed_at"), "claimed_at"),
     status: deliveryStatusSchema.parse(getField(data, "status")),
     telegramChatId: nullableNumber(getField(data, "telegram_chat_id")),
+    messageThreadId: nullableNumber(getField(data, "message_thread_id")),
     telegramMessageId: nullableNumber(getField(data, "telegram_message_id")),
     errorCode: nullableString(getField(data, "error_code")),
     createdAt: parseYdbTimestampRequired(getField(data, "created_at"), "created_at"),
@@ -228,7 +236,9 @@ export class DeliveriesRepository {
         if (!occurrenceRow || !workspaceRow || getField(workspaceRow, "status") !== "active") {
           return null;
         }
-        if (hasActiveDeliveryLock(occurrenceRow, now)) {
+        // A failed retirement releases its lease but still owns the old message
+        // reference. Do not advance cadence or replace that reference meanwhile.
+        if (hasActiveDeliveryLock(occurrenceRow, now) || hasPendingMessageRetirement(occurrenceRow)) {
           return null;
         }
         await prepareOccurrenceMutation(
@@ -372,6 +382,7 @@ export class DeliveriesRepository {
           claimedAt: now,
           status: "reserved",
           telegramChatId: targetChatId,
+          messageThreadId: occurrence.visibility === "group" ? occurrence.messageThreadId : null,
           telegramMessageId: null,
           errorCode: null,
           createdAt: now,
@@ -391,6 +402,7 @@ export class DeliveriesRepository {
             DECLARE $occurrence_revision AS Uint64;
             DECLARE $status AS Utf8;
             DECLARE $telegram_chat_id AS Int64;
+            DECLARE $message_thread_id AS Int64?;
             DECLARE $next_notification_at AS Timestamp;
             DECLARE $next_sequence AS Uint32;
             DECLARE $overdue_status AS Utf8;
@@ -398,11 +410,11 @@ export class DeliveriesRepository {
             INSERT INTO notification_deliveries (
               workspace_id, delivery_key, occurrence_id, reminder_id,
               delivery_type, sequence, scheduled_at, claimed_at, status,
-              occurrence_revision, telegram_chat_id, created_at, updated_at
+              occurrence_revision, telegram_chat_id, message_thread_id, created_at, updated_at
             ) VALUES (
               $workspace_id, $delivery_key, $occurrence_id, $reminder_id,
               $delivery_type, $sequence, $scheduled_at, $claimed_at, $status,
-              $occurrence_revision, $telegram_chat_id, $claimed_at, $claimed_at
+              $occurrence_revision, $telegram_chat_id, $message_thread_id, $claimed_at, $claimed_at
             );
 
             UPDATE reminder_occurrences SET
@@ -435,6 +447,7 @@ export class DeliveriesRepository {
             ),
             $status: TypedValues.utf8(delivery.status),
             $telegram_chat_id: TypedValues.int64(targetChatId),
+            $message_thread_id: optionalInt64(delivery.messageThreadId),
             $next_notification_at: timestampValue(nextNotificationAt),
             $next_sequence: TypedValues.uint32(delivery.sequence + 1),
             $overdue_status: TypedValues.utf8("overdue"),
@@ -465,12 +478,20 @@ export class DeliveriesRepository {
           DECLARE $delivery_key AS Utf8;
           SELECT delivery.status AS delivery_status,
             delivery.telegram_chat_id AS reserved_chat_id,
+            delivery.message_thread_id AS reserved_thread_id,
+            occurrence.message_thread_id AS current_thread_id,
+            topic.message_thread_id AS known_thread_id,
+            topic.is_closed AS topic_is_closed,
+            topic.unavailable_reason AS topic_unavailable_reason,
             delivery.occurrence_revision AS occurrence_revision,
             delivery.occurrence_id AS occurrence_id,
             occurrence.status AS occurrence_status,
             occurrence.state_revision AS state_revision,
             occurrence.delivery_lock_key AS delivery_lock_key,
             occurrence.delivery_locked_at AS delivery_locked_at,
+            occurrence.message_sync_retire_only AS message_sync_retire_only,
+            occurrence.latest_message_chat_id AS latest_message_chat_id,
+            occurrence.latest_message_id AS latest_message_id,
             occurrence.notification_state AS notification_state,
             occurrence.visibility AS visibility,
             occurrence.assignment_mode AS assignment_mode,
@@ -491,6 +512,9 @@ export class DeliveriesRepository {
             ON workspace.workspace_id = delivery.workspace_id
           LEFT JOIN users AS user
             ON user.user_id = occurrence.responsible_user_id
+          LEFT JOIN workspace_topics AS topic
+            ON topic.workspace_id = occurrence.workspace_id
+            AND topic.message_thread_id = occurrence.message_thread_id
           WHERE delivery.workspace_id = $workspace_id
             AND delivery.delivery_key = $delivery_key
           LIMIT 1;
@@ -514,12 +538,15 @@ export class DeliveriesRepository {
       const reservedChatId = getField(row, "reserved_chat_id") == null
         ? null
         : Number(getField(row, "reserved_chat_id"));
+      const currentThreadId = getField(row, "visibility") === "private"
+        ? null : nullableNumber(getField(row, "current_thread_id"));
       const valid =
         getField(row, "delivery_status") === "reserved" &&
           getField(row, "workspace_status") === "active" &&
           getField(row, "reminder_status") === "active" &&
           ["pending", "overdue"].includes(String(getField(row, "occurrence_status"))) &&
           getField(row, "notification_state") === "waiting" &&
+          !hasPendingMessageRetirement(row) &&
           Number(getField(row, "occurrence_revision")) ===
             Number(getField(row, "state_revision")) &&
           (
@@ -527,7 +554,10 @@ export class DeliveriesRepository {
             !hasActiveDeliveryLock(row, now)
           ) &&
           currentTargetChatId != null &&
-          currentTargetChatId === reservedChatId;
+          currentTargetChatId === reservedChatId &&
+          currentThreadId === nullableNumber(getField(row, "reserved_thread_id")) &&
+          (currentThreadId == null || (getField(row, "known_thread_id") != null &&
+            !Boolean(getField(row, "topic_is_closed")) && !getField(row, "topic_unavailable_reason")));
 
       const occurrenceId = String(getField(row, "occurrence_id"));
       if (!valid) {

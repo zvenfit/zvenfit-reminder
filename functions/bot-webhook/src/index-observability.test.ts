@@ -4,6 +4,11 @@ vi.mock("./bot-initialization.js", () => ({
   ensureBotInitialized: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("./bot-menu.js", () => ({
+  ensureBotMenu: vi.fn().mockResolvedValue(undefined),
+  restorePrivateBotMenu: vi.fn().mockResolvedValue(true),
+}));
+
 import { AUTHENTICATED_WEBHOOK_HEADER, handler } from "./index.js";
 
 function stubValidConfig(): void {

@@ -232,14 +232,14 @@ describe("Telegram webhook proxy", () => {
     );
   });
 
-  it("allows only the Telegram metadata methods required for profile photos", async () => {
+  it("allows the required profile metadata and bot menu methods", async () => {
     const telegramFetch = vi.fn<OriginFetch>().mockResolvedValue(
       new Response(JSON.stringify({ ok: true, result: {} }), {
         headers: { "Content-Type": "application/json" },
       }),
     );
 
-    for (const method of ["getUserProfilePhotos", "getFile"]) {
+    for (const method of ["getChat", "getUserProfilePhotos", "getFile", "setChatMenuButton", "setMyCommands"]) {
       const response = await handleRequest(
         new Request(`https://proxy.example/telegram/${method}`, {
           method: "POST",
@@ -256,7 +256,7 @@ describe("Telegram webhook proxy", () => {
       );
       expect(response.status).toBe(200);
     }
-    expect(telegramFetch).toHaveBeenCalledTimes(2);
+    expect(telegramFetch).toHaveBeenCalledTimes(5);
   });
 
   it("allows only authenticated bounded Telegram profile photo downloads", async () => {

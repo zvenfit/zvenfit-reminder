@@ -24,6 +24,11 @@ import {
   WorkspaceRoleChangeForbiddenError,
   WorkspaceSettingsForbiddenError,
   WorkspacesRepository,
+  TopicsRepository,
+  TopicUnavailableError,
+  TopicRegistrationForbiddenError,
+  TopicConnectionConflictError,
+  topicConnectionInputSchema,
   UndoWindowExpiredError,
   canCreateReminder,
   occurrenceDraftUpdateSchema,
@@ -37,6 +42,8 @@ import {
   type SnoozeSelection,
 } from "@zvenfit-reminder/shared";
 import { z, ZodError } from "zod";
+import { InvalidTopicLinkError } from "./topic-link.js";
+import type { TopicConnectionService } from "./topic-connections.js";
 import type { ApiGatewayEvent, ApiGatewayResponse } from "./api.js";
 import { getHeader, getPath, jsonResponse } from "./api.js";
 import {
@@ -56,6 +63,7 @@ import {
 } from "./member-enrollment.js";
 
 export interface WorkspaceApiDependencies {
+  topics: Pick<TopicsRepository, "list">;
   workspaces: Pick<
     WorkspacesRepository,
     "getById" | "listForUser" | "updateSettings" | "transferOwnership"
@@ -95,6 +103,7 @@ const snoozeApiBodySchema = z.union([
 
 function createDependencies(config: AppConfig): WorkspaceApiDependencies {
   return {
+    topics: new TopicsRepository(config.ydbEndpoint, config.ydbDatabase),
     workspaces: new WorkspacesRepository(config.ydbEndpoint, config.ydbDatabase),
     members: new WorkspaceMembersRepository(config.ydbEndpoint, config.ydbDatabase),
     reminders: new RemindersRepository(config.ydbEndpoint, config.ydbDatabase),
@@ -115,10 +124,13 @@ function isWorkspaceRoute(method: string, path: string): boolean {
       path === "/api/history" ||
       path === "/api/reminders" ||
       path === "/api/members" ||
+      path === "/api/topics" ||
+      /^\/api\/topic-connections\/[^/]+$/.test(path) ||
       /^\/api\/members\/\d+\/avatar$/.test(path)
     )) ||
     (method === "POST" && (
       path === "/api/reminders" ||
+      path === "/api/topic-connections" ||
       path === "/api/members/publish-enrollment" ||
       path === "/api/workspace/transfer-ownership" ||
       /^\/api\/reminders\/[^/]+\/reassign$/.test(path) ||
@@ -140,6 +152,7 @@ export async function handleWorkspaceApi(
   config: AppConfig,
   initData: ParsedInitData,
   providedDependencies?: WorkspaceApiDependencies,
+  topicConnections?: Pick<TopicConnectionService, "start" | "get">,
 ): Promise<ApiGatewayResponse | null> {
   const method = event.httpMethod ?? "GET";
   const path = getPath(event);
@@ -169,6 +182,39 @@ export async function handleWorkspaceApi(
   );
   if (!actor || actor.status !== "active") {
     return jsonResponse(403, { error: "Workspace membership required", code: "forbidden" });
+  }
+
+  if (method === "GET" && path === "/api/topics") {
+    return jsonResponse(200, { topics: await dependencies.topics.list(workspace.workspaceId) });
+  }
+
+  const topicStatus = path.match(/^\/api\/topic-connections\/([^/]+)$/);
+  if (path === "/api/topic-connections" || topicStatus) {
+    if (actor.role !== "owner" && actor.role !== "organizer") {
+      return jsonResponse(403, { error: "Подключать темы могут владелец и организаторы группы.", code: "forbidden" });
+    }
+    if (!topicConnections) return jsonResponse(503, { error: "Проверка тем временно недоступна.", code: "unavailable" });
+    if (method === "GET" && topicStatus) {
+      if (!/^[a-f0-9]{32}$/.test(topicStatus[1])) return jsonResponse(400, { error: "Invalid connection ID", code: "validation_failed" });
+      const connection = await topicConnections.get(topicStatus[1], workspace.workspaceId, actor.userId);
+      return connection ? jsonResponse(200, connection) : jsonResponse(404, { error: "Проверка не найдена.", code: "not_found" });
+    }
+    let body: unknown;
+    try { body = JSON.parse(event.body ?? "{}"); } catch {
+      return jsonResponse(400, { error: "Invalid JSON", code: "invalid_json" });
+    }
+    const parsed = topicConnectionInputSchema.safeParse(body);
+    if (!parsed.success) return jsonResponse(400, { error: "Укажите ссылку и название темы.", code: "validation_failed" });
+    try {
+      return jsonResponse(200, await topicConnections.start({ ...parsed.data,
+        workspaceId: workspace.workspaceId, actorUserId: actor.userId, telegramChatId: workspace.telegramChatId }));
+    } catch (error) {
+      if (error instanceof InvalidTopicLinkError) return jsonResponse(400, { error: error.message, code: "invalid_topic_link" });
+      if (error instanceof TopicConnectionConflictError) return jsonResponse(409, { error: "Эта проверка уже связана с другой темой. Начните новую проверку.", code: "request_conflict" });
+      if (error instanceof TopicRegistrationForbiddenError) return jsonResponse(403, { error: "Нет доступа к подключению тем.", code: "forbidden" });
+      if (error instanceof TopicUnavailableError) return jsonResponse(409, { error: "Тема закрыта. Откройте её в Telegram или выберите другую.", code: "topic_unavailable" });
+      throw error;
+    }
   }
 
   if (method === "POST" && path === "/api/members/publish-enrollment") {
@@ -350,6 +396,9 @@ export async function handleWorkspaceApi(
             : "update_conflict",
         });
       }
+      if (error instanceof TopicUnavailableError) {
+        return jsonResponse(409, { error: "Выберите доступную тему этой группы. Обновите список тем.", code: "topic_unavailable" });
+      }
       if (error instanceof PrivateChatUnavailableError) {
         return jsonResponse(409, {
           error: "Responsible person must start the bot first",
@@ -449,6 +498,9 @@ export async function handleWorkspaceApi(
           code: "schedule_has_no_future_deadline",
         });
       }
+      if (error instanceof TopicUnavailableError) {
+        return jsonResponse(409, { error: "Выберите доступную тему этой группы. Обновите список тем.", code: "topic_unavailable" });
+      }
       if (error instanceof PrivateChatUnavailableError) {
         return jsonResponse(409, {
           error: "Responsible person must start the bot first",
@@ -500,6 +552,9 @@ export async function handleWorkspaceApi(
       }
       if (error instanceof InactiveWorkspaceMemberError) {
         return jsonResponse(409, { error: "Choose an active member", code: "inactive_participant" });
+      }
+      if (error instanceof TopicUnavailableError) {
+        return jsonResponse(409, { error: "Выберите доступную тему этой группы. Обновите список тем.", code: "topic_unavailable" });
       }
       if (error instanceof PrivateChatUnavailableError) {
         return jsonResponse(409, {
@@ -721,6 +776,9 @@ export async function handleWorkspaceApi(
   } catch (error) {
     if (error instanceof ReminderCreateForbiddenError) {
       return jsonResponse(403, { error: "Cannot create this reminder", code: "forbidden" });
+    }
+    if (error instanceof TopicUnavailableError) {
+      return jsonResponse(409, { error: "Выберите доступную тему этой группы. Обновите список тем.", code: "topic_unavailable" });
     }
     if (error instanceof ScheduleHasNoFutureDeadlineError) {
       return jsonResponse(409, {

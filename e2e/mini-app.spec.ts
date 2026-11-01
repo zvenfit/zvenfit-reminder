@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Request } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Request } from "@playwright/test";
 
 type Role = "owner" | "organizer" | "member";
 
@@ -17,6 +17,7 @@ interface ApiMember {
 interface ApiWorkspace {
   workspaceId: string;
   telegramChatId: number;
+  isForum?: boolean;
   displayName: string;
   ownerUserId: number;
   timezone: string;
@@ -36,6 +37,7 @@ interface ApiReminder {
   amountMinor: number | null;
   currency: string | null;
   visibility: "group" | "private";
+  messageThreadId?: number | null;
   creatorUserId: number;
   assignment: { mode: "person"; responsibleUserId: number } | { mode: "anyone" };
   watcherUserIds: number[];
@@ -62,6 +64,7 @@ interface ApiOccurrence {
   amountMinor: number | null;
   currency: string | null;
   visibility: "group" | "private";
+  messageThreadId?: number | null;
   assignment: { mode: "person"; responsibleUserId: number } | { mode: "anyone" };
   watcherUserIds: number[];
   status: "pending" | "overdue" | "completed" | "cancelled";
@@ -87,6 +90,17 @@ interface ApiOccurrence {
 }
 
 interface ApiState {
+  topics?: Record<string, Array<{ messageThreadId: number; name: string; isClosed: boolean; unavailableReason?: "topic_closed" | "topic_deleted" | null }>>;
+  topicsFailuresRemaining?: number;
+  topicConnectionError?: string;
+  topicConnectionState?: "pending" | "sending" | "succeeded" | "failed" | "unknown";
+  topicConnectionGate?: Promise<void>;
+  topicConnectionFailuresRemaining?: number;
+  createGate?: Promise<void>;
+  createResponseNeverArrives?: boolean;
+  groupConnectionFailuresRemaining?: number;
+  groupConnectionState?: "pending" | "validating" | "connected" | "rejected" | "expired";
+  groupWorkspace?: ApiWorkspace;
   workspaces: ApiWorkspace[];
   members: Record<string, ApiMember[]>;
   reminders: Record<string, ApiReminder[]>;
@@ -195,6 +209,7 @@ function createState(): ApiState {
     workspaces: [
       {
         workspaceId: "team",
+        isForum: true,
         telegramChatId: -1001,
         displayName: "Команда",
         ownerUserId: 10,
@@ -256,6 +271,8 @@ function workspaceId(request: Request): string | null {
 
 async function installTelegramAndApi(page: Page, state: ApiState): Promise<void> {
   await installTelegram(page);
+  const topicConnections = new Map<string, { link: string; name: string }>();
+  const groupConnections = new Map<string, string>();
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -284,8 +301,40 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       }
       return fulfill({ workspaces: state.workspaces });
     }
+    if (path.startsWith("/api/group-connections")) {
+      if ((state.groupConnectionFailuresRemaining ?? 0) > 0) { state.groupConnectionFailuresRemaining!--; return fulfill({ error: "Ответ не получен", code: "temporary_failure" }, 503); }
+      const id = method === "POST" && path === "/api/group-connections" ? String(body?.clientRequestId) : path.split("/")[3];
+      if (body?.launchMode) groupConnections.set(id, String(body.launchMode));
+      const connectionState = state.groupConnectionState ?? "pending";
+      if (connectionState === "connected" && state.groupWorkspace && !state.workspaces.some((item) => item.workspaceId === state.groupWorkspace!.workspaceId)) state.workspaces.push(state.groupWorkspace);
+      return fulfill({ connectionId: id, state: connectionState, expiresAt: "2099-01-01T00:00:00Z", workspaceId: state.groupWorkspace?.workspaceId,
+        fallbackUrl: "https://t.me/example_bot?start=connect_group", ...(groupConnections.get(id) === "native" ? { preparedButtonId: "prepared-group-choice" } : {}) });
+    }
     if (!selected || !state.members[selected]) {
       return fulfill({ error: "Workspace not found", code: "not_found" }, 404);
+    }
+    if (method === "GET" && path === "/api/topics") {
+      if ((state.topicsFailuresRemaining ?? 0) > 0) {
+        state.topicsFailuresRemaining!--;
+        return fulfill({ error: "Temporary failure" }, 503);
+      }
+      return fulfill({ topics: state.topics?.[selected] ?? [] });
+    }
+    if (path.startsWith("/api/topic-connections")) {
+      const id = method === "POST" ? String(body?.clientRequestId) : path.split("/")[3];
+      if (method === "POST") {
+        if (state.topicConnectionError) return fulfill({ error: state.topicConnectionError, code: "invalid_topic_link" }, 400);
+        topicConnections.set(id, { link: String(body?.link), name: String(body?.name) });
+        if ((state.topicConnectionFailuresRemaining ?? 0) > 0) { state.topicConnectionFailuresRemaining!--; return route.abort("failed"); }
+        await state.topicConnectionGate;
+      }
+      const topic = { messageThreadId: 62, name: topicConnections.get(id)?.name ?? "Тренировки", isClosed: false };
+      const connectionState = state.topicConnectionState ?? "succeeded";
+      if (connectionState === "succeeded") {
+        state.topics ??= {};
+        state.topics[selected] = [...(state.topics[selected] ?? []).filter((item) => item.messageThreadId !== topic.messageThreadId), topic];
+      }
+      return fulfill({ connectionId: id, state: connectionState, expiresAt: "2099-01-01T00:00:00Z", messageThreadId: topic.messageThreadId, name: topic.name });
     }
     if (method === "GET" && path === "/api/members") {
       if ((state.memberFailuresRemaining ?? 0) > 0) {
@@ -347,6 +396,7 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
       return fulfill({ occurrences });
     }
     if (method === "POST" && path === "/api/reminders") {
+      await state.createGate;
       if ((state.createFailuresRemaining ?? 0) > 0) {
         state.createFailuresRemaining = (state.createFailuresRemaining ?? 1) - 1;
         return fulfill({ error: "Temporary failure", code: "temporary_failure" }, 503);
@@ -357,6 +407,7 @@ async function installTelegramAndApi(page: Page, state: ApiState): Promise<void>
         creatorUserId: 10,
       });
       state.reminders[selected].unshift(created);
+      if (state.createResponseNeverArrives) return;
       return fulfill({ reminder: created }, 201);
     }
     const updateMatch = path.match(/^\/api\/reminders\/([^/]+)$/);
@@ -467,7 +518,7 @@ async function installTelegram(page: Page): Promise<void> {
       value: {
         WebApp: {
           initData: "e2e-init-data",
-          initDataUnsafe: { user: { id: 10, first_name: "Анна" } },
+          initDataUnsafe: { user: { id: Number(localStorage.getItem("e2e.actorId") ?? 10), first_name: "Анна" } },
           ready() {},
           expand() {},
           BackButton: {
@@ -489,6 +540,40 @@ async function openApp(page: Page, state: ApiState): Promise<void> {
   await installTelegramAndApi(page, state);
   await page.goto("/");
   await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveValue("team");
+}
+
+async function checkRecoveryActionViewports(page: Page, name: string, outputPath: (name: string) => string, precedingBlock?: Locator, followingBlock?: Locator) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 20, top: 12 } });
+  for (const width of [320, 412]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: 568 });
+    await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+    const action = page.getByRole("button", { name, exact: true });
+    await action.scrollIntoViewIfNeeded();
+    await page.keyboard.press("Tab");
+    await action.focus();
+    await expect(action).toBeFocused();
+    await expect(action).toHaveCSS("outline-style", "solid");
+    const bounds = (await action.boundingBox())!;
+    expect(bounds.width).toBeGreaterThanOrEqual(44);
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+    expect(bounds.y).toBeGreaterThanOrEqual(0);
+    expect(bounds.y + bounds.height).toBeLessThanOrEqual(548);
+    if (precedingBlock) {
+      const previous = (await precedingBlock.boundingBox())!;
+      const outlineInset = await action.evaluate((element) => {
+        const style = getComputedStyle(element);
+        return Number.parseFloat(style.outlineWidth) + Number.parseFloat(style.outlineOffset);
+      });
+      expect(bounds.y - outlineInset).toBeGreaterThanOrEqual(previous.y + previous.height);
+      if (followingBlock) {
+        const next = (await followingBlock.boundingBox())!;
+        expect(bounds.y + bounds.height + outlineInset).toBeLessThanOrEqual(next.y);
+      }
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: outputPath(`recovery-${width}-${colorScheme}.png`) });
+  }
 }
 
 test("isolates data when switching between groups", async ({ page }) => {
@@ -712,7 +797,7 @@ test("shows the dashboard structure while the initial workspace is loading", asy
 
 test("retries a failed dashboard load from the contextual error", async ({ page }) => {
   const state = createState();
-  // Vite's StrictMode runs the initial effect twice in E2E development mode.
+  // Keep the service unavailable through bootstrap; recover at the user's retry.
   state.dashboardFailuresRemaining = 2;
   await installTelegramAndApi(page, state);
 
@@ -736,10 +821,105 @@ test("retries a failed dashboard load from the contextual error", async ({ page 
   });
   expect(retryColors.icon).toBe(retryColors.button);
   expect(retryColors.stroke).toBe(retryColors.button);
+  state.dashboardFailuresRemaining = 0;
   await retryAction.click();
 
   await expect(page.getByText("Забрать паспорт")).toBeVisible();
   await expect(requestAlert).toHaveCount(0);
+});
+
+test("recovers from a stalled workspace request in short light and dark viewports", async ({ page }) => {
+  const state = createState();
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  let stalled = true;
+  let requests = 0;
+  await page.route("**/api/workspaces", async (route) => {
+    requests += 1;
+    if (!stalled) await route.fallback();
+  });
+
+  for (const width of [320, 412]) {
+    for (const colorScheme of ["light", "dark"] as const) {
+      stalled = true;
+      const requestsBefore = requests;
+      await page.setViewportSize({ width, height: 520 });
+      await page.emulateMedia({ colorScheme });
+      await page.goto("/");
+      await expect(page.getByRole("status")).toHaveText("Загружаем рабочее пространство");
+      await expect.poll(() => requests).toBeGreaterThanOrEqual(requestsBefore + 2);
+      await page.clock.fastForward(20_001);
+
+      await expect(page.getByRole("alert")).toContainText("Сервис долго не отвечает");
+      await expect(page.locator(".app--initial-loading")).toHaveCount(0);
+      const retry = page.getByRole("button", { name: "Обновить", exact: true });
+      await expect(retry).toBeEnabled();
+      await retry.focus();
+      await expect(retry).toBeFocused();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+        .toBe(true);
+      const retryBounds = (await retry.boundingBox())!;
+      const botLinkBounds = (await page.getByRole("link", { name: "Открыть чат с ботом" }).boundingBox())!;
+      expect(botLinkBounds.x >= retryBounds.x + retryBounds.width + 8 ||
+        botLinkBounds.y >= retryBounds.y + retryBounds.height + 8).toBe(true);
+      await page.screenshot({ path: test.info().outputPath(`timeout-${width}-${colorScheme}.png`) });
+
+      stalled = false;
+      await retry.click();
+      await expect(page.getByText("Забрать паспорт")).toBeVisible();
+      await expect(page.getByRole("alert")).toHaveCount(0);
+    }
+  }
+});
+
+test("shows partial data and retries when the dashboard request stalls", async ({ page }) => {
+  const state = createState();
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  let stalled = true;
+  let requests = 0;
+  await page.route("**/api/dashboard", async (route) => {
+    requests += 1;
+    if (!stalled) await route.fallback();
+  });
+
+  await page.goto("/");
+  await expect.poll(() => requests).toBeGreaterThanOrEqual(1);
+  await page.clock.fastForward(20_001);
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("Задачи временно не загрузились");
+  await expect(page.getByText("3 участника")).toBeVisible();
+  await expect(page.getByText("Сейчас тихо")).toHaveCount(0);
+
+  stalled = false;
+  await alert.getByRole("button", { name: "Загрузить данные" }).click();
+  await expect(page.getByText("Забрать паспорт")).toBeVisible();
+  await expect(alert).toHaveCount(0);
+});
+
+test("opens tasks while history is stalled and lets history recover independently", async ({ page }) => {
+  const state = createState();
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  let stalled = true;
+  await page.route("**/api/history", async (route) => {
+    if (!stalled) await route.fallback();
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Забрать паспорт")).toBeVisible();
+  await expect(page.getByText("3 участника")).toBeVisible();
+  await page.getByRole("button", { name: "История", exact: true }).click();
+  await expect(page.locator(".history-list.skeleton-list")).toBeVisible();
+  await expect(page.getByText("История пока пуста")).toHaveCount(0);
+
+  await page.clock.fastForward(20_001);
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("История временно недоступна");
+  stalled = false;
+  await alert.getByRole("button", { name: "Загрузить историю" }).click();
+  await expect(page.getByText("История пока пуста")).toBeVisible();
+  await expect(alert).toHaveCount(0);
 });
 
 test("keeps tasks and members available when history temporarily fails", async ({ page }) => {
@@ -762,6 +942,7 @@ test("keeps tasks and members available when history temporarily fails", async (
   const requestsBeforeRetry = state.requests.length;
   const historyRequestsBeforeRetry = state.requests.filter((request) =>
     request.path === "/api/history").length;
+  state.historyFailuresRemaining = 0;
   await retryAction.click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByText("История пока пуста")).toBeVisible();
@@ -785,6 +966,7 @@ test("settles an in-flight history retry when switching groups", async ({ page }
   await expect(retryAction).toBeVisible();
 
   state.historyDelayMs = 500;
+  state.historyFailuresRemaining = 0;
   const historyRequestsBeforeRetry = state.requests.filter((request) =>
     request.path === "/api/history").length;
   await retryAction.click();
@@ -806,17 +988,17 @@ test("recovers from an empty workspace response without leaving disabled control
 
   await page.goto("/");
 
-  await expect(page.getByRole("heading", { name: "Обновите список групп" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Подключить группу" })).toBeVisible();
   await expect(page.getByText("Для аккаунта Анна")).toBeVisible();
   await expect(page.getByRole("button", { name: "Новое напоминание" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Обновить" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Обновить список групп" })).toBeEnabled();
   expect(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1))
     .toBe(true);
   const initialWorkspaceRequests = state.requests.filter((request) =>
     request.path === "/api/workspaces").length;
 
   state.workspaces.push(teamWorkspace);
-  await page.getByRole("button", { name: "Обновить" }).click();
+  await page.getByRole("button", { name: "Обновить список групп" }).click();
 
   await expect(page.getByText(teamWorkspace.displayName, { exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Выбранная группа" })).toHaveCount(0);
@@ -1157,7 +1339,7 @@ test("opens additional settings and focuses an invalid payment link", async ({ p
   await page.getByRole("radio", { name: "Платёж" }).click();
   await page.locator("#reminder-title").fill("Оплатить подписку");
 
-  const details = page.locator("details.additional-fields");
+  const details = page.locator("details.additional-fields").filter({ has: page.getByText("Дополнительные настройки", { exact: true }) });
   await details.getByText("Дополнительные настройки", { exact: true }).click();
   const actionUrl = page.locator("#reminder-action-url");
   await actionUrl.fill("http://example.com/pay");
@@ -1733,9 +1915,12 @@ test("keeps occurrence editing stable when its date is cleared", async ({ page }
 
 test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
   const state = createState();
+  state.topics = { team: [{ messageThreadId: 42, name: "Оплаты", isClosed: false }, { messageThreadId: 52, name: "Показания", isClosed: false }] };
+  state.reminders.team[0].messageThreadId = 52;
   const item = state.occurrences.team.find((candidate) => candidate.occurrenceId === "internet")!;
   item.reminderId = "meters";
   item.kind = "payment";
+  item.messageThreadId = 42;
   item.title = "Разовый платёж за счётчики";
   item.amountMinor = 2_500;
   item.currency = "RUB";
@@ -1748,6 +1933,7 @@ test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
 
   await page.getByRole("button", { name: /Разовый платёж за счётчики/ }).click();
   await page.getByRole("button", { name: "Изменить" }).click();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("42");
   const occurrenceTitle = page.getByRole("textbox", { name: "Что нужно оплатить" });
   await expect(occurrenceTitle).toHaveValue("Разовый платёж за счётчики");
   await expect(page.getByRole("spinbutton", { name: "Количество до срока" }))
@@ -1760,6 +1946,7 @@ test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
   await page.getByRole("spinbutton", { name: "Количество до срока" }).fill("7");
 
   await page.getByRole("radio", { name: /Этот и следующие/ }).click();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("52");
   await expect(page.getByRole("textbox", { name: "Что нужно сделать" }))
     .toHaveValue("Передать показания");
   await expect(page.getByRole("spinbutton", { name: "Количество до срока" }))
@@ -1771,6 +1958,7 @@ test("keeps occurrence and series edit drafts isolated", async ({ page }) => {
   await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Серия показаний без утечки");
 
   await page.getByRole("radio", { name: /Только этот срок/ }).click();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("42");
   await expect(page.getByRole("textbox", { name: "Что нужно оплатить" }))
     .toHaveValue("Черновик только этого платежа");
   await expect(page.getByRole("spinbutton", { name: "Количество до срока" }))
@@ -2166,4 +2354,652 @@ test("keeps a reminder created in the built-in preview mode", async ({ page }) =
   await page.getByRole("textbox", { name: "Что нужно сделать" }).fill("Купить корм");
   await page.getByRole("button", { name: "Создать" }).click();
   await expect(page.getByText("Купить корм")).toBeVisible();
+});
+
+test("forum destination saves with the responsible participant and clears for private delivery", async ({ page }) => {
+  const state = createState();
+  state.topics = { team: [
+    { messageThreadId: 42, name: "Оплаты", isClosed: false },
+    { messageThreadId: 52, name: "Архив", isClosed: true },
+  ] };
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Оплатить аренду зала");
+  const destination = page.getByLabel("Куда отправлять");
+  await expect(destination).toBeEnabled();
+  await expect(destination.locator('option[value="52"]')).toBeDisabled();
+  await destination.selectOption("42");
+  await page.getByRole("button", { name: "Ответственный", exact: true }).click();
+  await page.getByRole("option", { name: /Иван/ }).click();
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect(page.getByRole("heading", { name: "План", exact: true })).toBeVisible();
+  expect(state.requests.find((item) => item.method === "POST" && item.path === "/api/reminders"))
+    .toMatchObject({ workspaceId: "team", body: { messageThreadId: 42, assignment: { mode: "person", responsibleUserId: 20 } } });
+
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Личная задача");
+  await expect(destination).toBeEnabled();
+  await destination.selectOption("42");
+  await page.getByRole("radio", { name: /Личное/ }).click();
+  await expect(destination).toHaveCount(0);
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect(page.getByRole("heading", { name: "План", exact: true })).toBeVisible();
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/reminders").at(-1))
+    .toMatchObject({ body: { visibility: "private", messageThreadId: null } });
+});
+
+test("forum topic connects through UI and becomes the reminder destination without losing the draft", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Напомнить про тренировку");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  const destination = page.getByLabel("Куда отправлять");
+  await expect(destination).toHaveValue("62");
+  await expect(destination).toBeFocused();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Напомнить про тренировку");
+  await expect(page.getByLabel("Ссылка на тему", { exact: true })).not.toBeVisible();
+  expect(state.requests.find((item) => item.method === "POST" && item.path === "/api/topic-connections"))
+    .toMatchObject({ workspaceId: "team", body: { link: "https://t.me/c/1234567890/62", name: "Тренировки" } });
+  await page.getByRole("button", { name: "Обновить темы" }).click();
+  await expect(destination.locator('option[value="62"]')).toHaveText("Тренировки");
+  await expect(destination).toBeEnabled();
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect(page.getByRole("heading", { name: "План", exact: true })).toBeVisible();
+  expect(state.requests.find((item) => item.method === "POST" && item.path === "/api/reminders"))
+    .toMatchObject({ body: { messageThreadId: 62, title: "Напомнить про тренировку" } });
+});
+
+test("forum topic connection errors keep both the selected topic and entered values", async ({ page }) => {
+  const state = createState();
+  state.topics = { team: [{ messageThreadId: 42, name: "Оплаты", isClosed: false }] };
+  state.topicConnectionError = "Эта тема из другой группы. Выберите тему текущей группы.";
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  const destination = page.getByLabel("Куда отправлять");
+  await expect(destination).toBeEnabled();
+  await destination.selectOption("42");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect(page.getByLabel("Ссылка на тему", { exact: true })).toBeFocused();
+  expect(state.requests.some((item) => item.method === "POST" && item.path === "/api/topic-connections")).toBe(false);
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/9876543210/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect(page.getByText(state.topicConnectionError)).toBeVisible();
+  await expect(destination).toHaveValue("42");
+  await expect(page.getByLabel("Название темы", { exact: true })).toHaveValue("Тренировки");
+  await expect(page.getByLabel("Ссылка на тему", { exact: true })).toHaveValue("https://t.me/c/9876543210/62");
+  state.topicConnectionError = undefined;
+  await page.getByRole("button", { name: "Начать новую проверку" }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).press("Enter");
+  await expect(destination).toHaveValue("62");
+  expect(state.requests.some((item) => item.method === "POST" && item.path === "/api/reminders")).toBe(false);
+});
+
+test("forum destination survives a failed list refresh without silently moving to General", async ({ page }) => {
+  const state = createState();
+  state.reminders.team[0].messageThreadId = 42;
+  state.topics = { team: [{ messageThreadId: 42, name: "Показания", isClosed: false }] };
+  state.topicsFailuresRemaining = 2;
+  await openApp(page, state);
+  await page.getByRole("button", { name: "План", exact: true }).click();
+  await page.getByRole("button", { name: /Передать показания/ }).click();
+  // Detail loads topics independently; editing still keeps its stored destination.
+  await expect.poll(() => state.topicsFailuresRemaining).toBe(1);
+  await page.getByRole("button", { name: "Изменить" }).click();
+  const destination = page.getByLabel("Куда отправлять");
+  await expect(destination).toHaveValue("42");
+  await page.getByRole("button", { name: "Обновить темы" }).click();
+  await expect(page.getByText("Не удалось загрузить темы. Обновите список перед выбором.")).toBeVisible();
+  await expect(destination).toHaveValue("42");
+  await page.getByRole("button", { name: "Обновить темы" }).click();
+  await expect(destination.locator('option[value="42"]')).toHaveText("Показания");
+  await expect(destination).toHaveValue("42");
+});
+
+test("forum entry hints select only an accessible workspace", async ({ page }) => {
+  const state = createState();
+  await installTelegramAndApi(page, state);
+  await page.goto("/?tgWebAppStartParam=ws_home");
+  await expect(page.getByLabel("Выбранная группа")).toHaveValue("home");
+  await page.goto("/?workspace=team");
+  await expect(page.getByLabel("Выбранная группа")).toHaveValue("team");
+  await page.goto("/?workspace=foreign-workspace");
+  await expect(page.getByLabel("Выбранная группа")).toHaveValue("team");
+  expect(state.requests.some((request) => request.workspaceId === "foreign-workspace")).toBe(false);
+});
+
+test("forum destination remains usable in short light and dark Telegram viewports", async ({ page }, testInfo) => {
+  const state = createState();
+  state.topics = { team: [{ messageThreadId: 42, name: "Оплаты и организационные вопросы команды", isClosed: false }] };
+  await installTelegramAndApi(page, state);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 20, top: 12 } });
+  for (const width of [320, 412]) {
+    for (const colorScheme of ["light", "dark"] as const) {
+      await page.setViewportSize({ width, height: 568 });
+      await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+      await page.goto("/");
+      await page.evaluate(() => { for (const key of Object.keys(localStorage)) if (key.startsWith("zvenfit.reminder-draft.")) localStorage.removeItem(key); });
+      await page.getByRole("button", { name: "Новое напоминание" }).click();
+
+      const destination = page.getByLabel("Куда отправлять");
+      await expect(destination).toBeEnabled();
+      await destination.selectOption("42");
+      await destination.scrollIntoViewIfNeeded();
+      await destination.focus();
+      await expect(destination).toBeFocused();
+      const bounds = await destination.boundingBox();
+      expect(bounds!.height).toBeGreaterThanOrEqual(44);
+      expect(bounds!.x).toBeGreaterThanOrEqual(0);
+      expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`forum-${width}-${colorScheme}.png`) });
+      await page.getByText("Подключить тему", { exact: true }).click();
+      const link = page.getByLabel("Ссылка на тему", { exact: true });
+      await link.fill("https://t.me/c/1234567890/62");
+      await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+      await link.scrollIntoViewIfNeeded();
+      await link.focus();
+      await expect(link).toBeFocused();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`forum-connect-${width}-${colorScheme}.png`) });
+      const connect = page.getByRole("button", { name: "Проверить и подключить" });
+      await connect.scrollIntoViewIfNeeded();
+      const connectBounds = await connect.boundingBox();
+      expect(connectBounds!.height).toBeGreaterThanOrEqual(44);
+      expect(connectBounds!.y + connectBounds!.height).toBeLessThanOrEqual(568);
+      const save = page.getByRole("button", { name: "Создать поручение" });
+      await save.scrollIntoViewIfNeeded();
+      const saveBounds = await save.boundingBox();
+      expect(saveBounds!.y + saveBounds!.height).toBeLessThanOrEqual(568);
+    }
+  }
+});
+
+test("connects the first group from the empty screen through the native Telegram chooser", async ({ page }) => {
+  const state = createState();
+  state.groupWorkspace = state.workspaces[0];
+  state.workspaces = [];
+  await installTelegramAndApi(page, state);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Подключить группу", exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    const app = (window as unknown as { Telegram: { WebApp: Record<string, unknown> } }).Telegram.WebApp;
+    app.requestChat = (id: string, callback: (sent: boolean) => void) => { app.chosenRequest = id; callback(true); };
+  });
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { Telegram: { WebApp: { chosenRequest?: string } } }).Telegram.WebApp.chosenRequest)).toBe("prepared-group-choice");
+  expect(state.requests.find((item) => item.path === "/api/group-connections"))
+    .toMatchObject({ workspaceId: null, body: { launchMode: "native", clientRequestId: expect.any(String) } });
+  state.groupConnectionState = "connected";
+  await expect(page.getByRole("button", { name: "Новое напоминание" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Подключить группу", exact: true })).toHaveCount(0);
+});
+
+test("offers the private-chat button fallback and activates the connected group", async ({ page }) => {
+  const state = createState();
+  state.groupWorkspace = state.workspaces[1];
+  await openApp(page, state);
+  await page.evaluate(() => {
+    const app = (window as unknown as { Telegram: { WebApp: Record<string, unknown> } }).Telegram.WebApp;
+    app.openTelegramLink = (url: string) => { app.openedLink = url; };
+  });
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect(page.getByText(/Печатать команду не нужно/)).toBeVisible();
+  expect(state.requests.find((item) => item.path === "/api/group-connections"))
+    .toMatchObject({ workspaceId: null, body: { launchMode: "private_chat" } });
+  state.groupConnectionState = "connected";
+  await page.getByRole("button", { name: "Проверить результат" }).click();
+  await expect(page.getByLabel("Выбранная группа")).toHaveValue("home");
+});
+
+test("restores the full reminder draft and raw date/time after relaunch without sending anything", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Черновик после Telegram");
+  await page.getByLabel("Дата", { exact: true }).fill("31022099");
+  await page.getByLabel("Время", { exact: true }).fill("2599");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.reload();
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Черновик после Telegram");
+  await expect(page.getByLabel("Дата", { exact: true })).toHaveValue("31.02.2099");
+  await expect(page.getByLabel("Время", { exact: true })).toHaveValue("25:99");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await expect(page.getByLabel("Ссылка на тему", { exact: true })).toHaveValue("https://t.me/c/1234567890/62");
+  await expect(page.getByLabel("Название темы", { exact: true })).toHaveValue("Тренировки");
+  expect(state.requests.some((item) => item.method === "POST")).toBe(false);
+});
+
+test("does not repeat an uncertain topic send after reload or status checks", async ({ page }) => {
+  const state = createState();
+  state.topicConnectionState = "unknown";
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Не отправлять дважды");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect(page.getByText(/Результат отправки неизвестен/)).toBeVisible();
+  const initial = state.requests.find((item) => item.method === "POST" && item.path === "/api/topic-connections")!;
+  await page.reload();
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await expect(page.getByText(/Результат отправки неизвестен/)).toBeVisible();
+  await page.getByRole("button", { name: "Проверить результат", exact: true }).click();
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections")).toHaveLength(1);
+  await page.getByRole("button", { name: "Начать новую проверку" }).click();
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect.poll(() => state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections").length).toBe(2);
+  const latest = state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections").at(-1)!;
+  expect((latest.body as { clientRequestId: string }).clientRequestId).not.toBe((initial.body as { clientRequestId: string }).clientRequestId);
+});
+
+test("clears a confirmed reminder draft and keeps other workspaces isolated", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Сохранить один раз");
+  await page.reload();
+  await page.getByLabel("Выбранная группа").selectOption("home");
+  await expect(page.getByRole("button", { name: "Продолжить черновик" })).toHaveCount(0);
+  await page.getByLabel("Выбранная группа").selectOption("team");
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect(page.getByRole("heading", { name: "План", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Продолжить черновик" })).toHaveCount(0);
+});
+
+test("ordinary groups do not offer a forum connection", async ({ page }) => {
+  const state = createState(); state.workspaces[0].isForum = false;
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await expect(page.getByText("Подключить тему", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("Куда отправлять")).toHaveCount(0);
+});
+
+test("uses the same group attempt when native choice fails and a new UUID after expiration", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.evaluate(() => {
+    const app = (window as unknown as { Telegram: { WebApp: Record<string, unknown> } }).Telegram.WebApp;
+    app.requestChat = () => { throw new Error("unsupported client"); };
+    app.openTelegramLink = (url: string) => { app.openedLink = url; };
+  });
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect(page.getByText(/Печатать команду не нужно/)).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { Telegram: { WebApp: { openedLink?: string } } }).Telegram.WebApp.openedLink)).toContain("https://t.me/");
+  const first = state.requests.find((item) => item.path === "/api/group-connections")!;
+  state.groupConnectionState = "expired";
+  await page.getByRole("button", { name: "Проверить результат" }).click();
+  await page.getByRole("button", { name: "Начать новое подключение" }).click();
+  state.groupConnectionState = "pending";
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect.poll(() => state.requests.filter((item) => item.path === "/api/group-connections").length).toBe(2);
+  const next = state.requests.filter((item) => item.path === "/api/group-connections").at(-1)!;
+  expect((next.body as { clientRequestId: string }).clientRequestId).not.toBe((first.body as { clientRequestId: string }).clientRequestId);
+});
+
+test("restores both editing scopes on normal reopen and warns about a changed occurrence", async ({ page }) => {
+  const state = createState();
+  const item = occurrence("meters-open", "Передать показания", { reminderId: "meters" });
+  state.occurrences.team = [item];
+  item.updatedAt = "2026-10-30T10:00:00Z";
+  await openApp(page, state);
+  await page.getByRole("button", { name: /Передать показания/ }).first().click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Черновик срока");
+  await page.getByRole("radio", { name: /Этот и следующие/ }).click();
+  await page.getByLabel("Что нужно сделать").fill("Черновик серии");
+  await page.reload();
+  item.updatedAt = "2026-10-30T11:00:00Z";
+  await page.reload();
+  await page.getByRole("button", { name: /Передать показания/ }).first().click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  await expect(page.getByText(/изменилось, пока вы были вне приложения/)).toBeVisible();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Черновик серии");
+  await page.getByRole("radio", { name: /Только этот срок/ }).click();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Черновик срока");
+  expect(state.requests.some((item) => item.method === "PATCH")).toBe(false);
+});
+
+test("keeps a topic repair control after forum mode is disabled", async ({ page }) => {
+  const state = createState(); state.workspaces[0].isForum = false;
+  state.reminders.team[0].messageThreadId = 42;
+  await openApp(page, state);
+  await page.getByRole("button", { name: "План", exact: true }).click();
+  await page.getByRole("button", { name: /Передать показания/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("42");
+  await expect(page.getByText("Подключить тему", { exact: true })).toHaveCount(0);
+  await page.getByLabel("Куда отправлять").selectOption("");
+  await page.getByRole("button", { name: "Сохранить серию" }).click();
+  await expect.poll(() => state.requests.find((item) => item.method === "PATCH" && item.path === "/api/reminders/meters")?.body).toMatchObject({ messageThreadId: null });
+});
+
+test("prevents draft edits or navigation while a confirmed save is pending", async ({ page }) => {
+  const state = createState();
+  let release!: () => void;
+  state.createGate = new Promise<void>((resolve) => { release = resolve; });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Сохраняемый черновик");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect(page.getByRole("button", { name: "Назад" })).toBeDisabled();
+  await expect(page.locator("form.reminder-form")).toHaveAttribute("inert", "");
+  release();
+  await expect(page.getByRole("heading", { name: "План", exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Продолжить черновик" })).toHaveCount(0);
+});
+
+test("group onboarding fits short Telegram viewports in both themes", async ({ page }, testInfo) => {
+  const state = createState(); state.workspaces = [];
+  await installTelegramAndApi(page, state);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Emulation.setSafeAreaInsetsOverride", { insets: { bottom: 20, top: 12 } });
+  for (const width of [320, 412]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: 568 });
+    await page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+    await page.goto("/");
+    const choose = page.getByRole("button", { name: "Выбрать группу", exact: true });
+    await expect(choose).toBeVisible();
+    await choose.focus();
+    await expect(choose).toBeFocused();
+    const bounds = await choose.boundingBox();
+    expect(bounds!.height).toBeGreaterThanOrEqual(44);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(548);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`group-onboarding-${width}-${colorScheme}.png`) });
+  }
+});
+
+test("retries lost connection responses with the original client request UUID", async ({ page }) => {
+  const state = createState(); state.groupConnectionFailuresRemaining = 1;
+  await openApp(page, state);
+  await page.evaluate(() => { window.Telegram!.WebApp!.openTelegramLink = () => {}; });
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect(page.getByText("Ответ не получен", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Продолжить подключение" }).click();
+  await expect(page.getByRole("button", { name: "Проверить результат" })).toBeEnabled();
+  const groups = state.requests.filter((item) => item.method === "POST" && item.path === "/api/group-connections");
+  expect(groups).toHaveLength(2);
+  expect(groups[0].body).toEqual(groups[1].body);
+  await page.getByRole("button", { name: "Назад" }).click();
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  state.topicConnectionFailuresRemaining = 1;
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect(page.getByText(/Ответ не получен. Проверьте результат этой попытки/)).toBeVisible();
+  await page.getByRole("button", { name: "Проверить результат" }).click();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("62");
+  const topics = state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections");
+  expect(topics).toHaveLength(2);
+  expect(topics[0].body).toEqual(topics[1].body);
+});
+
+test("a late topic response does not overwrite a different workspace draft", async ({ page }) => {
+  const state = createState(); let release!: () => void;
+  state.topicConnectionGate = new Promise<void>((resolve) => { release = resolve; });
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Черновик команды");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await page.getByRole("button", { name: "Назад" }).click();
+  await page.getByRole("button", { name: "Задачи", exact: true }).click();
+  await page.getByLabel("Выбранная группа").selectOption("home");
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Домашний черновик");
+  release();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Домашний черновик");
+  await page.reload();
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Домашний черновик");
+  await expect(page.getByLabel("Куда отправлять")).toHaveCount(0);
+});
+
+test("recovers a stalled group validation through retry without replacing its attempt", async ({ page }) => {
+  const state = createState(); state.groupConnectionState = "validating"; state.groupWorkspace = state.workspaces[1];
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await page.getByRole("button", { name: "Повторить проверку" }).click();
+  await expect(page.getByRole("button", { name: "Повторить проверку" })).toBeEnabled();
+  state.groupConnectionState = "connected";
+  await page.getByRole("button", { name: "Повторить проверку" }).click();
+  await expect(page.getByLabel("Выбранная группа")).toHaveValue("home");
+  const created = state.requests.filter((item) => item.method === "POST" && item.path === "/api/group-connections");
+  expect(created).toHaveLength(1);
+  const clientRequestId = (created[0].body as { clientRequestId: string }).clientRequestId;
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === `/api/group-connections/${clientRequestId}/retry`)).toHaveLength(2);
+});
+
+test("a timed-out committed save can verify the fresh Plan without repeating its write", async ({ page }, testInfo) => {
+  const state = createState(); state.createResponseNeverArrives = true;
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Сохранено без ответа");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect.poll(() => state.reminders.team.some((item) => item.title === "Сохранено без ответа")).toBe(true);
+  await page.clock.fastForward(20_001);
+  await expect(page.getByText(/Прошлая попытка сохранения могла завершиться/)).toBeVisible();
+  const readsBefore = state.requests.filter((item) => item.method === "GET" && item.path === "/api/reminders").length;
+  await checkRecoveryActionViewports(page, "Проверить План", (name) => testInfo.outputPath(name), page.getByText(/Прошлая попытка сохранения могла завершиться/), page.getByText("Что создаём", { exact: true }));
+  await page.getByRole("button", { name: "Проверить План", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Сохранено без ответа/ })).toBeVisible();
+  expect(state.requests.filter((item) => item.method === "GET" && item.path === "/api/reminders").length).toBeGreaterThan(readsBefore);
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/reminders")).toHaveLength(1);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Сохранено без ответа");
+  await expect(page.getByText(/Прошлая попытка сохранения могла завершиться/)).toBeVisible();
+});
+
+test("relaunch after a lost topic POST retains the original attempt without an automatic send", async ({ page }) => {
+  const state = createState(); state.topicConnectionFailuresRemaining = 1;
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Без повторной проверки");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect(page.getByText(/Ответ не получен. Проверьте результат этой попытки/)).toBeVisible();
+  const original = state.requests.find((item) => item.method === "POST" && item.path === "/api/topic-connections")!;
+  await page.reload();
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await expect(page.getByLabel("Ссылка на тему", { exact: true })).toBeDisabled();
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections")).toHaveLength(1);
+  await page.getByRole("button", { name: "Проверить результат", exact: true }).click();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("62");
+  const attempts = state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections");
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1].body).toEqual(original.body);
+});
+
+test("native cancellation keeps the same group attempt available for another selection", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.evaluate(() => {
+    const app = window.Telegram!.WebApp!;
+    app.requestChat = (_id, callback) => callback?.(false);
+  });
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect(page.getByText("Выбор отменён. Можно выбрать группу позже.")).toBeVisible();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await expect(page.getByText("Выбор отменён. Можно выбрать группу позже.")).toBeVisible();
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/group-connections")).toHaveLength(1);
+  expect(state.requests.some((item) => item.method === "POST" && item.path.endsWith("/retry"))).toBe(false);
+});
+
+test("relaunching another Telegram account isolates drafts and group operations", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.evaluate(() => { window.Telegram!.WebApp!.openTelegramLink = () => {}; });
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  await page.getByRole("button", { name: "Назад" }).click();
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Черновик Анны");
+  await page.evaluate(() => localStorage.setItem("e2e.actorId", "20"));
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Продолжить черновик" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Подключить группу", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Проверить результат" })).toHaveCount(0);
+  await page.evaluate(() => { window.Telegram!.WebApp!.openTelegramLink = () => {}; });
+  await page.getByRole("button", { name: "Выбрать группу", exact: true }).click();
+  const attempts = state.requests.filter((item) => item.method === "POST" && item.path === "/api/group-connections");
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0].body).not.toEqual(attempts[1].body);
+  await page.evaluate(() => localStorage.setItem("e2e.actorId", "10"));
+  await page.reload();
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Черновик Анны");
+});
+
+test("delivery-unavailable topics remain visible and disabled until the user repairs the destination", async ({ page }) => {
+  const state = createState();
+  state.reminders.team[0].messageThreadId = 42;
+  state.topics = { team: [{ messageThreadId: 42, name: "Удалённая тема", isClosed: false, unavailableReason: "topic_deleted" }, { messageThreadId: 52, name: "Новая тема", isClosed: false }] };
+  await openApp(page, state);
+  await page.getByRole("button", { name: "План", exact: true }).click();
+  await page.getByRole("button", { name: /Передать показания/ }).click();
+  await page.getByRole("button", { name: "Изменить" }).click();
+  const destination = page.getByLabel("Куда отправлять");
+  await expect(destination).toHaveValue("42");
+  await expect(destination.locator('option[value="42"]')).toBeDisabled();
+  await expect(destination.locator('option[value="42"]')).toHaveText("Удалённая тема · недоступна");
+  await page.getByRole("button", { name: "Сохранить серию" }).click();
+  await expect(page.getByText("Выберите открытую тему или общий чат.")).toBeVisible();
+  expect(state.requests.some((item) => item.method === "PATCH")).toBe(false);
+  await destination.selectOption("52");
+  await page.getByRole("button", { name: "Сохранить серию" }).click();
+  await expect.poll(() => state.requests.find((item) => item.method === "PATCH" && item.path === "/api/reminders/meters")?.body).toMatchObject({ messageThreadId: 52 });
+});
+
+test("late save and Plan refresh responses preserve a newer draft in another workspace", async ({ page }) => {
+  const state = createState();
+  let releaseWrite!: () => void;
+  let releaseRead!: () => void;
+  state.createGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  const oldReadGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Отложенное сохранение команды");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect.poll(() => state.requests.filter((item) => item.method === "POST" && item.path === "/api/reminders").length).toBe(1);
+  await page.clock.fastForward(20_001);
+  await expect(page.getByText(/Прошлая попытка сохранения могла завершиться/)).toBeVisible();
+  let waitingOldReads = 0;
+  await page.route("**/api/reminders", async (route) => {
+    if (route.request().method() === "GET" && workspaceId(route.request()) === "team") { waitingOldReads += 1; await oldReadGate; }
+    await route.fallback();
+  });
+  await page.getByRole("button", { name: "Назад" }).click();
+  await expect.poll(() => waitingOldReads).toBe(1);
+  await page.getByLabel("Выбранная группа").selectOption("home");
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Новый домашний черновик");
+  releaseWrite(); releaseRead();
+  await expect.poll(() => state.reminders.team.some((item) => item.title === "Отложенное сохранение команды")).toBe(true);
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Новый домашний черновик");
+  await page.reload();
+  await expect(page.getByLabel("Выбранная группа")).toHaveValue("home");
+  await page.getByRole("button", { name: "Продолжить черновик" }).click();
+  await expect(page.getByLabel("Что нужно сделать")).toHaveValue("Новый домашний черновик");
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/reminders")).toHaveLength(1);
+});
+
+test("an unsuccessful Plan verification labels cached data and offers a read-only retry", async ({ page }, testInfo) => {
+  const state = createState(); state.createResponseNeverArrives = true;
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Проверка после таймаута");
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect.poll(() => state.reminders.team.some((item) => item.title === "Проверка после таймаута")).toBe(true);
+  await page.clock.fastForward(20_001);
+  await expect(page.getByRole("button", { name: "Проверить План", exact: true })).toBeVisible();
+  let unavailable = true;
+  await page.route("**/api/reminders", async (route) => {
+    if (unavailable && route.request().method() === "GET") return route.fulfill({ status: 503, json: { error: "Temporary failure" } });
+    await route.fallback();
+  });
+  await page.getByRole("button", { name: "Проверить План", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Показываем последнюю загруженную версию");
+  await checkRecoveryActionViewports(page, "Загрузить план", (name) => testInfo.outputPath(name));
+  await expect(page.getByRole("button", { name: /Проверка после таймаута/ })).toHaveCount(0);
+  unavailable = false;
+  await page.getByRole("button", { name: "Загрузить план", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Проверка после таймаута/ })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/reminders")).toHaveLength(1);
+});
+
+test("topic polling transitions to unknown and stops without a new send", async ({ page }) => {
+  const state = createState(); state.topicConnectionState = "sending";
+  await installTelegramAndApi(page, state);
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Не повторять сообщение");
+  await page.getByText("Подключить тему", { exact: true }).click();
+  await page.getByLabel("Ссылка на тему", { exact: true }).fill("https://t.me/c/1234567890/62");
+  await page.getByLabel("Название темы", { exact: true }).fill("Тренировки");
+  await page.getByRole("button", { name: "Проверить и подключить" }).click();
+  await expect(page.getByRole("button", { name: "Создать поручение" })).toBeDisabled();
+  state.topicConnectionState = "unknown";
+  await page.clock.fastForward(1501);
+  await expect(page.getByText(/Результат отправки неизвестен/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Создать поручение" })).toBeEnabled();
+  await expect(page.getByLabel("Куда отправлять")).toHaveValue("");
+  const readCount = state.requests.filter((item) => item.method === "GET" && item.path.startsWith("/api/topic-connections/")).length;
+  expect(readCount).toBe(1);
+  await page.clock.fastForward(60_000);
+  expect(state.requests.filter((item) => item.method === "GET" && item.path.startsWith("/api/topic-connections/")).length).toBe(readCount);
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/topic-connections")).toHaveLength(1);
+});
+
+test("a confirmed save clears its draft even if refreshing the Plan fails", async ({ page }) => {
+  const state = createState();
+  await openApp(page, state);
+  await page.getByRole("button", { name: "Новое напоминание" }).click();
+  await page.getByLabel("Что нужно сделать").fill("Подтверждённое сохранение");
+  let unavailable = true;
+  await page.route("**/api/reminders", async (route) => {
+    if (unavailable && route.request().method() === "GET") return route.fulfill({ status: 503, json: { error: "Temporary failure" } });
+    await route.fallback();
+  });
+  await page.getByRole("button", { name: "Создать поручение" }).click();
+  await expect(page.getByRole("heading", { name: "План", exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith("zvenfit.reminder-draft.")).length)).toBe(0);
+  unavailable = false;
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Продолжить черновик" })).toHaveCount(0);
+  await page.getByRole("button", { name: "План", exact: true }).click();
+  await expect(page.getByRole("button", { name: /Подтверждённое сохранение/ })).toBeVisible();
+  expect(state.requests.filter((item) => item.method === "POST" && item.path === "/api/reminders")).toHaveLength(1);
 });
