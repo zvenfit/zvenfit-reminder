@@ -94,6 +94,14 @@ Deploy service account должен иметь `logging.editor` на custom log 
 группы binding проверяется отдельно до первого push в `main`, иначе production
 workflow остановится на шаге `Resolve production log group`, не начав деплой.
 
+Если Cloud Logging отвечает `Unavailable`, для релиза можно задать переменную
+`YC_LOG_GROUP_ID` в GitHub Environment `production`. Возьмите ID из последнего
+успешного деплоя и сверьте его с `log_options.log_group_id` рабочего API Gateway
+`zvenfit-reminder-api`. Workflow сначала запрашивает группу `zvenfit-reminder`
+по имени. При успешном запросе ID должны совпасть. При `Unavailable` workflow
+передаёт проверенный ID обеим функциям. После восстановления Cloud Logging
+проверьте поступление логов, затем удалите временную переменную.
+
 ## Проверки после деплоя
 
 - `/health/runtime` должен вернуть `200`, `ok: true` и список выполненных probes;

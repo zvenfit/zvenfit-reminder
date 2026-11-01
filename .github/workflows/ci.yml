@@ -95,10 +95,31 @@ jobs:
           yc config set service-account-key sa-key.json
           yc config set folder-id "$YC_FOLDER_ID"
       - name: Resolve production log group
+        env:
+          PINNED_LOG_GROUP_ID: ${{ vars.YC_LOG_GROUP_ID }}
         run: |
-          log_group_json="$(yc logging group get --name zvenfit-reminder --format json)"
-          log_group_id="$(printf '%s' "$log_group_json" | jq -er .id)"
-          echo "YC_LOG_GROUP_ID=$log_group_id" >> "$GITHUB_ENV"
+          lookup_error="$(mktemp)"
+          trap 'rm -f "$lookup_error"' EXIT
+          if log_group_json="$(yc logging group get --name zvenfit-reminder --format json 2>"$lookup_error")"; then
+            log_group_id="$(jq -er '.id | strings | select(length == 20)' <<< "$log_group_json")"
+            if [[ -n "$PINNED_LOG_GROUP_ID" && "$log_group_id" != "$PINNED_LOG_GROUP_ID" ]]; then
+              echo "::error::The named production log group differs from the configured ID."
+              exit 1
+            fi
+          else
+            rpc_errors="$(grep -Eo 'rpc error: code = [^[:space:]]+' "$lookup_error" | sort -u || true)"
+            if [[ -z "$PINNED_LOG_GROUP_ID" || "$rpc_errors" != 'rpc error: code = Unavailable' ]]; then
+              echo "::error::Cannot resolve the production log group."
+              exit 1
+            fi
+            log_group_id="$PINNED_LOG_GROUP_ID"
+            echo "::warning::Cloud Logging is unavailable. Using the configured production log group ID."
+          fi
+          if [[ ! "$log_group_id" =~ ^[a-z0-9]{20}$ ]]; then
+            echo "::error::Invalid production log group ID."
+            exit 1
+          fi
+          printf 'YC_LOG_GROUP_ID=%s\n' "$log_group_id" >> "$GITHUB_ENV"
       - name: Install YDB CLI
         run: |
           ydb_cli_dir="$RUNNER_TEMP/ydb-cli"
